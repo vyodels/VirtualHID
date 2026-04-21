@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CGEventPostToPid 验证页</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="stage-panel">
+        <div class="panel-header">
+          <h1>CGEventPostToPid 浏览器验证</h1>
+          <div class="actions">
+            <button id="focus-input">聚焦输入框</button>
+            <button id="clear-log">清空日志</button>
+            <button id="export-log">导出日志</button>
+          </div>
+        </div>
+        <div id="status" class="status-grid"></div>
+        <div id="stage" class="stage" tabindex="0">
+          <canvas id="trace"></canvas>
+          <div id="cursor-ghost" class="cursor-ghost" aria-hidden="true"></div>
+          <div id="trace-hud" class="trace-hud">等待虚拟鼠标轨迹…</div>
+          <div class="stage-copy">
+            <div class="stage-title">Pointer Zone</div>
+            <div class="stage-desc">蓝线是浏览器真实收到的移动轨迹，橙色发光点是最后一个命中位置。</div>
+          </div>
+          <div id="scroll-zone" class="scroll-zone" tabindex="0">
+            <div class="scroll-title">Scroll Zone</div>
+            <div class="scroll-desc">这里用于演示 `wheel` / 双指滑屏对应的滚轮事件。</div>
+            <div class="scroll-inner">
+              <div>Scroll item 01</div>
+              <div>Scroll item 02</div>
+              <div>Scroll item 03</div>
+              <div>Scroll item 04</div>
+              <div>Scroll item 05</div>
+              <div>Scroll item 06</div>
+              <div>Scroll item 07</div>
+              <div>Scroll item 08</div>
+              <div>Scroll item 09</div>
+              <div>Scroll item 10</div>
+              <div>Scroll item 11</div>
+              <div>Scroll item 12</div>
+              <div>Scroll item 13</div>
+              <div>Scroll item 14</div>
+              <div>Scroll item 15</div>
+              <div>Scroll item 16</div>
+              <div>Scroll item 17</div>
+              <div>Scroll item 18</div>
+              <div>Scroll item 19</div>
+              <div>Scroll item 20</div>
+              <div>Scroll item 21</div>
+              <div>Scroll item 22</div>
+              <div>Scroll item 23</div>
+              <div>Scroll item 24</div>
+            </div>
+          </div>
+          <div id="draggable" class="draggable" draggable="true">Drag Me</div>
+        </div>
+        <label class="input-block">
+          <span>Keyboard Zone</span>
+          <textarea id="keyboard-target" rows="5" spellcheck="false" placeholder="这里会记录键盘输入，建议先点“聚焦输入框”"></textarea>
+        </label>
+      </section>
+      <aside class="log-panel">
+        <section class="summary-card">
+          <h2>Summary</h2>
+          <div id="summary"></div>
+        </section>
+        <section class="summary-card">
+          <h2>Event Log</h2>
+          <pre id="log"></pre>
+        </section>
+      </aside>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
