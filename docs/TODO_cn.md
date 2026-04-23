@@ -11,3 +11,21 @@
 - 学习方案：先采集真实用户中文输入的 IME 行为，包括拼音节奏、候选确认、退格修正，再决定是否回放拼音序列或生成 profile。
 
 建议优先级：先实现 `pasteText` 作为可靠 fallback，再设计 `imePinyin` 的采集和回放。
+
+## 目标解析 / 坐标换算 / 回放级学习
+
+M2-M7 主计划已经完成，但下一阶段还有一组结构性能力待补：
+
+- 回放级 `compact trace` 指纹：让长期学习不仅能调参，还能重建节奏片段
+- `windowId / tabId / host` 级目标解析与激活
+- viewport → OS 绝对坐标换算下沉到 VirtualHID
+- 执行结果证据化：区分“事件已发出”和“语义确认成功”
+
+当前边界已固定：
+
+- **落点随机性不再在 VirtualHID 内处理**
+- 调用方必须传精确目标点；`landingZone / region / targetSpread` 一律视为上游契约错误
+
+详细方案见：
+
+- `docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`

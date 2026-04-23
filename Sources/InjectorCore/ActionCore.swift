@@ -303,36 +303,39 @@ public final class ActionExecutor {
         case .move(let to, let style, let durationMs, let profile):
             let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
             let start = profile?.origin ?? currentMouseLocation(fallback: target.frame.center)
-            let resolvedTarget = randomizedTarget(base: to, explicitProfile: profile, motionProfile: motionProfile, rng: &rng)
-            let path = trajectoryPath(
+            let resolvedTarget = to
+            return try emitMovePath(
                 from: start,
                 to: resolvedTarget,
                 style: style,
-                pointCount: movePointCount(style: style, durationMs: durationMs, motionProfile: motionProfile, rng: &rng),
+                durationMs: durationMs,
                 motionProfile: motionProfile,
+                button: .left,
+                poster: poster,
+                dryRun: dryRun,
                 rng: &rng
             )
-            let timing = HumanTimingCurve.plan(
-                path: path.map(\.humanPoint),
-                requestedDurationMs: durationMs,
-                profile: motionProfile,
-                rng: &rng
-            )
-            var emitted = [InjectedEvent]()
-            for (index, point) in path.enumerated() {
-                emitted.append(try postMouse(type: .mouseMoved, location: point, button: .left, poster: poster, dryRun: dryRun))
-                if index < path.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
-                    FocusController.sleep(milliseconds: timing.delaysMs[index])
-                }
-            }
-            return emitted
 
         case .click(let at, let button, let holdMs, let count, let profile):
             let motionProfile = profile?.motionProfile
-            let clickPoint = randomizedTarget(base: at, explicitProfile: profile, motionProfile: motionProfile, rng: &rng)
+            let clickPoint = at
             let resolvedHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
             let interClickMs = motionProfile?.resolvedInterClickMs(defaultValue: 120, rng: &rng) ?? 120
             var emitted = [InjectedEvent]()
+            let start = profile?.origin ?? currentMouseLocation(fallback: clickPoint)
+            if needsCursorTravel(from: start, to: clickPoint) {
+                emitted.append(contentsOf: try emitMovePath(
+                    from: start,
+                    to: clickPoint,
+                    style: pointerActionStyle(for: motionProfile),
+                    durationMs: nil,
+                    motionProfile: motionProfile,
+                    button: button.cgButton,
+                    poster: poster,
+                    dryRun: dryRun,
+                    rng: &rng
+                ))
+            }
             let clickCount = max(count, 1)
             for index in 0..<clickCount {
                 emitted.append(try postMouse(type: button.downEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
@@ -349,7 +352,7 @@ public final class ActionExecutor {
         case .drag(let from, let to, let button, let style, let profile):
             let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
             let start = profile?.origin ?? from
-            let resolvedTarget = randomizedTarget(base: to, explicitProfile: profile, motionProfile: motionProfile, rng: &rng)
+            let resolvedTarget = to
             let dragPath = trajectoryPath(
                 from: start,
                 to: resolvedTarget,
@@ -449,6 +452,41 @@ public final class ActionExecutor {
             _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
         }
         return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
+    }
+
+    private func emitMovePath(
+        from start: CGPoint,
+        to end: CGPoint,
+        style: TrajectoryStyle,
+        durationMs: Int?,
+        motionProfile: MotionProfile?,
+        button: CGMouseButton,
+        poster: EventPoster,
+        dryRun: Bool,
+        rng: inout SystemRandomNumberGenerator
+    ) throws -> [InjectedEvent] {
+        let path = trajectoryPath(
+            from: start,
+            to: end,
+            style: style,
+            pointCount: movePointCount(style: style, durationMs: durationMs, motionProfile: motionProfile, rng: &rng),
+            motionProfile: motionProfile,
+            rng: &rng
+        )
+        let timing = HumanTimingCurve.plan(
+            path: path.map(\.humanPoint),
+            requestedDurationMs: durationMs,
+            profile: motionProfile,
+            rng: &rng
+        )
+        var emitted = [InjectedEvent]()
+        for (index, point) in path.enumerated() {
+            emitted.append(try postMouse(type: .mouseMoved, location: point, button: button, poster: poster, dryRun: dryRun))
+            if index < path.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
+                FocusController.sleep(milliseconds: timing.delaysMs[index])
+            }
+        }
+        return emitted
     }
 
     private func record(type: String, location: CGPoint? = nil, key: String? = nil, virtualKey: CGKeyCode? = nil) -> InjectedEvent {
@@ -577,6 +615,17 @@ public final class ActionExecutor {
         CGEvent(source: nil)?.location ?? fallback
     }
 
+    private func needsCursorTravel(from start: CGPoint, to end: CGPoint) -> Bool {
+        hypot(end.x - start.x, end.y - start.y) > 2
+    }
+
+    private func pointerActionStyle(for motionProfile: MotionProfile?) -> TrajectoryStyle {
+        guard let motionProfile else {
+            return .wind
+        }
+        return .profile(TemplateReference(id: "inline-pointer-action", motionProfile: motionProfile))
+    }
+
     private func resolvedMotionProfile(style: TrajectoryStyle, explicitProfile: PrimitiveProfile?) -> MotionProfile? {
         switch style {
         case .profile(let reference):
@@ -587,39 +636,6 @@ public final class ActionExecutor {
         case .linear, .bezier, .wind:
             return explicitProfile?.motionProfile
         }
-    }
-
-    private func randomizedTarget(
-        base: CGPoint,
-        explicitProfile: PrimitiveProfile?,
-        motionProfile: MotionProfile?,
-        rng: inout SystemRandomNumberGenerator
-    ) -> CGPoint {
-        if let landingZone = explicitProfile?.landingZone {
-            let center = landingZone.center ?? base
-            if let radius = landingZone.radius, radius > 0 {
-                let distance = rng.nextDouble(in: 0..<radius)
-                let angle = rng.nextDouble(in: 0..<(Double.pi * 2))
-                return CGPoint(
-                    x: center.x + CGFloat(cos(angle) * distance),
-                    y: center.y + CGFloat(sin(angle) * distance)
-                )
-            }
-            let width = landingZone.width ?? 0
-            let height = landingZone.height ?? 0
-            if width > 0 || height > 0 {
-                return CGPoint(
-                    x: center.x + CGFloat(rng.nextDouble(in: -width / 2..<max(width / 2, Double.leastNonzeroMagnitude))),
-                    y: center.y + CGFloat(rng.nextDouble(in: -height / 2..<max(height / 2, Double.leastNonzeroMagnitude)))
-                )
-            }
-        }
-
-        guard let motionProfile else {
-            return base
-        }
-        let offset = motionProfile.resolvedTargetOffset(rng: &rng)
-        return CGPoint(x: base.x + CGFloat(offset.x), y: base.y + CGFloat(offset.y))
     }
 
     private func detourWaypoint(

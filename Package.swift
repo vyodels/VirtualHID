@@ -79,6 +79,11 @@ let package = Package(
             name: "ProfileStoreTests",
             dependencies: ["ProfileStore", "HumanizationKit", "XCTest"],
             path: "Tests/ProfileStoreTests"
+        ),
+        .testTarget(
+            name: "ControlServerTests",
+            dependencies: ["ControlServer", "ProfileStore", "Supervisor", "XCTest"],
+            path: "Tests/ControlServerTests"
         )
     ]
 )

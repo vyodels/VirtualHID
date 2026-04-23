@@ -1,5 +1,7 @@
+import AppKit
 import CoreGraphics
 import Foundation
+import HumanizationKit
 import XCTest
 @testable import InjectorCore
 
@@ -48,6 +50,77 @@ final class EventPosterTests: XCTestCase {
             XCTAssertEqual(error as? PosterError, .postModeUnsupported(.leftMouseDown))
         }
         XCTAssertTrue(backend.calls.isEmpty)
+    }
+
+    func testDryRunClickIncludesPreludeMoveEventsWhenOriginProvided() {
+        let app = NSRunningApplication.current
+        let target = BrowserTarget(
+            app: app,
+            pid: app.processIdentifier,
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.tests",
+            windowTitle: nil,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let executor = ActionExecutor(target: target)
+
+        let result = try! executor.execute(
+            ActionRequest(
+                id: "click-prelude",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 180, y: 140),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(origin: CGPoint(x: 20, y: 20))
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        XCTAssertTrue(result.events.count > 3)
+        XCTAssertEqual(result.events.first?.type, "mouseMoved")
+        XCTAssertEqual(result.events.suffix(2).map(\.type), ["leftMouseDown", "leftMouseUp"])
+    }
+
+    func testTargetSpreadDoesNotShiftFinalLandingPoint() {
+        let app = NSRunningApplication.current
+        let target = BrowserTarget(
+            app: app,
+            pid: app.processIdentifier,
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.tests",
+            windowTitle: nil,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let executor = ActionExecutor(target: target)
+        let requestedPoint = CGPoint(x: 320, y: 240)
+        let profile = PrimitiveProfile(
+            origin: CGPoint(x: 40, y: 60),
+            motionProfile: MotionProfile(targetSpreadPx: 24)
+        )
+
+        let result = try! executor.execute(
+            ActionRequest(
+                id: "fixed-target-point",
+                primitives: [
+                    .click(
+                        at: requestedPoint,
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: profile
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let finalLocation = result.events.last?.location
+        XCTAssertEqual(finalLocation?.x, requestedPoint.x)
+        XCTAssertEqual(finalLocation?.y, requestedPoint.y)
     }
 }
 

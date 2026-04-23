@@ -48,6 +48,7 @@ public final class ControlService {
     private let configuration: ControlServerConfiguration
     private let supervisor: SupervisorService
     private let profileStore: ProfileStore
+    private let actionQueue = DispatchQueue(label: "com.vyodels.virtualhid.control.actions")
     private let lock = NSLock()
     private let isoFormatter: ISO8601DateFormatter
     private var currentExecutor: ActionExecutor?
@@ -169,6 +170,12 @@ public final class ControlService {
     }
 
     private func handleAction(_ params: [String: Any]) throws -> [String: Any] {
+        try actionQueue.sync {
+            try performAction(params)
+        }
+    }
+
+    private func performAction(_ params: [String: Any]) throws -> [String: Any] {
         guard !supervisor.killSwitch.isActive else {
             let triggeredAt = supervisor.killSwitch.triggeredAt.map { isoFormatter.string(from: $0) } ?? "unknown"
             throw ControlServerError.coded("E_KILL_SWITCH", "user triggered kill switch at \(triggeredAt)")
@@ -433,6 +440,7 @@ public final class ControlService {
             guard let type = primitive["type"] as? String else {
                 throw ControlServerError.coded("E_UNKNOWN", "primitive.type is required")
             }
+            try assertFixedPointOnlyPayload(primitive)
             let profile = try primitiveProfile(from: primitive)
             switch type {
             case "move":
@@ -875,6 +883,45 @@ private func primitiveProfile(from primitive: [String: Any]) throws -> Primitive
         return nil
     }
     return PrimitiveProfile(origin: origin, landingZone: landingZone, motionProfile: motionProfile)
+}
+
+private let fixedPointOnlyForbiddenKeys: Set<String> = [
+    "region",
+    "landingZone",
+    "landing_zone",
+    "landingCenter",
+    "landing_center",
+    "landingWidth",
+    "landing_width",
+    "landingHeight",
+    "landing_height",
+    "landingRadius",
+    "landing_radius",
+    "targetSpreadPx",
+    "target_spread_px"
+]
+
+private func assertFixedPointOnlyPayload(_ value: Any?, path: String = "primitive") throws {
+    guard let value else {
+        return
+    }
+    if let object = value as? [String: Any] {
+        for (key, nestedValue) in object {
+            if fixedPointOnlyForbiddenKeys.contains(key) {
+                throw ControlServerError.coded(
+                    "E_FIXED_POINT_ONLY",
+                    "VirtualHID 只接受固定落点，\(path).\(key) 必须由上游预先解析为精确点"
+                )
+            }
+            try assertFixedPointOnlyPayload(nestedValue, path: "\(path).\(key)")
+        }
+        return
+    }
+    if let array = value as? [Any] {
+        for (index, item) in array.enumerated() {
+            try assertFixedPointOnlyPayload(item, path: "\(path)[\(index)]")
+        }
+    }
 }
 
 private func parseMotionProfile(sources: [Any?]) throws -> MotionProfile? {
