@@ -18,7 +18,6 @@ REPORT = RESULTS / "browser-report.json"
 BROWSERS = {
     "safari": {
         "bundle": "com.apple.Safari",
-        "app_name": "Safari",
         "open_script": '''
         tell application "Safari"
           activate
@@ -32,7 +31,6 @@ BROWSERS = {
     },
     "chrome": {
         "bundle": "com.google.Chrome",
-        "app_name": "Google Chrome",
         "open_script": '''
         tell application "Google Chrome"
           activate
@@ -46,9 +44,8 @@ BROWSERS = {
     },
 }
 
-ACTIVE_SCENARIOS = "mouse_move_click_active,mouse_drag_active,scroll_active,keyboard_type_active"
-BLUR_MOUSE_SCENARIOS = "mouse_move_click_blur,mouse_drag_blur,scroll_blur"
-BLUR_KEYBOARD_SCENARIOS = "keyboard_type_blur"
+ACTIVE_SCENARIOS = "mouse_move_click_active,mouse_drag_active,scroll_active"
+BLUR_SCENARIOS = "mouse_move_click_blur,mouse_drag_blur,scroll_blur"
 
 
 def run(command, check=True, capture_output=True):
@@ -94,8 +91,8 @@ def osa(script: str) -> str:
     return run(["osascript", "-e", script]).stdout.strip()
 
 
-def open_browser(browser: str, url: str):
-    script = BROWSERS[browser]["open_script"].format(url=url)
+def open_browser(browser: str):
+    script = BROWSERS[browser]["open_script"].format(url=URL)
     osa(script)
     time.sleep(2.5)
 
@@ -105,30 +102,17 @@ def activate_browser(browser: str):
     time.sleep(1.2)
 
 
-def activate_textedit_and_clear():
+def activate_textedit():
     script = '''
     tell application "TextEdit"
       activate
       if (count of documents) = 0 then
         make new document
       end if
-      set text of front document to ""
     end tell
     '''
     osa(script)
     time.sleep(0.8)
-
-
-def get_textedit_text():
-    script = '''
-    tell application "TextEdit"
-      if (count of documents) = 0 then
-        return ""
-      end if
-      return text of front document
-    end tell
-    '''
-    return osa(script)
 
 
 def frontmost_app():
@@ -153,19 +137,7 @@ def read_report(wait_seconds=3.0):
     raise RuntimeError("未收到浏览器报告")
 
 
-def wait_for_focus_report(expected_focus, wait_seconds=5.0):
-    deadline = time.time() + wait_seconds
-    candidate = None
-    while time.time() < deadline:
-        candidate = read_report(wait_seconds=0.4)
-        focus = candidate.get("summary", {}).get("focus", {}).get("hasFocus")
-        if focus == expected_focus:
-            return candidate
-        time.sleep(0.2)
-    return candidate
-
-
-def run_injector(binary: Path, bundle: str, scenarios: str, key_input: str = "abc123"):
+def run_injector(binary: Path, bundle: str, scenarios: str):
     result = run([
         str(binary),
         "--bundle",
@@ -174,8 +146,8 @@ def run_injector(binary: Path, bundle: str, scenarios: str, key_input: str = "ab
         scenarios,
         "--results-dir",
         str(RESULTS),
-        "--key-input",
-        key_input,
+        "--post-mode",
+        "hid",
     ])
     return result.stdout
 
@@ -198,37 +170,25 @@ def main():
 
     binary = compile_injector()
     server = start_server()
-    artifacts = {"browser": browser, "bundle": bundle}
+    artifacts = {"browser": browser, "bundle": bundle, "post_mode": "hid"}
 
     try:
-        open_browser(browser, URL)
+        open_browser(browser)
         artifacts["initial_report"] = read_report(wait_seconds=5.0)
 
-        artifacts["active_focus_before"] = wait_for_focus_report(True)
         artifacts["active_stdout"] = run_injector(binary, bundle, ACTIVE_SCENARIOS)
         time.sleep(1.5)
         artifacts["active_report_after"] = read_report(wait_seconds=3.0)
 
-        activate_textedit_and_clear()
-        artifacts["blur_frontmost_before_mouse"] = frontmost_app()
-        artifacts["blur_focus_before_mouse"] = wait_for_focus_report(False)
-        artifacts["blur_mouse_stdout"] = run_injector(binary, bundle, BLUR_MOUSE_SCENARIOS)
+        activate_textedit()
+        artifacts["blur_frontmost_before"] = frontmost_app()
+        artifacts["blur_stdout"] = run_injector(binary, bundle, BLUR_SCENARIOS)
         time.sleep(1.5)
-        artifacts["blur_frontmost_after_mouse"] = frontmost_app()
+        artifacts["blur_frontmost_after"] = frontmost_app()
         activate_browser(browser)
-        artifacts["blur_mouse_report_after"] = read_report(wait_seconds=3.0)
+        artifacts["blur_report_after"] = read_report(wait_seconds=3.0)
 
-        activate_textedit_and_clear()
-        artifacts["blur_frontmost_before_keyboard"] = frontmost_app()
-        artifacts["blur_focus_before_keyboard"] = wait_for_focus_report(False)
-        artifacts["blur_keyboard_stdout"] = run_injector(binary, bundle, BLUR_KEYBOARD_SCENARIOS)
-        time.sleep(1.2)
-        artifacts["blur_frontmost_after_keyboard"] = frontmost_app()
-        artifacts["textedit_text_after_blur_keyboard"] = get_textedit_text()
-        activate_browser(browser)
-        artifacts["blur_keyboard_report_after"] = read_report(wait_seconds=3.0)
-
-        output = RESULTS / f"{browser}-matrix.json"
+        output = RESULTS / f"{browser}-hid-matrix.json"
         write_json(output, artifacts)
         print(json.dumps({"status": "ok", "results": str(output)}, ensure_ascii=False))
     finally:

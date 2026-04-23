@@ -5,6 +5,7 @@
 static NSString *const kTextEditPath = @"/System/Applications/TextEdit.app";
 static int64_t const kEventTag = 0x56484944;
 static NSInteger gSleepScale = 1;
+static BOOL gUseHIDPost = NO;
 
 @interface BrowserTarget : NSObject
 @property(nonatomic, strong) NSRunningApplication *application;
@@ -85,6 +86,7 @@ static BrowserTarget *ResolveTarget(NSArray<NSString *> *bundleIdentifiers) {
             }
 
             NSArray *candidates = focusedWindow ? @[focusedWindow] : (windows ?: @[]);
+            BrowserTarget *fallbackTarget = nil;
             for (id windowObj in candidates) {
                 AXUIElementRef window = (__bridge AXUIElementRef)windowObj;
                 CGRect frame = AXCopyFrame(window);
@@ -92,17 +94,26 @@ static BrowserTarget *ResolveTarget(NSArray<NSString *> *bundleIdentifiers) {
                     continue;
                 }
 
+                NSString *title = AXCopyAttribute(window, kAXTitleAttribute);
                 BrowserTarget *target = [BrowserTarget new];
                 target.application = app;
                 target.bundleIdentifier = bundleIdentifier;
                 target.pid = app.processIdentifier;
                 target.frame = frame;
-                NSString *title = AXCopyAttribute(window, kAXTitleAttribute);
                 target.windowTitle = [title isKindOfClass:[NSString class]] ? title : @"";
-                CFRelease(appElement);
-                return target;
+
+                if ([target.windowTitle containsString:@"CGEventPostToPid 验证页"] || [target.windowTitle containsString:@"127.0.0.1"] || [target.windowTitle containsString:@"index.html"]) {
+                    CFRelease(appElement);
+                    return target;
+                }
+                if (!fallbackTarget) {
+                    fallbackTarget = target;
+                }
             }
             CFRelease(appElement);
+            if (fallbackTarget) {
+                return fallbackTarget;
+            }
         }
     }
     return nil;
@@ -149,37 +160,35 @@ static NSDictionary *EventRecord(NSString *type, CGPoint *location, NSString *ke
     return record;
 }
 
-static void PostMouseEvent(pid_t pid, CGEventType type, CGPoint location, CGMouseButton button) {
-    CGEventRef event = CGEventCreateMouseEvent(NULL, type, location, button);
+static void PostEvent(pid_t pid, CGEventRef event) {
     if (!event) {
         return;
     }
     CGEventSetIntegerValueField(event, kCGEventSourceUserData, kEventTag);
-    CGEventPostToPid(pid, event);
+    if (gUseHIDPost) {
+        CGEventPost(kCGHIDEventTap, event);
+    } else {
+        CGEventPostToPid(pid, event);
+    }
     CFRelease(event);
+}
+
+static void PostMouseEvent(pid_t pid, CGEventType type, CGPoint location, CGMouseButton button) {
+    CGEventRef event = CGEventCreateMouseEvent(NULL, type, location, button);
+    PostEvent(pid, event);
 }
 
 static void PostKeyboardEvent(pid_t pid, CGKeyCode keyCode, BOOL keyDown, UniChar character) {
     CGEventRef event = CGEventCreateKeyboardEvent(NULL, keyCode, keyDown);
-    if (!event) {
-        return;
-    }
-    if (character != 0) {
+    if (event && character != 0) {
         CGEventKeyboardSetUnicodeString(event, 1, &character);
     }
-    CGEventSetIntegerValueField(event, kCGEventSourceUserData, kEventTag);
-    CGEventPostToPid(pid, event);
-    CFRelease(event);
+    PostEvent(pid, event);
 }
 
 static void PostScrollEvent(pid_t pid, int32_t deltaY) {
     CGEventRef event = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitLine, 1, deltaY);
-    if (!event) {
-        return;
-    }
-    CGEventSetIntegerValueField(event, kCGEventSourceUserData, kEventTag);
-    CGEventPostToPid(pid, event);
-    CFRelease(event);
+    PostEvent(pid, event);
 }
 
 static NSDictionary<NSString *, NSNumber *> *KeyMap(void) {
@@ -346,6 +355,7 @@ int main(int argc, const char *argv[]) {
             NSString *resultsDir = @"results";
             NSString *keyInput = @"abc123";
             gSleepScale = 1;
+            gUseHIDPost = NO;
 
             for (int index = 1; index < argc; index += 1) {
                 NSString *argument = [NSString stringWithUTF8String:argv[index]];
@@ -361,6 +371,9 @@ int main(int argc, const char *argv[]) {
                     keyInput = [NSString stringWithUTF8String:argv[++index]];
                 } else if ([argument isEqualToString:@"--sleep-scale"] && index + 1 < argc) {
                     gSleepScale = MAX(1, [[NSString stringWithUTF8String:argv[++index]] integerValue]);
+                } else if ([argument isEqualToString:@"--post-mode"] && index + 1 < argc) {
+                    NSString *mode = [NSString stringWithUTF8String:argv[++index]];
+                    gUseHIDPost = [mode isEqualToString:@"hid"];
                 }
             }
 
