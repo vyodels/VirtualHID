@@ -1,7 +1,7 @@
 # VirtualHID 下一阶段实施计划 · 目标解析 / 坐标换算 / 回放级指纹
 
 > **文档角色**：M2-M7 完成后的下一阶段活动计划
-> **状态**：🟡 进行中（方案已冻结，代码待继续实施）
+> **状态**：🟡 进行中（边界已冻结；固定点契约 / 串行执行 / 服务控制已完成，核心能力待继续实施）
 > **承接文档**：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
 > **目标**：把“摘要级学习”推进到“可回放、可验证、可长期优化”的执行与分析体系
 
@@ -17,6 +17,18 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 4. 执行成功目前主要是“事件已发出”，还不是“目标确实点中 / 结果确实发生”。
 
 本计划专门解决这些缺口。
+
+### 0.1 当前快照（2026-04-24）
+
+本计划启动前，仓库已经先补齐了一批基础能力：
+
+- 固定目标点契约已经收紧；`landingZone / region / targetSpread` 不再属于 VirtualHID 输入
+- `click` / `drag` 已有完整前置慢速移动，禁止视觉跳点
+- daemon `action` 已改为全局串行执行，避免键盘和鼠标并发交叉
+- `trace.commit -> profiles.rebuild -> applyProfiles` 学习闭环已打通
+- Web 实验台已提供 `长期分析 / 接口与 Codex` 导航，`report_server.py` 已支持 daemon 自动拉起、`/hid/daemon` 状态查看和 `/hid/restart` 重启
+
+因此，这份活动计划现在只聚焦**还没做完**的那部分：目标激活、坐标换算、回放级指纹、执行证据和 replay-aware 分析。
 
 ---
 
@@ -36,7 +48,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 “回放级 compact trace 指纹”指的是：**不保存完整原始事件流，也不保存 DOM/文本，但保存足以重建节奏与路径骨架的压缩指纹**。它通常包含：
 
 - 指令键：`host + taskId + stage + instructionKey + actionType`
-- 目标锚点：原点、目标落地区域、末端偏移分布
+- 目标锚点：原点、固定目标点、末端收敛误差分布
 - 路径骨架：8-24 个控制点或分段控制向量
 - 时间骨架：每段耗时、hesitation、settle、click hold、inter-click、scroll burst
 - 行为标签：`idle / normal / flow / lowEfficiency`、`smooth / gentle / hurried`
@@ -147,10 +159,10 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 ### 4.3 Execution Planner
 
-目标：把“点击某区域”扩展成完整事件流：
+目标：把“点击某固定点”扩展成完整事件流：
 
 1. 激活目标 app / window / tab
-2. 如需滚动，先滚动到目标区域进入 viewport
+2. 如需滚动，先滚动到目标点进入当前 viewport
 3. 生成慢速鼠标轨迹，完整发出 `mouseMoved`
 4. 执行 `mouseDown / mouseUp` 或 `drag` 全流
 5. 落点后保留 settle / hesitation / overshoot 修正，但最终点必须等于请求点
@@ -168,7 +180,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 证据分层：
 
 - **注入层**：事件已成功投递
-- **指针层**：光标最终落在目标区域内
+- **指针层**：光标最终收敛到请求点（或定义好的误差容忍阈值内）
 - **焦点层**：目标 app / window / tab 确实已激活
 - **观察层**：PassiveObserver 收到预期回声（move/click/drag/scroll）
 - **语义层**：由 Agent/browser 侧确认 DOM 状态变化
@@ -224,7 +236,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 - [ ] W1 `ReplayTraceStore`：新增 compact trace 指纹 schema、压缩与 retention
 - [ ] W2 `TargetResolverV2`：应用 / 窗口 / tab 激活与确认
-- [ ] W3 `ViewportMapper`：viewport↔screen 坐标换算与落地区域采样
+- [ ] W3 `ViewportMapper`：viewport↔screen 坐标换算
 - [ ] W4 `ExecutionPlanner`：scroll-to-visible、完整 click/drag 事件流、行为模式切换
 - [ ] W5 `OutcomeVerifier`：注入层 / 指针层 / 焦点层 / observer 层证据
 - [ ] W6 `Codex Analysis Loop v2`：从摘要级分析升级到 replay-aware 分析
@@ -235,6 +247,9 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 - [x] 长期摘要分析脚本与 HTTP 接口
 - [x] 行为模式混合与非匀速时间分配
 - [x] `click` 前置缓慢移动
+- [x] 固定目标点契约与非法区域参数拒绝
+- [x] daemon 全局串行动作执行
+- [x] Web 导航、daemon 自动拉起、`/hid/daemon` 与 `/hid/restart`
 
 ---
 

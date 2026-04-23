@@ -1,5 +1,15 @@
 # TODO
 
+## 当前剩余能力
+
+以下几项仍未完成，因此对应活动计划还保留在 `docs/plan/active/`：
+
+- 回放级 `compact trace` 指纹与 retention：当前只有摘要级长期分析，不能重建节奏片段
+- `windowId / tabId / host` 级目标解析与激活：当前仍主要依赖 app / 可见窗口
+- viewport → OS 坐标换算：当前上游仍需传最终固定点，换算尚未完全下沉
+- 执行结果证据化：当前能确认事件已投递，但还缺结构化“是否点中 / 是否被观察到 / 是否语义确认成功”
+- Codex replay-aware 自动调参：当前能做摘要分析和建议，但还不是基于 compact trace 的长期闭环
+
 ## 中文输入支持
 
 当前 `ActionCore.type(text:)` 只支持已映射的 ASCII 物理按键。中文、emoji、未映射符号会被跳过；系统不会把中文自动还原为拼音按键序列，例如不会把“鼠标”还原成 `shubiao`。
@@ -25,6 +35,7 @@ M2-M7 主计划已经完成，但下一阶段还有一组结构性能力待补�
 
 - **落点随机性不再在 VirtualHID 内处理**
 - 调用方必须传精确目标点；`landingZone / region / targetSpread` 一律视为上游契约错误
+- 鼠标 / 键盘 action 在 daemon 内已经全局串行，不再允许并发交叉执行
 
 详细方案见：
 

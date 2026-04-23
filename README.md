@@ -2,6 +2,23 @@
 
 VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它负责把上层 Agent 给出的目标、固定落点和动作序列，转换成真实的鼠标/键盘事件流，并通过观察、聚合和长期分析不断调整自己的执行参数。
 
+## 当前状态（2026-04-24）
+
+已完成：
+
+- M2-M7 主实施范围已经归档到 `docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
+- 固定目标点契约、完整点击前奏、非匀速时间曲线、全局串行动作执行
+- `trace.commit -> profiles.rebuild -> applyProfiles` 学习闭环
+- 长期拟人度分析脚本 / HTTP 接口 / Web 实验台导航
+- `report_server.py` 对 `vhid-daemon` 的自动拉起、状态查看和重启控制
+
+仍在进行：
+
+- `windowId / tabId / host` 级目标激活
+- viewport → OS 坐标换算下沉到 VirtualHID
+- 回放级 compact trace 指纹
+- 执行结果证据化与语义确认协作
+
 ## 当前能力
 
 - `InjectorCore`：目标窗口解析、焦点控制、事件投递、动作原语执行
@@ -29,7 +46,7 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 ```bash
 swift build
 swift test
-.build/debug/vhid-daemon
+.build/x86_64-apple-macosx/debug/vhid-daemon
 node mcp/server.mjs
 PORT=8123 python3 scripts/report_server.py
 python3 scripts/humanization_analysis.py --pretty
@@ -41,6 +58,17 @@ python3 scripts/humanization_analysis.py --pretty
 ./scripts/profile-learn-smoke.sh
 ```
 
+## Web 实验台与服务入口
+
+- 实验台：`http://127.0.0.1:8123/`
+- HID 状态：`GET /hid/state`
+- daemon 元信息：`GET /hid/daemon`
+- 重启 daemon：`POST /hid/restart`
+- 长期分析：`GET /analysis/report`
+
+页面顶部已经预留导航：`实验台 / 指标 / 对比 / 学习 / 长期分析 / 接口与 Codex`。
+`预览通道` 默认关闭，`results/cursor-command.json` 也按一次性消费处理，避免页面刷新后自动回放旧命令。
+
 ## 学习链路
 
 当前学习闭环已经打通：
@@ -51,7 +79,7 @@ python3 scripts/humanization_analysis.py --pretty
 4. `profiles.rebuild` 生成学习模板
 5. `action` 时命中模板并应用到 move / click / drag / type / key
 
-长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。
+长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。当前仍是**摘要级长期分析**；更高一层的 replay-aware 分析见活动计划。
 
 ## 重要边界
 
@@ -67,3 +95,4 @@ python3 scripts/humanization_analysis.py --pretty
 - 已完成实施文档：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
 - 下一阶段活动计划：`docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`
 - 待办：`docs/TODO_cn.md`
+- 贡献说明：`AGENTS.md` / `AGENTS_cn.md`
