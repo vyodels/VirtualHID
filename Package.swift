@@ -37,6 +37,7 @@ let package = Package(
         ),
         .target(
             name: "ProfileStore",
+            dependencies: ["HumanizationKit"],
             path: "Sources/ProfileStore",
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
@@ -76,7 +77,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ProfileStoreTests",
-            dependencies: ["ProfileStore", "XCTest"],
+            dependencies: ["ProfileStore", "HumanizationKit", "XCTest"],
             path: "Tests/ProfileStoreTests"
         )
     ]

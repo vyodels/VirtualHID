@@ -73,6 +73,50 @@ final class HumanizationKitTests: XCTestCase {
         XCTAssertTrue(schedule.allSatisfy { (40...180).contains($0.dwellMs) })
     }
 
+    func testHumanTimingCurveUsesAccelerationCruiseDecelerationInsteadOfUniformSteps() {
+        var rng = SeededRandomNumberGenerator(seed: 99)
+        let path = (0..<18).map { index in
+            HumanPoint(x: Double(index * 12), y: Double(index.isMultiple(of: 3) ? 2 : 0))
+        }
+        let profile = MotionProfile(
+            flavor: .smooth,
+            moveSpeedPxS: DoubleRange(min: 220, max: 260),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 42, max: 42)
+        )
+
+        let plan = HumanTimingCurve.plan(path: path, requestedDurationMs: 840, profile: profile, rng: &rng)
+        let interior = Array(plan.delaysMs.dropLast())
+
+        XCTAssertEqual(plan.totalDurationMs, 840)
+        XCTAssertEqual(plan.delaysMs.count, path.count)
+        XCTAssertTrue(interior.max() != interior.min())
+        XCTAssertTrue(interior.first! > interior[interior.count / 2])
+        XCTAssertTrue(interior.last! > interior[interior.count / 2])
+    }
+
+    func testBehaviorBlendAndMotionProfileSamplingRespectConfiguredModeAndRanges() {
+        var rng = SeededRandomNumberGenerator(seed: 7)
+        let blend = BehaviorBlend(idle: 0, normal: 0, flow: 1, lowEfficiency: 0)
+        let profile = MotionProfile(
+            behaviorBlend: blend,
+            moveSpeedPxS: DoubleRange(min: 300, max: 360),
+            pointCount: IntRange(min: 9, max: 11),
+            targetSpreadPx: 6,
+            clickHoldMs: IntRange(min: 52, max: 58)
+        )
+
+        let sampledMode = profile.sampleBehaviorMode(rng: &rng)
+        let sampledPointCount = profile.resolvedPointCount(fallback: 4, rng: &rng)
+        let sampledHoldMs = profile.resolvedClickHoldMs(defaultValue: 40, rng: &rng)
+        let sampledOffset = profile.resolvedTargetOffset(rng: &rng)
+
+        XCTAssertEqual(sampledMode, HumanBehaviorMode.flow)
+        XCTAssertTrue((9...11).contains(sampledPointCount))
+        XCTAssertTrue((52...58).contains(sampledHoldMs))
+        XCTAssertTrue(hypot(sampledOffset.x, sampledOffset.y) <= 6.01)
+    }
+
     private func average(_ values: [Double]) -> Double {
         guard values.isEmpty == false else {
             return 0

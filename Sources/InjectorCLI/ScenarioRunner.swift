@@ -63,8 +63,8 @@ struct ScenarioRunner {
         let start = isoFormatter.string(from: Date())
         let clickPoint = point(xFactor: 0.72, yFactor: 0.58)
         let primitives = [
-            ActionPrimitive.move(to: clickPoint, via: .wind, durationMs: 560),
-            .click(at: clickPoint, button: .left, holdMs: 45, count: 1)
+            ActionPrimitive.move(to: clickPoint, via: .wind, durationMs: 560, profile: nil),
+            .click(at: clickPoint, button: .left, holdMs: 45, count: 1, profile: nil)
         ]
         let actionResult = try executor.execute(
             request(
@@ -96,7 +96,7 @@ struct ScenarioRunner {
         let actionResult = try executor.execute(
             request(
                 for: "mouse_drag_active",
-                primitives: [.drag(from: startPoint, to: endPoint, button: .left, via: .wind)]
+                primitives: [.drag(from: startPoint, to: endPoint, button: .left, via: .wind, profile: nil)]
             )
         )
 
@@ -121,7 +121,7 @@ struct ScenarioRunner {
         let actionResult = try executor.execute(
             request(
                 for: active ? "keyboard_type_active" : "keyboard_type_blur",
-                primitives: [.type(text: keyInput, layout: .us)]
+                primitives: [.type(text: keyInput, layout: .us, profile: nil)]
             )
         )
 

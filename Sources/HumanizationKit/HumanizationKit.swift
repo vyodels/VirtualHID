@@ -53,6 +53,327 @@ public struct HumanizationProfile {
     }
 }
 
+public enum MotionFlavor: String, Codable, CaseIterable {
+    case smooth
+    case gentle
+    case hurried
+    case idle
+}
+
+public enum HumanBehaviorMode: String, Codable, CaseIterable {
+    case idle
+    case normal
+    case flow
+    case lowEfficiency = "low-efficiency"
+}
+
+public struct BehaviorBlend: Codable, Hashable {
+    public var idle: Double
+    public var normal: Double
+    public var flow: Double
+    public var lowEfficiency: Double
+
+    public init(
+        idle: Double = 0,
+        normal: Double = 1,
+        flow: Double = 0,
+        lowEfficiency: Double = 0
+    ) {
+        self.idle = idle
+        self.normal = normal
+        self.flow = flow
+        self.lowEfficiency = lowEfficiency
+    }
+}
+
+public struct IntRange: Codable, Hashable {
+    public let min: Int
+    public let max: Int
+
+    public init(min: Int, max: Int) {
+        self.min = min
+        self.max = max
+    }
+}
+
+public struct DoubleRange: Codable, Hashable {
+    public let min: Double
+    public let max: Double
+
+    public init(min: Double, max: Double) {
+        self.min = min
+        self.max = max
+    }
+}
+
+public struct MotionProfile: Codable, Hashable {
+    public var flavor: MotionFlavor?
+    public var behaviorBlend: BehaviorBlend?
+    public var moveSpeedPxS: DoubleRange?
+    public var dragSpeedPxS: DoubleRange?
+    public var pointCount: IntRange?
+    public var overshootProbability: Double?
+    public var wind: Double?
+    public var gravity: Double?
+    public var maxStep: Double?
+    public var jitter: Double?
+    public var controlSpread: Double?
+    public var targetSpreadPx: Double?
+    public var hesitationProbability: Double?
+    public var hesitationMs: IntRange?
+    public var settleMs: IntRange?
+    public var detourProbability: Double?
+    public var clickHoldMs: IntRange?
+    public var interClickMs: IntRange?
+    public var dwellMsMean: Double?
+    public var interKeyMsMean: Double?
+    public var straightnessMean: Double?
+    public var turnJitterMean: Double?
+
+    public init(
+        flavor: MotionFlavor? = nil,
+        behaviorBlend: BehaviorBlend? = nil,
+        moveSpeedPxS: DoubleRange? = nil,
+        dragSpeedPxS: DoubleRange? = nil,
+        pointCount: IntRange? = nil,
+        overshootProbability: Double? = nil,
+        wind: Double? = nil,
+        gravity: Double? = nil,
+        maxStep: Double? = nil,
+        jitter: Double? = nil,
+        controlSpread: Double? = nil,
+        targetSpreadPx: Double? = nil,
+        hesitationProbability: Double? = nil,
+        hesitationMs: IntRange? = nil,
+        settleMs: IntRange? = nil,
+        detourProbability: Double? = nil,
+        clickHoldMs: IntRange? = nil,
+        interClickMs: IntRange? = nil,
+        dwellMsMean: Double? = nil,
+        interKeyMsMean: Double? = nil,
+        straightnessMean: Double? = nil,
+        turnJitterMean: Double? = nil
+    ) {
+        self.flavor = flavor
+        self.behaviorBlend = behaviorBlend
+        self.moveSpeedPxS = moveSpeedPxS
+        self.dragSpeedPxS = dragSpeedPxS
+        self.pointCount = pointCount
+        self.overshootProbability = overshootProbability
+        self.wind = wind
+        self.gravity = gravity
+        self.maxStep = maxStep
+        self.jitter = jitter
+        self.controlSpread = controlSpread
+        self.targetSpreadPx = targetSpreadPx
+        self.hesitationProbability = hesitationProbability
+        self.hesitationMs = hesitationMs
+        self.settleMs = settleMs
+        self.detourProbability = detourProbability
+        self.clickHoldMs = clickHoldMs
+        self.interClickMs = interClickMs
+        self.dwellMsMean = dwellMsMean
+        self.interKeyMsMean = interKeyMsMean
+        self.straightnessMean = straightnessMean
+        self.turnJitterMean = turnJitterMean
+    }
+}
+
+public struct LearnedMotionTemplate: Codable, Hashable {
+    public var version: Int
+    public var strategy: String
+    public var actionType: String
+    public var sampleSize: Int
+    public var motion: MotionProfile
+
+    public init(
+        version: Int = 2,
+        strategy: String = "profile",
+        actionType: String,
+        sampleSize: Int,
+        motion: MotionProfile
+    ) {
+        self.version = version
+        self.strategy = strategy
+        self.actionType = actionType
+        self.sampleSize = sampleSize
+        self.motion = motion
+    }
+}
+
+public struct HumanTimingPlan: Hashable {
+    public let delaysMs: [Int]
+    public let totalDurationMs: Int
+    public let behaviorMode: HumanBehaviorMode
+
+    public init(delaysMs: [Int], totalDurationMs: Int, behaviorMode: HumanBehaviorMode) {
+        self.delaysMs = delaysMs
+        self.totalDurationMs = totalDurationMs
+        self.behaviorMode = behaviorMode
+    }
+}
+
+public enum HumanTimingCurve {
+    public static func plan<R: RandomNumberGenerator>(
+        path: [HumanPoint],
+        requestedDurationMs: Int?,
+        profile: MotionProfile?,
+        isDrag: Bool = false,
+        rng: inout R
+    ) -> HumanTimingPlan {
+        guard path.count > 1 else {
+            return HumanTimingPlan(delaysMs: [0], totalDurationMs: 0, behaviorMode: .normal)
+        }
+
+        let behaviorMode = profile?.sampleBehaviorMode(rng: &rng) ?? .normal
+        let segmentLengths = zip(path.dropFirst(), path).map { next, previous in
+            previous.distance(to: next)
+        }
+        let totalDistance = max(segmentLengths.reduce(0, +), 1)
+        let speedRange = profile?.resolvedSpeedRange(isDrag: isDrag, behaviorMode: behaviorMode) ?? defaultSpeedRange(for: behaviorMode, isDrag: isDrag)
+        let sampledSpeed = speedRange.sample(rng: &rng)
+        let settleMs = profile?.settleMs?.sample(rng: &rng) ?? defaultSettleMs(for: behaviorMode, isDrag: isDrag)
+        let autoDurationMs = Int((totalDistance / max(sampledSpeed, 80)) * 1000.0) + settleMs
+        let totalDurationMs = max(requestedDurationMs ?? autoDurationMs, segmentLengths.count)
+
+        var weights = [Double]()
+        weights.reserveCapacity(segmentLengths.count)
+        let turns = turnMagnitudes(path)
+        for index in segmentLengths.indices {
+            let progress = Double(index + 1) / Double(segmentLengths.count)
+            let curveSpeed = max(0.24, 0.42 + 0.88 * pow(sin(progress * .pi), 1.12))
+            let startBrake = progress < 0.12 ? 1.12 + (0.12 - progress) * 1.6 : 1.0
+            let endBrake = progress > 0.80 ? 1.08 + (progress - 0.80) * 1.8 : 1.0
+            let turnBoost = 1 + min(turns[index] / Double.pi, 0.9) * 0.48
+            let noise = 1 + rng.nextDouble(in: -0.10..<0.10)
+            let behaviorBoost = behaviorWeight(for: behaviorMode, progress: progress)
+            weights.append(max(0.001, segmentLengths[index] / curveSpeed * startBrake * endBrake * turnBoost * noise * behaviorBoost))
+        }
+
+        let hesitationProbability = profile?.hesitationProbability ?? defaultHesitationProbability(for: behaviorMode, isDrag: isDrag)
+        if segmentLengths.count > 2, rng.nextDouble(in: 0..<1) < hesitationProbability {
+            let hesitation = profile?.hesitationMs?.sample(rng: &rng) ?? defaultHesitationMs(for: behaviorMode)
+            let startIndex = max(0, Int(Double(segmentLengths.count) * 0.55))
+            let extraIndex = min(segmentLengths.count - 1, startIndex + Int(rng.nextDouble(in: 0..<Double(max(1, segmentLengths.count - startIndex)))))
+            weights[extraIndex] += Double(hesitation)
+        }
+
+        let weightSum = max(weights.reduce(0, +), 1)
+        var delays = [Int](repeating: 0, count: path.count)
+        var allocated = 0
+        for index in weights.indices {
+            let raw = Double(totalDurationMs) * (weights[index] / weightSum)
+            let delay = index == weights.indices.last ? max(1, totalDurationMs - allocated) : max(1, Int(raw.rounded()))
+            delays[index] = delay
+            allocated += delay
+        }
+        return HumanTimingPlan(delaysMs: delays, totalDurationMs: totalDurationMs, behaviorMode: behaviorMode)
+    }
+
+    private static func turnMagnitudes(_ path: [HumanPoint]) -> [Double] {
+        guard path.count > 2 else {
+            return Array(repeating: 0, count: max(0, path.count - 1))
+        }
+
+        var turns = [Double](repeating: 0, count: path.count - 1)
+        for index in 1..<(path.count - 1) {
+            let previous = path[index - 1]
+            let current = path[index]
+            let next = path[index + 1]
+            let a1 = atan2(current.y - previous.y, current.x - previous.x)
+            let a2 = atan2(next.y - current.y, next.x - current.x)
+            turns[index] = abs(normalizeAngle(a2 - a1))
+        }
+        return turns
+    }
+
+    private static func behaviorWeight(for mode: HumanBehaviorMode, progress: Double) -> Double {
+        switch mode {
+        case .idle:
+            return progress > 0.65 ? 1.18 : 1.06
+        case .normal:
+            return 1.0
+        case .flow:
+            return progress < 0.15 ? 0.96 : 0.88
+        case .lowEfficiency:
+            return progress > 0.35 && progress < 0.75 ? 1.14 : 1.08
+        }
+    }
+
+    private static func defaultSpeedRange(for mode: HumanBehaviorMode, isDrag: Bool) -> DoubleRange {
+        switch (mode, isDrag) {
+        case (.idle, false):
+            return DoubleRange(min: 100, max: 260)
+        case (.idle, true):
+            return DoubleRange(min: 90, max: 210)
+        case (.normal, false):
+            return DoubleRange(min: 260, max: 620)
+        case (.normal, true):
+            return DoubleRange(min: 180, max: 420)
+        case (.flow, false):
+            return DoubleRange(min: 520, max: 980)
+        case (.flow, true):
+            return DoubleRange(min: 320, max: 760)
+        case (.lowEfficiency, false):
+            return DoubleRange(min: 140, max: 360)
+        case (.lowEfficiency, true):
+            return DoubleRange(min: 110, max: 260)
+        }
+    }
+
+    private static func defaultSettleMs(for mode: HumanBehaviorMode, isDrag: Bool) -> Int {
+        switch (mode, isDrag) {
+        case (.idle, _):
+            return 90
+        case (.normal, _):
+            return 56
+        case (.flow, _):
+            return 36
+        case (.lowEfficiency, _):
+            return 110
+        }
+    }
+
+    private static func defaultHesitationProbability(for mode: HumanBehaviorMode, isDrag: Bool) -> Double {
+        switch (mode, isDrag) {
+        case (.idle, _):
+            return 0.34
+        case (.normal, false):
+            return 0.18
+        case (.normal, true):
+            return 0.24
+        case (.flow, _):
+            return 0.08
+        case (.lowEfficiency, _):
+            return 0.42
+        }
+    }
+
+    private static func defaultHesitationMs(for mode: HumanBehaviorMode) -> Int {
+        switch mode {
+        case .idle:
+            return 140
+        case .normal:
+            return 88
+        case .flow:
+            return 40
+        case .lowEfficiency:
+            return 180
+        }
+    }
+
+    private static func normalizeAngle(_ value: Double) -> Double {
+        var result = value
+        while result > Double.pi {
+            result -= Double.pi * 2
+        }
+        while result < -Double.pi {
+            result += Double.pi * 2
+        }
+        return result
+    }
+}
+
 public enum HumanKeyboard {
     private static let mapping: [UnicodeScalar: HumanKey] = [
         "a": HumanKey(keyCode: 0), "b": HumanKey(keyCode: 11),
@@ -526,6 +847,180 @@ private extension Array where Element == HumanPoint {
             return -1
         }
         return 0
+    }
+}
+
+public extension IntRange {
+    func sample<R: RandomNumberGenerator>(rng: inout R) -> Int {
+        guard max > min else {
+            return min
+        }
+        let span = Double(max - min + 1)
+        return min + Int(floor(rng.nextDouble(in: 0..<span)))
+    }
+}
+
+public extension DoubleRange {
+    func sample<R: RandomNumberGenerator>(rng: inout R) -> Double {
+        guard max > min else {
+            return min
+        }
+        return rng.nextDouble(in: min..<max)
+    }
+}
+
+public extension BehaviorBlend {
+    func normalized() -> BehaviorBlend {
+        let total = max(idle + normal + flow + lowEfficiency, Double.leastNonzeroMagnitude)
+        return BehaviorBlend(
+            idle: idle / total,
+            normal: normal / total,
+            flow: flow / total,
+            lowEfficiency: lowEfficiency / total
+        )
+    }
+
+    func sample<R: RandomNumberGenerator>(rng: inout R) -> HumanBehaviorMode {
+        let weights = normalized()
+        let threshold = rng.nextDouble(in: 0..<1)
+        let idleCutoff = weights.idle
+        let normalCutoff = idleCutoff + weights.normal
+        let flowCutoff = normalCutoff + weights.flow
+        switch threshold {
+        case ..<idleCutoff:
+            return .idle
+        case ..<normalCutoff:
+            return .normal
+        case ..<flowCutoff:
+            return .flow
+        default:
+            return .lowEfficiency
+        }
+    }
+}
+
+public extension MotionProfile {
+    func merging(_ override: MotionProfile?) -> MotionProfile {
+        guard let override else {
+            return self
+        }
+        return MotionProfile(
+            flavor: override.flavor ?? flavor,
+            behaviorBlend: override.behaviorBlend ?? behaviorBlend,
+            moveSpeedPxS: override.moveSpeedPxS ?? moveSpeedPxS,
+            dragSpeedPxS: override.dragSpeedPxS ?? dragSpeedPxS,
+            pointCount: override.pointCount ?? pointCount,
+            overshootProbability: override.overshootProbability ?? overshootProbability,
+            wind: override.wind ?? wind,
+            gravity: override.gravity ?? gravity,
+            maxStep: override.maxStep ?? maxStep,
+            jitter: override.jitter ?? jitter,
+            controlSpread: override.controlSpread ?? controlSpread,
+            targetSpreadPx: override.targetSpreadPx ?? targetSpreadPx,
+            hesitationProbability: override.hesitationProbability ?? hesitationProbability,
+            hesitationMs: override.hesitationMs ?? hesitationMs,
+            settleMs: override.settleMs ?? settleMs,
+            detourProbability: override.detourProbability ?? detourProbability,
+            clickHoldMs: override.clickHoldMs ?? clickHoldMs,
+            interClickMs: override.interClickMs ?? interClickMs,
+            dwellMsMean: override.dwellMsMean ?? dwellMsMean,
+            interKeyMsMean: override.interKeyMsMean ?? interKeyMsMean,
+            straightnessMean: override.straightnessMean ?? straightnessMean,
+            turnJitterMean: override.turnJitterMean ?? turnJitterMean
+        )
+    }
+
+    func sampleBehaviorMode<R: RandomNumberGenerator>(rng: inout R) -> HumanBehaviorMode {
+        if let behaviorBlend {
+            return behaviorBlend.sample(rng: &rng)
+        }
+        switch flavor {
+        case .hurried:
+            return .flow
+        case .idle:
+            return .idle
+        case .gentle:
+            return .normal
+        case .smooth:
+            return .normal
+        case nil:
+            return .normal
+        }
+    }
+
+    func resolvedSpeedRange(isDrag: Bool, behaviorMode: HumanBehaviorMode) -> DoubleRange {
+        if isDrag, let dragSpeedPxS {
+            return dragSpeedPxS
+        }
+        if let moveSpeedPxS {
+            return moveSpeedPxS
+        }
+        switch behaviorMode {
+        case .idle:
+            return isDrag ? DoubleRange(min: 90, max: 210) : DoubleRange(min: 100, max: 260)
+        case .normal:
+            return isDrag ? DoubleRange(min: 180, max: 420) : DoubleRange(min: 260, max: 620)
+        case .flow:
+            return isDrag ? DoubleRange(min: 320, max: 760) : DoubleRange(min: 520, max: 980)
+        case .lowEfficiency:
+            return isDrag ? DoubleRange(min: 110, max: 260) : DoubleRange(min: 140, max: 360)
+        }
+    }
+
+    func resolvedPointCount<R: RandomNumberGenerator>(fallback: Int, rng: inout R) -> Int {
+        max(1, pointCount?.sample(rng: &rng) ?? fallback)
+    }
+
+    func resolvedWindParams(base: WindMouseParams) -> WindMouseParams {
+        var params = base
+        if let gravity {
+            params.gravity = gravity
+        }
+        if let wind {
+            params.wind = wind
+        }
+        if let maxStep {
+            params.maxStep = maxStep
+        }
+        if let overshootProbability {
+            params.overshootProbability = overshootProbability
+        }
+        if let targetSpreadPx {
+            params.targetArea = max(1, targetSpreadPx)
+        }
+        return params
+    }
+
+    func resolvedBezierParams(base: BezierMouseParams) -> BezierMouseParams {
+        var params = base
+        if let controlSpread {
+            params.controlSpread = controlSpread
+        }
+        if let jitter {
+            params.jitter = jitter
+        }
+        return params
+    }
+
+    func resolvedClickHoldMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        max(12, clickHoldMs?.sample(rng: &rng) ?? defaultValue)
+    }
+
+    func resolvedInterClickMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        max(24, interClickMs?.sample(rng: &rng) ?? defaultValue)
+    }
+
+    func resolvedTargetOffset<R: RandomNumberGenerator>(rng: inout R) -> HumanPoint {
+        let spread = max(targetSpreadPx ?? 0, 0)
+        guard spread > 0 else {
+            return HumanPoint(x: 0, y: 0)
+        }
+        let radius = rng.nextDouble(in: 0..<spread)
+        let angle = rng.nextDouble(in: 0..<(Double.pi * 2))
+        return HumanPoint(
+            x: cos(angle) * radius,
+            y: sin(angle) * radius
+        )
     }
 }
 

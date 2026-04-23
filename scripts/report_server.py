@@ -53,6 +53,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/styles.css":
             self.serve_file(WEB / "styles.css", "text/css; charset=utf-8")
             return
+        if path == "/cursor-catpaw.png":
+            self.serve_file(WEB / "cursor-catpaw.png", "image/png")
+            return
         if path == "/cursor-command":
             self.serve_cursor_command()
             return
@@ -65,6 +68,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/hid/action":
             self.serve_hid_action()
+            return
+        if path == "/hid/rpc":
+            self.serve_hid_rpc()
             return
         if path != "/report":
             self.send_error(404)
@@ -99,18 +105,27 @@ class Handler(BaseHTTPRequestHandler):
         self.forward_hid_request("state", {})
 
     def serve_hid_action(self):
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self.send_json_error(400, "E_BAD_REQUEST", "invalid Content-Length")
-            return
-        body = self.rfile.read(length) if length else b"{}"
-        try:
-            params = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            self.send_json_error(400, "E_BAD_REQUEST", str(error))
+        params = self.read_json_body()
+        if params is None:
             return
         self.forward_hid_request("action", params)
+
+    def serve_hid_rpc(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            self.send_json_error(400, "E_BAD_REQUEST", "RPC payload must be a JSON object")
+            return
+        method = payload.get("method")
+        if not isinstance(method, str) or not method:
+            self.send_json_error(400, "E_BAD_REQUEST", "RPC payload requires string field method")
+            return
+        params = payload.get("params", {})
+        if not isinstance(params, dict):
+            self.send_json_error(400, "E_BAD_REQUEST", "RPC payload field params must be a JSON object")
+            return
+        self.forward_hid_request(method, params)
 
     def forward_hid_request(self, method, params):
         try:
@@ -134,6 +149,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json_error(400, "E_BAD_REQUEST", "invalid Content-Length")
+            return None
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self.send_json_error(400, "E_BAD_REQUEST", str(error))
+            return None
 
     def serve_cursor_command(self):
         RESULTS.mkdir(exist_ok=True)

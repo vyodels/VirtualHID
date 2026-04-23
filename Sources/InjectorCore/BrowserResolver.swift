@@ -47,24 +47,55 @@ public enum BrowserResolver {
 
     public static func resolve(bundleIdentifiers: [String]) throws -> BrowserTarget {
         try ensureAccessibilityTrusted()
+        var resolvedTargets = [BrowserTarget]()
+        var sawRunningApp = false
+        var lastWindowError: BrowserResolverError?
 
         for bundleIdentifier in bundleIdentifiers {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
                 .filter { !$0.isTerminated }
-                .sorted { ($0.activationPolicy.rawValue, $0.processIdentifier) > ($1.activationPolicy.rawValue, $1.processIdentifier) }
+                .sorted {
+                    let lhsFrontmost = FocusController.isFrontmost(app: $0)
+                    let rhsFrontmost = FocusController.isFrontmost(app: $1)
+                    if lhsFrontmost != rhsFrontmost {
+                        return lhsFrontmost && !rhsFrontmost
+                    }
+                    return ($0.activationPolicy.rawValue, $0.processIdentifier) > ($1.activationPolicy.rawValue, $1.processIdentifier)
+                }
 
-            if let app = apps.first {
-                let window = try resolveMainWindow(for: app, bundleIdentifier: bundleIdentifier)
-                return BrowserTarget(
-                    app: app,
-                    pid: app.processIdentifier,
-                    bundleIdentifier: bundleIdentifier,
-                    windowTitle: window.title,
-                    frame: window.frame
-                )
+            guard !apps.isEmpty else {
+                continue
+            }
+            sawRunningApp = true
+
+            for app in apps {
+                do {
+                    let window = try resolveMainWindow(for: app, bundleIdentifier: bundleIdentifier)
+                    resolvedTargets.append(
+                        BrowserTarget(
+                            app: app,
+                            pid: app.processIdentifier,
+                            bundleIdentifier: bundleIdentifier,
+                            windowTitle: window.title,
+                            frame: window.frame
+                        )
+                    )
+                } catch BrowserResolverError.windowNotFound {
+                    lastWindowError = .windowNotFound(bundleIdentifier)
+                    continue
+                }
             }
         }
 
+        if let frontmost = resolvedTargets.first(where: { FocusController.isFrontmost(app: $0.app) }) {
+            return frontmost
+        }
+        if let target = resolvedTargets.first {
+            return target
+        }
+        if let lastWindowError, sawRunningApp {
+            throw lastWindowError
+        }
         throw BrowserResolverError.appNotFound(bundleIdentifiers.joined(separator: ", "))
     }
 

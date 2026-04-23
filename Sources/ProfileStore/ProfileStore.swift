@@ -1,4 +1,5 @@
 import Foundation
+import HumanizationKit
 import SQLite3
 import os
 
@@ -34,14 +35,45 @@ public struct TracePoint: Codable, Equatable {
     }
 }
 
+public struct TraceRetentionPolicy: Equatable {
+    public let maxAgeMs: Int64
+    public let maxTracesPerGroup: Int
+    public let cleanupIntervalMs: Int64
+
+    public init(
+        maxAgeMs: Int64 = 30 * 24 * 60 * 60 * 1000,
+        maxTracesPerGroup: Int = 600,
+        cleanupIntervalMs: Int64 = 6 * 60 * 60 * 1000
+    ) {
+        self.maxAgeMs = maxAgeMs
+        self.maxTracesPerGroup = maxTracesPerGroup
+        self.cleanupIntervalMs = cleanupIntervalMs
+    }
+}
+
 public struct TracePayload: Codable, Equatable {
     public let eventId: String?
     public let type: String
     public let point: TracePoint?
     public let keyCode: UInt16?
     public let points: [TracePoint]
+    public let origin: TracePoint?
+    public let targetPoint: TracePoint?
+    public let targetRadiusPx: Double?
+    public let landingErrorPx: Double?
+    public let durationMs: Double?
+    public let segmentMs: [Double]
+    public let hesitationMs: [Double]
+    public let clickHoldMs: [Double]
+    public let interClickMs: [Double]
     public let dwellMs: [Double]
     public let interKeyMs: [Double]
+    public let behaviorMode: HumanBehaviorMode?
+    public let flavor: MotionFlavor?
+    public let straightness: Double?
+    public let turnJitter: Double?
+    public let pathLengthPx: Double?
+    public let speedPxS: Double?
 
     public init(
         eventId: String?,
@@ -49,16 +81,123 @@ public struct TracePayload: Codable, Equatable {
         point: TracePoint? = nil,
         keyCode: UInt16? = nil,
         points: [TracePoint] = [],
+        origin: TracePoint? = nil,
+        targetPoint: TracePoint? = nil,
+        targetRadiusPx: Double? = nil,
+        landingErrorPx: Double? = nil,
+        durationMs: Double? = nil,
+        segmentMs: [Double] = [],
+        hesitationMs: [Double] = [],
+        clickHoldMs: [Double] = [],
+        interClickMs: [Double] = [],
         dwellMs: [Double] = [],
-        interKeyMs: [Double] = []
+        interKeyMs: [Double] = [],
+        behaviorMode: HumanBehaviorMode? = nil,
+        flavor: MotionFlavor? = nil,
+        straightness: Double? = nil,
+        turnJitter: Double? = nil,
+        pathLengthPx: Double? = nil,
+        speedPxS: Double? = nil
     ) {
         self.eventId = eventId
         self.type = type
         self.point = point
         self.keyCode = keyCode
         self.points = points
+        self.origin = origin
+        self.targetPoint = targetPoint
+        self.targetRadiusPx = targetRadiusPx
+        self.landingErrorPx = landingErrorPx
+        self.durationMs = durationMs
+        self.segmentMs = segmentMs
+        self.hesitationMs = hesitationMs
+        self.clickHoldMs = clickHoldMs
+        self.interClickMs = interClickMs
         self.dwellMs = dwellMs
         self.interKeyMs = interKeyMs
+        self.behaviorMode = behaviorMode
+        self.flavor = flavor
+        self.straightness = straightness
+        self.turnJitter = turnJitter
+        self.pathLengthPx = pathLengthPx
+        self.speedPxS = speedPxS
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case eventId
+        case type
+        case point
+        case keyCode
+        case points
+        case origin
+        case targetPoint
+        case targetRadiusPx
+        case landingErrorPx
+        case durationMs
+        case segmentMs
+        case hesitationMs
+        case clickHoldMs
+        case interClickMs
+        case dwellMs
+        case interKeyMs
+        case behaviorMode
+        case flavor
+        case straightness
+        case turnJitter
+        case pathLengthPx
+        case speedPxS
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        eventId = try container.decodeIfPresent(String.self, forKey: .eventId)
+        type = try container.decode(String.self, forKey: .type)
+        point = try container.decodeIfPresent(TracePoint.self, forKey: .point)
+        keyCode = try container.decodeIfPresent(UInt16.self, forKey: .keyCode)
+        points = try container.decodeIfPresent([TracePoint].self, forKey: .points) ?? []
+        origin = try container.decodeIfPresent(TracePoint.self, forKey: .origin)
+        targetPoint = try container.decodeIfPresent(TracePoint.self, forKey: .targetPoint)
+        targetRadiusPx = try container.decodeIfPresent(Double.self, forKey: .targetRadiusPx)
+        landingErrorPx = try container.decodeIfPresent(Double.self, forKey: .landingErrorPx)
+        durationMs = try container.decodeIfPresent(Double.self, forKey: .durationMs)
+        segmentMs = try container.decodeIfPresent([Double].self, forKey: .segmentMs) ?? []
+        hesitationMs = try container.decodeIfPresent([Double].self, forKey: .hesitationMs) ?? []
+        clickHoldMs = try container.decodeIfPresent([Double].self, forKey: .clickHoldMs) ?? []
+        interClickMs = try container.decodeIfPresent([Double].self, forKey: .interClickMs) ?? []
+        dwellMs = try container.decodeIfPresent([Double].self, forKey: .dwellMs) ?? []
+        interKeyMs = try container.decodeIfPresent([Double].self, forKey: .interKeyMs) ?? []
+        behaviorMode = try container.decodeIfPresent(HumanBehaviorMode.self, forKey: .behaviorMode)
+        flavor = try container.decodeIfPresent(MotionFlavor.self, forKey: .flavor)
+        straightness = try container.decodeIfPresent(Double.self, forKey: .straightness)
+        turnJitter = try container.decodeIfPresent(Double.self, forKey: .turnJitter)
+        pathLengthPx = try container.decodeIfPresent(Double.self, forKey: .pathLengthPx)
+        speedPxS = try container.decodeIfPresent(Double.self, forKey: .speedPxS)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(eventId, forKey: .eventId)
+        try container.encode(type, forKey: .type)
+        try container.encodeIfPresent(point, forKey: .point)
+        try container.encodeIfPresent(keyCode, forKey: .keyCode)
+        try container.encode(points, forKey: .points)
+        try container.encodeIfPresent(origin, forKey: .origin)
+        try container.encodeIfPresent(targetPoint, forKey: .targetPoint)
+        try container.encodeIfPresent(targetRadiusPx, forKey: .targetRadiusPx)
+        try container.encodeIfPresent(landingErrorPx, forKey: .landingErrorPx)
+        try container.encodeIfPresent(durationMs, forKey: .durationMs)
+        try container.encode(segmentMs, forKey: .segmentMs)
+        try container.encode(hesitationMs, forKey: .hesitationMs)
+        try container.encode(clickHoldMs, forKey: .clickHoldMs)
+        try container.encode(interClickMs, forKey: .interClickMs)
+        try container.encode(dwellMs, forKey: .dwellMs)
+        try container.encode(interKeyMs, forKey: .interKeyMs)
+        try container.encodeIfPresent(behaviorMode, forKey: .behaviorMode)
+        try container.encodeIfPresent(flavor, forKey: .flavor)
+        try container.encodeIfPresent(straightness, forKey: .straightness)
+        try container.encodeIfPresent(turnJitter, forKey: .turnJitter)
+        try container.encodeIfPresent(pathLengthPx, forKey: .pathLengthPx)
+        try container.encodeIfPresent(speedPxS, forKey: .speedPxS)
     }
 }
 
@@ -167,9 +306,16 @@ public final class ProfileStore {
     private var db: OpaquePointer?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let templateEncoder = JSONEncoder()
     private let logger = Logger(subsystem: "com.vyodels.virtualhid", category: "profile-store")
+    private let retentionPolicy: TraceRetentionPolicy
+    private var lastCleanupAtMs: Int64
 
-    public init(path: String) throws {
+    public init(path: String, retentionPolicy: TraceRetentionPolicy = TraceRetentionPolicy()) throws {
+        self.retentionPolicy = retentionPolicy
+        lastCleanupAtMs = 0
+        templateEncoder.outputFormatting = [.sortedKeys]
+
         var database: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &database, flags, nil) != SQLITE_OK {
@@ -194,7 +340,7 @@ public final class ProfileStore {
         }
 
         let payload = String(data: try encoder.encode(input.payload), encoding: .utf8) ?? "{}"
-        return try lock.withLock {
+        return try lock.withLock { [self] in
             let sql = """
             INSERT INTO traces (ts, source, host, element_sig, task_id, stage, action_type, payload)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -212,7 +358,9 @@ public final class ProfileStore {
             bindText(payload, to: statement, at: 8)
 
             try stepDone(statement)
-            return sqlite3_last_insert_rowid(db)
+            let traceId = sqlite3_last_insert_rowid(self.db)
+            try self.performRetentionIfNeeded(nowMs: self.currentTimeMs())
+            return traceId
         }
     }
 
@@ -226,7 +374,9 @@ public final class ProfileStore {
         role: String?,
         host: String,
         taskId: String?,
-        stage: String?
+        stage: String?,
+        actionTypeOverride: String? = nil,
+        payloadOverride: TracePayload? = nil
     ) throws -> TraceCommitResult {
         guard !host.isEmpty else {
             throw ProfileStoreError.invalidInput("host is required")
@@ -240,7 +390,14 @@ public final class ProfileStore {
             return TraceCommitResult(committed: false, dropped: true, traceId: nil, reason: "sensitive_role")
         }
 
-        let actionType = Self.actionType(forObservedType: eventType)
+        let payload = payloadOverride ?? TracePayload(
+            eventId: eventId,
+            type: eventType,
+            point: point,
+            keyCode: keyCode,
+            points: point.map { [$0] } ?? []
+        )
+        let actionType = actionTypeOverride ?? Self.actionType(forObservedType: eventType)
         let traceId = try insertTrace(
             TraceInput(
                 ts: ts,
@@ -250,28 +407,23 @@ public final class ProfileStore {
                 taskId: taskId,
                 stage: stage,
                 actionType: actionType,
-                payload: TracePayload(
-                    eventId: eventId,
-                    type: eventType,
-                    point: point,
-                    keyCode: keyCode,
-                    points: point.map { [$0] } ?? []
-                )
+                payload: payload
             )
         )
         return TraceCommitResult(committed: true, dropped: false, traceId: traceId, reason: nil)
     }
 
     public func rebuild(host: String? = nil) throws -> AggregateReport {
-        try lock.withLock {
-            let scanned = try countTraces(host: host)
-            try deleteTemplates(host: host, sig: nil)
-            let groups = try loadGroups(host: host)
+        try lock.withLock { [self] in
+            try self.performRetentionIfNeeded(nowMs: self.currentTimeMs(), force: true)
+            let scanned = try self.countTraces(host: host)
+            try self.deleteTemplates(host: host, sig: nil)
+            let groups = try self.loadGroups(host: host)
             var generated = 0
 
             for group in groups where group.sampleSize >= 5 {
-                let params = try buildParams(for: group)
-                try insertTemplate(group: group, paramsJSON: params)
+                let params = try self.buildParams(for: group)
+                try self.insertTemplate(group: group, paramsJSON: params)
                 generated += 1
             }
 
@@ -422,6 +574,7 @@ public final class ProfileStore {
             )
             """)
             try execute("CREATE INDEX IF NOT EXISTS idx_traces_host_sig ON traces(host, element_sig)")
+            try execute("CREATE INDEX IF NOT EXISTS idx_traces_group_ts ON traces(host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type, ts DESC, id DESC)")
         }
     }
 
@@ -479,43 +632,52 @@ public final class ProfileStore {
         bindText(group.taskId ?? "", to: statement, at: 3)
         bindText(group.actionType, to: statement, at: 4)
 
-        var points = [TracePoint]()
-        var dwell = [Double]()
-        var interKey = [Double]()
+        var samples = [TraceSample]()
 
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let data = columnString(statement, 0).data(using: .utf8),
                   let payload = try? decoder.decode(TracePayload.self, from: data) else {
                 continue
             }
-            points.append(contentsOf: payload.points)
-            if let point = payload.point, payload.points.isEmpty {
-                points.append(point)
+            if let sample = traceSample(from: payload) {
+                samples.append(sample)
             }
-            dwell.append(contentsOf: payload.dwellMs)
-            interKey.append(contentsOf: payload.interKeyMs)
         }
 
-        var params: [String: Any] = [
-            "version": 1,
-            "strategy": "profile",
-            "actionType": group.actionType,
-            "sampleSize": group.sampleSize
-        ]
+        let behaviorBlend = behaviorBlend(for: samples)
+        let motion = MotionProfile(
+            flavor: deriveFlavor(from: samples, behaviorBlend: behaviorBlend),
+            behaviorBlend: behaviorBlend,
+            moveSpeedPxS: group.actionType == "move" ? stochasticDoubleRange(values: samples.compactMap(\.speedPxS), floor: 90, ceil: 1400, minimumFractionalSpan: 0.18, absoluteMinimumSpan: 60) : nil,
+            dragSpeedPxS: group.actionType == "drag" ? stochasticDoubleRange(values: samples.compactMap(\.speedPxS), floor: 80, ceil: 1200, minimumFractionalSpan: 0.20, absoluteMinimumSpan: 50) : nil,
+            pointCount: stochasticIntRange(values: samples.map(\.pointCount).filter { $0 > 0 }, minimumSpan: 2, floor: 1, ceil: 240),
+            overshootProbability: boundedProbability(averageOrNil(samples.compactMap(\.overshootSignal))),
+            wind: deriveWind(from: samples),
+            gravity: deriveGravity(from: samples),
+            maxStep: deriveMaxStep(from: samples),
+            jitter: deriveJitter(from: samples),
+            controlSpread: deriveControlSpread(from: samples),
+            targetSpreadPx: deriveTargetSpread(from: samples),
+            hesitationProbability: deriveHesitationProbability(from: samples),
+            hesitationMs: stochasticIntRange(values: samples.flatMap(\.hesitationMs), minimumSpan: 18, floor: 24, ceil: 420),
+            settleMs: deriveSettleRange(from: samples),
+            detourProbability: boundedProbability(averageOrNil(samples.compactMap(\.detourSignal))),
+            clickHoldMs: stochasticIntRange(values: samples.flatMap(\.clickHoldMs), minimumSpan: 12, floor: 18, ceil: 320),
+            interClickMs: stochasticIntRange(values: samples.flatMap(\.interClickMs), minimumSpan: 18, floor: 36, ceil: 520),
+            dwellMsMean: averageOrNil(samples.flatMap(\.dwellMs)),
+            interKeyMsMean: averageOrNil(samples.flatMap(\.interKeyMs)),
+            straightnessMean: averageOrNil(samples.compactMap(\.straightness)),
+            turnJitterMean: averageOrNil(samples.compactMap(\.turnJitter))
+        )
+        let template = LearnedMotionTemplate(
+            version: 2,
+            strategy: "profile",
+            actionType: group.actionType,
+            sampleSize: group.sampleSize,
+            motion: motion
+        )
 
-        if !points.isEmpty {
-            let meanX = points.map(\.x).reduce(0, +) / Double(points.count)
-            let meanY = points.map(\.y).reduce(0, +) / Double(points.count)
-            params["controlPoints"] = [["x": meanX, "y": meanY]]
-            params["pointCount"] = points.count
-        }
-
-        if !dwell.isEmpty || !interKey.isEmpty {
-            params["dwellMsMean"] = mean(dwell)
-            params["interKeyMsMean"] = mean(interKey)
-        }
-
-        let data = try JSONSerialization.data(withJSONObject: params, options: [.sortedKeys])
+        let data = try templateEncoder.encode(template)
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
@@ -584,6 +746,474 @@ public final class ProfileStore {
             return Int(sqlite3_column_int(statement, 0))
         }
         return try scalarInt("SELECT COUNT(*) FROM traces")
+    }
+
+    private func performRetentionIfNeeded(nowMs: Int64, force: Bool = false) throws {
+        guard retentionPolicy.maxAgeMs > 0 || retentionPolicy.maxTracesPerGroup > 0 else {
+            return
+        }
+        let interval = retentionPolicy.cleanupIntervalMs
+        let shouldRun = force || interval <= 0 || lastCleanupAtMs == 0 || (nowMs - lastCleanupAtMs) >= interval
+        guard shouldRun else {
+            return
+        }
+
+        if retentionPolicy.maxAgeMs > 0 {
+            try deleteAgedTraces(olderThan: nowMs - retentionPolicy.maxAgeMs)
+        }
+        if retentionPolicy.maxTracesPerGroup > 0 {
+            try trimTraceOverflow(limit: retentionPolicy.maxTracesPerGroup)
+        }
+        lastCleanupAtMs = nowMs
+    }
+
+    private func deleteAgedTraces(olderThan cutoffMs: Int64) throws {
+        let statement = try prepare("DELETE FROM traces WHERE ts < ?")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cutoffMs)
+        try stepDone(statement)
+    }
+
+    private func trimTraceOverflow(limit: Int) throws {
+        let sql = """
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type
+                   ORDER BY ts DESC, id DESC
+                 ) AS row_num
+          FROM traces
+        )
+        DELETE FROM traces
+        WHERE id IN (SELECT id FROM ranked WHERE row_num > ?)
+        """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(limit))
+        try stepDone(statement)
+    }
+
+    private func traceSample(from payload: TracePayload) -> TraceSample? {
+        let path = resolvedPath(from: payload)
+        let pathLength = positive(payload.pathLengthPx) ?? computePathLength(path)
+        let durationMs = positive(payload.durationMs) ?? sumPositive(payload.segmentMs)
+        let speedPxS = positive(payload.speedPxS) ?? {
+            guard let pathLength, let durationMs, durationMs > 0 else {
+                return nil
+            }
+            return (pathLength / durationMs) * 1000.0
+        }()
+        let landingErrorPx = positive(payload.landingErrorPx) ?? computeLandingError(path: path, target: payload.targetPoint)
+        let straightness = boundedUnit(payload.straightness ?? computeStraightness(path))
+        let turnJitter = boundedUnit(payload.turnJitter ?? computeTurnJitter(path))
+        let pointCount = max(path.count, payload.points.count, payload.point == nil ? 0 : 1)
+
+        guard pointCount > 0
+            || !payload.clickHoldMs.isEmpty
+            || !payload.interClickMs.isEmpty
+            || !payload.dwellMs.isEmpty
+            || !payload.interKeyMs.isEmpty else {
+            return nil
+        }
+
+        let targetSpreadPx = positive(landingErrorPx)
+            ?? positive(payload.targetRadiusPx)
+            ?? inferTargetSpread(path: path, target: payload.targetPoint)
+        let overshootSignal = computeOvershootSignal(path: path, target: payload.targetPoint, targetRadiusPx: payload.targetRadiusPx)
+        let detourSignal = straightness.map { $0 < 0.9 ? 1.0 : max(0, min(1, (1 - $0) * 2.8)) }
+        let behaviorMode = payload.behaviorMode ?? classifyBehavior(
+            speedPxS: speedPxS,
+            hesitationMs: payload.hesitationMs,
+            clickHoldMs: payload.clickHoldMs,
+            dwellMs: payload.dwellMs,
+            interKeyMs: payload.interKeyMs,
+            straightness: straightness,
+            turnJitter: turnJitter,
+            targetSpreadPx: targetSpreadPx
+        )
+
+        return TraceSample(
+            pointCount: max(1, pointCount),
+            speedPxS: speedPxS,
+            hesitationMs: payload.hesitationMs.filter { $0 > 0 },
+            clickHoldMs: payload.clickHoldMs.filter { $0 > 0 },
+            interClickMs: payload.interClickMs.filter { $0 > 0 },
+            dwellMs: payload.dwellMs.filter { $0 > 0 },
+            interKeyMs: payload.interKeyMs.filter { $0 > 0 },
+            straightness: straightness,
+            turnJitter: turnJitter,
+            targetSpreadPx: targetSpreadPx,
+            overshootSignal: overshootSignal,
+            detourSignal: detourSignal,
+            behaviorMode: behaviorMode,
+            flavor: payload.flavor
+        )
+    }
+
+    private func resolvedPath(from payload: TracePayload) -> [TracePoint] {
+        if !payload.points.isEmpty {
+            return payload.points
+        }
+        var path = [TracePoint]()
+        if let origin = payload.origin {
+            path.append(origin)
+        }
+        if let point = payload.point, path.last != point {
+            path.append(point)
+        } else if let targetPoint = payload.targetPoint, path.last != targetPoint {
+            path.append(targetPoint)
+        }
+        return path
+    }
+
+    private func computePathLength(_ path: [TracePoint]) -> Double? {
+        guard path.count > 1 else {
+            return nil
+        }
+        return zip(path, path.dropFirst()).reduce(0) { partial, pair in
+            partial + distance(from: pair.0, to: pair.1)
+        }
+    }
+
+    private func computeLandingError(path: [TracePoint], target: TracePoint?) -> Double? {
+        guard let target, let last = path.last else {
+            return nil
+        }
+        return distance(from: last, to: target)
+    }
+
+    private func inferTargetSpread(path: [TracePoint], target: TracePoint?) -> Double? {
+        guard let target else {
+            return nil
+        }
+        let distances = path.map { distance(from: $0, to: target) }.filter { $0 > 0 }
+        guard !distances.isEmpty else {
+            return nil
+        }
+        return percentile(of: distances.sorted(), at: 0.2)
+    }
+
+    private func computeStraightness(_ path: [TracePoint]) -> Double? {
+        guard path.count > 1, let pathLength = computePathLength(path), pathLength > 0 else {
+            return nil
+        }
+        let direct = distance(from: path[0], to: path[path.count - 1])
+        return max(0, min(1, direct / pathLength))
+    }
+
+    private func computeTurnJitter(_ path: [TracePoint]) -> Double? {
+        guard path.count > 2 else {
+            return nil
+        }
+        var turns = [Double]()
+        turns.reserveCapacity(path.count - 2)
+        for index in 1..<(path.count - 1) {
+            let previous = path[index - 1]
+            let current = path[index]
+            let next = path[index + 1]
+            let a1 = atan2(current.y - previous.y, current.x - previous.x)
+            let a2 = atan2(next.y - current.y, next.x - current.x)
+            turns.append(abs(normalizeAngle(a2 - a1)) / Double.pi)
+        }
+        return averageOrNil(turns)
+    }
+
+    private func computeOvershootSignal(path: [TracePoint], target: TracePoint?, targetRadiusPx: Double?) -> Double? {
+        guard let target, path.count > 2 else {
+            return nil
+        }
+        let threshold = max(targetRadiusPx ?? 0, 4)
+        let distances = path.map { distance(from: $0, to: target) }
+        guard let entryIndex = distances.firstIndex(where: { $0 <= threshold }) else {
+            return 0
+        }
+        let suffix = distances.suffix(from: entryIndex)
+        guard let maxAfterEntry = suffix.max(), let finalDistance = distances.last else {
+            return 0
+        }
+        return maxAfterEntry > threshold * 1.7 && finalDistance <= threshold * 1.15 ? 1 : 0
+    }
+
+    private func behaviorBlend(for samples: [TraceSample]) -> BehaviorBlend {
+        guard !samples.isEmpty else {
+            return BehaviorBlend(normal: 1).normalized()
+        }
+        var idle = 0.0
+        var normal = 0.0
+        var flow = 0.0
+        var lowEfficiency = 0.0
+        for sample in samples {
+            switch sample.behaviorMode {
+            case .idle:
+                idle += 1
+            case .normal:
+                normal += 1
+            case .flow:
+                flow += 1
+            case .lowEfficiency:
+                lowEfficiency += 1
+            }
+        }
+        return BehaviorBlend(
+            idle: idle,
+            normal: normal,
+            flow: flow,
+            lowEfficiency: lowEfficiency
+        ).normalized()
+    }
+
+    private func deriveFlavor(from samples: [TraceSample], behaviorBlend: BehaviorBlend) -> MotionFlavor {
+        let explicit = samples.compactMap(\.flavor)
+        if let winner = mostFrequent(explicit) {
+            return winner
+        }
+        let weights = behaviorBlend.normalized()
+        if weights.idle >= max(weights.normal, weights.flow, weights.lowEfficiency) {
+            return .idle
+        }
+        if weights.flow >= max(weights.idle, weights.normal, weights.lowEfficiency) {
+            return .hurried
+        }
+        let straightness = averageOrNil(samples.compactMap(\.straightness)) ?? 0.9
+        let jitter = averageOrNil(samples.compactMap(\.turnJitter)) ?? 0.1
+        return straightness >= 0.91 && jitter <= 0.18 ? .smooth : .gentle
+    }
+
+    private func deriveWind(from samples: [TraceSample]) -> Double? {
+        let jitter = averageOrNil(samples.compactMap(\.turnJitter))
+        let hesitation = deriveHesitationProbability(from: samples)
+        guard jitter != nil || hesitation != nil else {
+            return nil
+        }
+        return clamp(2.2 + (jitter ?? 0.12) * 4.8 + (hesitation ?? 0.16) * 1.6, min: 1.2, max: 8.8)
+    }
+
+    private func deriveGravity(from samples: [TraceSample]) -> Double? {
+        let straightness = averageOrNil(samples.compactMap(\.straightness))
+        let speed = averageOrNil(samples.compactMap(\.speedPxS))
+        guard straightness != nil || speed != nil else {
+            return nil
+        }
+        return clamp(7.4 + (straightness ?? 0.9) * 2.0 + min((speed ?? 320) / 420, 2.2), min: 6.0, max: 13.5)
+    }
+
+    private func deriveMaxStep(from samples: [TraceSample]) -> Double? {
+        guard let speed = averageOrNil(samples.compactMap(\.speedPxS)) else {
+            return nil
+        }
+        return clamp(speed / 72, min: 4.0, max: 18.0)
+    }
+
+    private func deriveJitter(from samples: [TraceSample]) -> Double? {
+        guard let turnJitter = averageOrNil(samples.compactMap(\.turnJitter)) else {
+            return nil
+        }
+        return clamp(0.03 + turnJitter * 0.75, min: 0.02, max: 0.5)
+    }
+
+    private func deriveControlSpread(from samples: [TraceSample]) -> Double? {
+        let turnJitter = averageOrNil(samples.compactMap(\.turnJitter))
+        let targetSpread = deriveTargetSpread(from: samples)
+        guard turnJitter != nil || targetSpread != nil else {
+            return nil
+        }
+        return clamp(18 + (turnJitter ?? 0.12) * 42 + (targetSpread ?? 4) * 1.8, min: 12, max: 120)
+    }
+
+    private func deriveTargetSpread(from samples: [TraceSample]) -> Double? {
+        let values = samples.compactMap(\.targetSpreadPx).filter { $0 > 0 }
+        guard !values.isEmpty else {
+            return nil
+        }
+        let sorted = values.sorted()
+        return clamp(max(percentile(of: sorted, at: 0.7), mean(sorted) * 0.92), min: 1.5, max: 48)
+    }
+
+    private func deriveHesitationProbability(from samples: [TraceSample]) -> Double? {
+        guard !samples.isEmpty else {
+            return nil
+        }
+        let hits = Double(samples.filter { !$0.hesitationMs.isEmpty }.count)
+        return boundedProbability(hits / Double(samples.count))
+    }
+
+    private func deriveSettleRange(from samples: [TraceSample]) -> IntRange? {
+        let baseValues = samples.compactMap(\.targetSpreadPx).map { max(24, $0 * 6.2) }
+        let hesitationTail = samples.flatMap(\.hesitationMs).map { max(18, $0 * 0.42) }
+        let settleValues = baseValues + hesitationTail
+        guard !settleValues.isEmpty else {
+            return nil
+        }
+        return stochasticIntRange(values: settleValues, minimumSpan: 16, floor: 20, ceil: 260)
+    }
+
+    private func classifyBehavior(
+        speedPxS: Double?,
+        hesitationMs: [Double],
+        clickHoldMs: [Double],
+        dwellMs: [Double],
+        interKeyMs: [Double],
+        straightness: Double?,
+        turnJitter: Double?,
+        targetSpreadPx: Double?
+    ) -> HumanBehaviorMode {
+        let hesitationMean = averageOrNil(hesitationMs) ?? 0
+        let clickHoldMean = averageOrNil(clickHoldMs) ?? 0
+        let dwellMean = averageOrNil(dwellMs) ?? 0
+        let interKeyMean = averageOrNil(interKeyMs) ?? 0
+        let straightness = straightness ?? 0.9
+        let turnJitter = turnJitter ?? 0.1
+        let targetSpread = targetSpreadPx ?? 0
+
+        if let speedPxS, speedPxS >= 640, hesitationMean < 76, clickHoldMean < 84, interKeyMean < 118, straightness > 0.9, turnJitter < 0.24 {
+            return .flow
+        }
+        if dwellMean >= 320 || interKeyMean >= 220 || clickHoldMean >= 160 || (speedPxS ?? 0) < 150 && hesitationMean >= 120 {
+            return .idle
+        }
+        if hesitationMean >= 150 || turnJitter >= 0.4 || straightness <= 0.82 || targetSpread >= 18 || ((speedPxS ?? 280) < 210 && straightness < 0.88) {
+            return .lowEfficiency
+        }
+        return .normal
+    }
+
+    private func stochasticIntRange(values: [Int], minimumSpan: Int, floor lowerBound: Int, ceil upperBound: Int) -> IntRange? {
+        stochasticIntRange(values: values.map(Double.init), minimumSpan: minimumSpan, floor: lowerBound, ceil: upperBound)
+    }
+
+    private func stochasticIntRange(values: [Double], minimumSpan: Int, floor lowerBound: Int, ceil upperBound: Int) -> IntRange? {
+        guard let range = stochasticDoubleRange(
+            values: values,
+            floor: Double(lowerBound),
+            ceil: Double(upperBound),
+            minimumFractionalSpan: 0.16,
+            absoluteMinimumSpan: Double(minimumSpan)
+        ) else {
+            return nil
+        }
+        let minValue = max(lowerBound, Int(floor(range.min)))
+        let maxValue = min(upperBound, max(minValue + minimumSpan, Int(ceil(range.max))))
+        return IntRange(min: minValue, max: maxValue)
+    }
+
+    private func stochasticDoubleRange(
+        values: [Double],
+        floor lowerBound: Double,
+        ceil upperBound: Double,
+        minimumFractionalSpan: Double,
+        absoluteMinimumSpan: Double
+    ) -> DoubleRange? {
+        let filtered = values.filter { $0.isFinite && $0 > 0 }.sorted()
+        guard !filtered.isEmpty else {
+            return nil
+        }
+
+        let low = percentile(of: filtered, at: 0.18)
+        let high = percentile(of: filtered, at: 0.86)
+        let center = mean(filtered)
+        let minimumSpan = max(abs(center) * minimumFractionalSpan, absoluteMinimumSpan)
+
+        var minValue = max(lowerBound, min(low, center - minimumSpan / 2))
+        var maxValue = min(upperBound, max(high, center + minimumSpan / 2))
+        if maxValue - minValue < minimumSpan {
+            let midpoint = clamp(center, min: lowerBound + minimumSpan / 2, max: upperBound - minimumSpan / 2)
+            minValue = max(lowerBound, midpoint - minimumSpan / 2)
+            maxValue = min(upperBound, midpoint + minimumSpan / 2)
+        }
+
+        if maxValue <= minValue {
+            maxValue = min(upperBound, minValue + minimumSpan)
+        }
+        return DoubleRange(min: minValue, max: maxValue)
+    }
+
+    private func percentile(of sortedValues: [Double], at percentile: Double) -> Double {
+        guard !sortedValues.isEmpty else {
+            return 0
+        }
+        if sortedValues.count == 1 {
+            return sortedValues[0]
+        }
+        let clamped = clamp(percentile, min: 0, max: 1)
+        let index = clamped * Double(sortedValues.count - 1)
+        let lowerIndex = Int(floor(index))
+        let upperIndex = Int(ceil(index))
+        guard lowerIndex != upperIndex else {
+            return sortedValues[lowerIndex]
+        }
+        let fraction = index - Double(lowerIndex)
+        return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * fraction
+    }
+
+    private func averageOrNil(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else {
+            return nil
+        }
+        return mean(values)
+    }
+
+    private func mostFrequent<T: Hashable>(_ values: [T]) -> T? {
+        guard !values.isEmpty else {
+            return nil
+        }
+        var counts = [T: Int]()
+        for value in values {
+            counts[value, default: 0] += 1
+        }
+        return counts.max { lhs, rhs in
+            if lhs.value == rhs.value {
+                return String(describing: lhs.key) > String(describing: rhs.key)
+            }
+            return lhs.value < rhs.value
+        }?.key
+    }
+
+    private func sumPositive(_ values: [Double]) -> Double? {
+        let filtered = values.filter { $0 > 0 }
+        guard !filtered.isEmpty else {
+            return nil
+        }
+        return filtered.reduce(0, +)
+    }
+
+    private func positive(_ value: Double?) -> Double? {
+        guard let value, value > 0, value.isFinite else {
+            return nil
+        }
+        return value
+    }
+
+    private func boundedUnit(_ value: Double?) -> Double? {
+        guard let value else {
+            return nil
+        }
+        return clamp(value, min: 0, max: 1)
+    }
+
+    private func boundedProbability(_ value: Double?) -> Double? {
+        guard let value else {
+            return nil
+        }
+        return clamp(value, min: 0, max: 1)
+    }
+
+    private func distance(from lhs: TracePoint, to rhs: TracePoint) -> Double {
+        hypot(rhs.x - lhs.x, rhs.y - lhs.y)
+    }
+
+    private func normalizeAngle(_ value: Double) -> Double {
+        var result = value
+        while result > Double.pi {
+            result -= Double.pi * 2
+        }
+        while result < -Double.pi {
+            result += Double.pi * 2
+        }
+        return result
+    }
+
+    private func clamp<T: Comparable>(_ value: T, min lowerBound: T, max upperBound: T) -> T {
+        Swift.max(lowerBound, Swift.min(upperBound, value))
     }
 
     private func scalarInt(_ sql: String) throws -> Int {
@@ -704,6 +1334,23 @@ private struct TemplateGroup {
     let taskId: String?
     let actionType: String
     let sampleSize: Int
+}
+
+private struct TraceSample {
+    let pointCount: Int
+    let speedPxS: Double?
+    let hesitationMs: [Double]
+    let clickHoldMs: [Double]
+    let interClickMs: [Double]
+    let dwellMs: [Double]
+    let interKeyMs: [Double]
+    let straightness: Double?
+    let turnJitter: Double?
+    let targetSpreadPx: Double?
+    let overshootSignal: Double?
+    let detourSignal: Double?
+    let behaviorMode: HumanBehaviorMode
+    let flavor: MotionFlavor?
 }
 
 private extension NSLock {

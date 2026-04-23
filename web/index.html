@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">VirtualHID Capture Lab</p>
           <h1>用户行为 vs 虚拟 HID 对比采集</h1>
-          <p class="hero-copy">复杂 DOM、Shadow DOM、iframe、拖拽、滚动和输入场景，用于采集鼠标键盘行为并生成拟人化参数建议。</p>
+          <p class="hero-copy">复杂 DOM、隔离组件（Shadow DOM）、iframe、拖拽、滚动和输入场景，用于采集鼠标键盘行为并生成拟人化参数建议。</p>
         </div>
         <div class="hero-actions">
           <button id="start-user">开始用户采集</button>
@@ -36,7 +36,7 @@
               <label><input id="toggle-persistent" type="checkbox" checked /> 持久轨迹</label>
               <label><input id="toggle-tail" type="checkbox" checked /> 尾气轨迹</label>
               <label><input id="toggle-effects" type="checkbox" checked /> 事件特效</label>
-              <label><input id="toggle-dry-run" type="checkbox" /> HID dryRun</label>
+              <label title="只生成事件计划和页面预览，不真正向系统投递鼠标键盘事件"><input id="toggle-dry-run" type="checkbox" /> HID dryRun</label>
             </div>
           </div>
 
@@ -49,8 +49,9 @@
             <section class="target-card primary-target" data-sig="demo-primary">
               <span>复杂按钮</span>
               <button id="morph-button" class="morph-button">Hover / Click / Double</button>
-              <button id="split-left" class="split">左半区</button>
-              <button id="split-right" class="split">右半区</button>
+              <button id="split-left" class="split">左侧按钮</button>
+              <button id="split-right" class="split">右侧按钮</button>
+              <p class="mini-note">这两个相邻目标用来测试切换命中、左右偏移和短距离移动稳定性。</p>
             </section>
 
             <section class="target-card form-target" data-sig="demo-form">
@@ -68,11 +69,12 @@
               <div class="scroll-list"></div>
             </section>
 
-            <div id="draggable" class="draggable" draggable="true" data-sig="demo-drag">Drag Me</div>
-            <div id="drop-zone" class="drop-zone">Drop Zone</div>
+            <div id="draggable" class="draggable" draggable="true" data-sig="demo-drag">拖动源</div>
+            <div id="drop-zone" class="drop-zone">拖放落点区</div>
 
             <section class="target-card dom-target">
-              <h3>Shadow DOM</h3>
+              <h3>隔离组件区（Shadow DOM）</h3>
+              <p class="mini-note">这里面的按钮和输入框被包在浏览器的隔离 DOM 里，用来测试跨组件边界采集。</p>
               <div id="shadow-host"></div>
             </section>
           </div>
@@ -87,6 +89,10 @@
           <section class="card">
             <h2>采集与指标</h2>
             <div id="summary" class="summary"></div>
+          </section>
+          <section class="card">
+            <h2>事件覆盖</h2>
+            <div id="coverage" class="coverage"></div>
           </section>
           <section class="card">
             <h2>对比结果</h2>

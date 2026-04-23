@@ -298,7 +298,15 @@ public final class ControlService {
         }
 
         let observed = supervisor.observer.event(id: eventId)
-        let point = observed?.point.map { TracePoint(x: $0.x, y: $0.y) } ?? parseOptionalPoint(params["point"] as? [String: Any])
+        let payloadOverride = parseTracePayload(
+            eventId: eventId,
+            eventType: observed?.type ?? (params["actionType"] as? String) ?? "click",
+            params: params,
+            observed: observed
+        )
+        let point = payloadOverride?.point
+            ?? observed?.point.map { TracePoint(x: $0.x, y: $0.y) }
+            ?? parseOptionalPoint(params["point"] as? [String: Any])
         let keyCode = observed?.keyCode ?? UInt16(number(params["keyCode"]) ?? 0)
         let eventType = observed?.type ?? (params["actionType"] as? String) ?? "click"
         let ts = observed?.ts ?? Int64(Date().timeIntervalSince1970 * 1000)
@@ -312,7 +320,9 @@ public final class ControlService {
             role: params["role"] as? String,
             host: host,
             taskId: (params["taskId"] as? String) ?? (params["task_id"] as? String),
-            stage: params["stage"] as? String
+            stage: params["stage"] as? String,
+            actionTypeOverride: params["traceType"] as? String,
+            payloadOverride: payloadOverride
         )
         return [
             "committed": result.committed,
@@ -423,26 +433,30 @@ public final class ControlService {
             guard let type = primitive["type"] as? String else {
                 throw ControlServerError.coded("E_UNKNOWN", "primitive.type is required")
             }
+            let profile = try primitiveProfile(from: primitive)
             switch type {
             case "move":
                 return .move(
                     to: try point(primitive["to"] as? [String: Any], name: "to"),
-                    via: trajectoryStyle(primitive["via"] as? String),
-                    durationMs: intValue(primitive["durationMs"])
+                    via: try trajectoryStyle(primitive["via"], fallbackMotionProfile: profile?.motionProfile),
+                    durationMs: intValue(primitive["durationMs"]),
+                    profile: profile
                 )
             case "click":
                 return .click(
                     at: try point(primitive["at"] as? [String: Any], name: "at"),
                     button: mouseButton(primitive["button"] as? String),
                     holdMs: intValue(primitive["holdMs"]),
-                    count: intValue(primitive["count"]) ?? 1
+                    count: intValue(primitive["count"]) ?? 1,
+                    profile: profile
                 )
             case "drag":
                 return .drag(
                     from: try point(primitive["from"] as? [String: Any], name: "from"),
                     to: try point(primitive["to"] as? [String: Any], name: "to"),
                     button: mouseButton(primitive["button"] as? String),
-                    via: trajectoryStyle(primitive["via"] as? String)
+                    via: try trajectoryStyle(primitive["via"], fallbackMotionProfile: profile?.motionProfile),
+                    profile: profile
                 )
             case "scroll":
                 return .scroll(
@@ -454,11 +468,16 @@ public final class ControlService {
             case "type":
                 return .type(
                     text: primitive["text"] as? String ?? "",
-                    layout: KeyboardLayout(rawValue: primitive["layout"] as? String ?? "us") ?? .us
+                    layout: KeyboardLayout(rawValue: primitive["layout"] as? String ?? "us") ?? .us,
+                    profile: profile
                 )
             case "key":
                 let keyCode = UInt16(number(primitive["keyCode"]) ?? number(primitive["virtualKey"]) ?? 0)
-                return .key(chord: KeyChord(keyCode: keyCode), holdMs: intValue(primitive["holdMs"]))
+                return .key(
+                    chord: KeyChord(keyCode: keyCode),
+                    holdMs: intValue(primitive["holdMs"]),
+                    profile: profile
+                )
             default:
                 throw ControlServerError.coded("E_UNKNOWN", "unsupported primitive type \(type)")
             }
@@ -483,15 +502,50 @@ public final class ControlService {
                 return primitive
             }
 
-            let reference = TemplateReference(id: "\(template.host):\(template.elementSig):\(template.actionType)")
+            let motionProfile = decodedMotionProfile(from: template)
+            let reference = TemplateReference(
+                id: "\(template.host):\(template.elementSig):\(template.actionType)",
+                motionProfile: motionProfile
+            )
             applied = true
             templateIds.append(reference.id)
             switch primitive {
-            case .move(let to, _, let durationMs):
-                return .move(to: to, via: .profile(reference), durationMs: durationMs)
-            case .drag(let from, let to, let button, _):
-                return .drag(from: from, to: to, button: button, via: .profile(reference))
-            default:
+            case .move(let to, _, let durationMs, let profile):
+                return .move(
+                    to: to,
+                    via: .profile(reference),
+                    durationMs: durationMs,
+                    profile: profile
+                )
+            case .click(let at, let button, let holdMs, let count, let profile):
+                return .click(
+                    at: at,
+                    button: button,
+                    holdMs: holdMs,
+                    count: count,
+                    profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
+                )
+            case .drag(let from, let to, let button, _, let profile):
+                return .drag(
+                    from: from,
+                    to: to,
+                    button: button,
+                    via: .profile(reference),
+                    profile: profile
+                )
+            case .type(let text, let layout, let profile):
+                return .type(
+                    text: text,
+                    layout: layout,
+                    profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
+                )
+            case .key(let chord, let holdMs, let profile):
+                return .key(
+                    chord: chord,
+                    holdMs: holdMs,
+                    profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
+                )
+            case .scroll:
                 return primitive
             }
         }
@@ -688,17 +742,61 @@ private func parseOptionalPoint(_ object: [String: Any]?) -> TracePoint? {
     return TracePoint(x: x, y: y)
 }
 
-private func trajectoryStyle(_ rawValue: String?) -> TrajectoryStyle {
-    switch rawValue {
-    case "linear":
-        return .linear
-    case "bezier":
-        return .bezier
-    case "profile":
-        return .profile(TemplateReference(id: "request-profile"))
-    default:
-        return .wind
+private func parseTracePayload(
+    eventId: String,
+    eventType: String,
+    params: [String: Any],
+    observed: ObservedEvent?
+) -> TracePayload? {
+    guard let payloadObject = params["payload"] as? [String: Any] else {
+        return nil
     }
+
+    let payloadType = payloadObject["type"] as? String ?? eventType
+    let payloadPoint = observed?.point.map { TracePoint(x: $0.x, y: $0.y) }
+        ?? parseOptionalPoint(payloadObject["point"] as? [String: Any])
+        ?? parseOptionalPoint(params["point"] as? [String: Any])
+    let payloadKeyCode = observed?.keyCode
+        ?? UInt16(number(payloadObject["keyCode"]) ?? number(params["keyCode"]) ?? 0)
+
+    return TracePayload(
+        eventId: eventId,
+        type: payloadType,
+        point: payloadPoint,
+        keyCode: payloadKeyCode == 0 ? nil : payloadKeyCode,
+        points: parseTracePoints(payloadObject["points"]),
+        origin: parseOptionalPoint(payloadObject["origin"] as? [String: Any]),
+        targetPoint: parseOptionalPoint(payloadObject["targetPoint"] as? [String: Any]),
+        targetRadiusPx: number(payloadObject["targetRadiusPx"]),
+        landingErrorPx: number(payloadObject["landingErrorPx"]),
+        durationMs: number(payloadObject["durationMs"]),
+        segmentMs: parseDoubleArray(payloadObject["segmentMs"]),
+        hesitationMs: parseDoubleArray(payloadObject["hesitationMs"]),
+        clickHoldMs: parseDoubleArray(payloadObject["clickHoldMs"]),
+        interClickMs: parseDoubleArray(payloadObject["interClickMs"]),
+        dwellMs: parseDoubleArray(payloadObject["dwellMs"]),
+        interKeyMs: parseDoubleArray(payloadObject["interKeyMs"]),
+        behaviorMode: (payloadObject["behaviorMode"] as? String).flatMap(HumanBehaviorMode.init(rawValue:)),
+        flavor: (payloadObject["flavor"] as? String).flatMap(MotionFlavor.init(rawValue:)),
+        straightness: number(payloadObject["straightness"]),
+        turnJitter: number(payloadObject["turnJitter"]),
+        pathLengthPx: number(payloadObject["pathLengthPx"]),
+        speedPxS: number(payloadObject["speedPxS"])
+    )
+}
+
+private func parseTracePoints(_ value: Any?) -> [TracePoint] {
+    guard let objects = value as? [[String: Any]] else {
+        return []
+    }
+    return objects.compactMap(parseOptionalPoint)
+}
+
+private func parseDoubleArray(_ value: Any?) -> [Double] {
+    guard let values = value as? [Any] else {
+        return []
+    }
+    return values.compactMap(number)
 }
 
 private func mouseButton(_ rawValue: String?) -> MouseButton {
@@ -707,6 +805,277 @@ private func mouseButton(_ rawValue: String?) -> MouseButton {
 
 private func scrollStyle(_ rawValue: String?) -> ScrollStyle {
     ScrollStyle(rawValue: rawValue ?? "wheel") ?? .wheel
+}
+
+private func optionalCGPoint(_ value: Any?, name: String) throws -> CGPoint? {
+    guard let value else {
+        return nil
+    }
+    guard let object = value as? [String: Any] else {
+        throw ControlServerError.coded("E_UNKNOWN", "point \(name) requires x and y")
+    }
+    return try point(object, name: name)
+}
+
+private func trajectoryStyle(_ rawValue: Any?, fallbackMotionProfile: MotionProfile?) throws -> TrajectoryStyle {
+    if let object = rawValue as? [String: Any] {
+        let style = (object["style"] as? String) ?? (object["type"] as? String) ?? (object["mode"] as? String)
+        let requestMotion = try parseMotionProfile(sources: [object["motion"], object["motionProfile"], object])
+        let mergedMotion = fallbackMotionProfile?.merging(requestMotion) ?? requestMotion ?? fallbackMotionProfile
+        if style?.lowercased() == "profile" {
+            return .profile(
+                TemplateReference(
+                    id: (object["templateId"] as? String) ?? (object["profileId"] as? String) ?? (object["id"] as? String) ?? "request-profile",
+                    motionProfile: mergedMotion
+                )
+            )
+        }
+        return trajectoryStyle(style, fallbackMotionProfile: mergedMotion)
+    }
+    return trajectoryStyle(rawValue as? String, fallbackMotionProfile: fallbackMotionProfile)
+}
+
+private func trajectoryStyle(_ rawValue: String?, fallbackMotionProfile: MotionProfile?) -> TrajectoryStyle {
+    switch rawValue?.lowercased() {
+    case "linear":
+        return .linear
+    case "bezier":
+        return .bezier
+    case "profile":
+        return .profile(TemplateReference(id: "request-profile", motionProfile: fallbackMotionProfile))
+    default:
+        return .wind
+    }
+}
+
+private func primitiveProfile(from primitive: [String: Any]) throws -> PrimitiveProfile? {
+    let profileObject = primitive["profile"] as? [String: Any]
+    let origin = try optionalCGPoint(profileObject?["origin"] ?? primitive["origin"], name: "origin")
+    let landingZone = try parseLandingZone(
+        profileObject?["landingZone"] ?? profileObject?["landing_zone"] ?? primitive["landingZone"] ?? primitive["landing_zone"],
+        fallback: [
+            "center": profileObject?["landingCenter"] ?? primitive["landingCenter"],
+            "width": profileObject?["landingWidth"] ?? primitive["landingWidth"],
+            "height": profileObject?["landingHeight"] ?? primitive["landingHeight"],
+            "radius": profileObject?["landingRadius"] ?? primitive["landingRadius"]
+        ]
+    )
+    let motionProfile = try parseMotionProfile(
+        sources: [
+            primitive["via"],
+            primitive["motion"],
+            primitive["motionProfile"],
+            primitive,
+            profileObject?["motion"],
+            profileObject?["motionProfile"],
+            profileObject
+        ]
+    )
+    if origin == nil, landingZone == nil, motionProfile == nil {
+        return nil
+    }
+    return PrimitiveProfile(origin: origin, landingZone: landingZone, motionProfile: motionProfile)
+}
+
+private func parseMotionProfile(sources: [Any?]) throws -> MotionProfile? {
+    var profile: MotionProfile?
+    for source in sources {
+        guard let parsed = try parseMotionProfile(source) else {
+            continue
+        }
+        profile = profile?.merging(parsed) ?? parsed
+    }
+    return profile
+}
+
+private func parseMotionProfile(_ value: Any?) throws -> MotionProfile? {
+    guard let object = value as? [String: Any] else {
+        return nil
+    }
+    var profile: MotionProfile?
+    if let nested = object["motion"] as? [String: Any], let parsed = try parseDirectMotionProfile(nested) {
+        profile = parsed
+    }
+    if let nested = object["motionProfile"] as? [String: Any], let parsed = try parseDirectMotionProfile(nested) {
+        profile = profile?.merging(parsed) ?? parsed
+    }
+    if let parsed = try parseDirectMotionProfile(object) {
+        profile = profile?.merging(parsed) ?? parsed
+    }
+    return profile
+}
+
+private func parseDirectMotionProfile(_ object: [String: Any]) throws -> MotionProfile? {
+    let flavor = try parseMotionFlavor(object["flavor"] ?? object["trajectoryFlavor"])
+    let behaviorBlend = try parseBehaviorBlend(
+        object["behaviorBlend"] ?? object["behaviorMode"] ?? object["behavior"]
+    )
+    let profile = MotionProfile(
+        flavor: flavor,
+        behaviorBlend: behaviorBlend,
+        moveSpeedPxS: try parseDoubleRange(object["moveSpeedPxS"] ?? object["speedPxS"], name: "moveSpeedPxS"),
+        dragSpeedPxS: try parseDoubleRange(object["dragSpeedPxS"], name: "dragSpeedPxS"),
+        pointCount: try parseIntRange(object["pointCount"], name: "pointCount"),
+        overshootProbability: number(object["overshootProbability"]),
+        wind: number(object["wind"]),
+        gravity: number(object["gravity"]),
+        maxStep: number(object["maxStep"]),
+        jitter: number(object["jitter"]),
+        controlSpread: number(object["controlSpread"]),
+        targetSpreadPx: number(object["targetSpreadPx"]),
+        hesitationProbability: number(object["hesitationProbability"]),
+        hesitationMs: try parseIntRange(object["hesitationMs"], name: "hesitationMs"),
+        settleMs: try parseIntRange(object["settleMs"], name: "settleMs"),
+        detourProbability: number(object["detourProbability"]),
+        clickHoldMs: try parseIntRange(object["clickHoldMs"], name: "clickHoldMs"),
+        interClickMs: try parseIntRange(object["interClickMs"], name: "interClickMs"),
+        dwellMsMean: number(object["dwellMsMean"]),
+        interKeyMsMean: number(object["interKeyMsMean"]),
+        straightnessMean: number(object["straightnessMean"]),
+        turnJitterMean: number(object["turnJitterMean"])
+    )
+    if profile == MotionProfile() {
+        return nil
+    }
+    return profile
+}
+
+private func parseMotionFlavor(_ value: Any?) throws -> MotionFlavor? {
+    guard let raw = value as? String else {
+        return nil
+    }
+    let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard let flavor = MotionFlavor(rawValue: normalized) else {
+        throw ControlServerError.coded("E_UNKNOWN", "unsupported motion flavor \(raw)")
+    }
+    return flavor
+}
+
+private func parseBehaviorBlend(_ value: Any?) throws -> BehaviorBlend? {
+    if let raw = value as? String {
+        guard let mode = normalizedBehaviorMode(raw) else {
+            throw ControlServerError.coded("E_UNKNOWN", "unsupported behavior mode \(raw)")
+        }
+        return behaviorBlend(for: mode)
+    }
+    guard let object = value as? [String: Any] else {
+        return nil
+    }
+    let blend = BehaviorBlend(
+        idle: number(object["idle"]) ?? 0,
+        normal: number(object["normal"]) ?? 0,
+        flow: number(object["flow"]) ?? 0,
+        lowEfficiency: number(object["lowEfficiency"]) ?? number(object["low_efficiency"]) ?? number(object["low-efficiency"]) ?? 0
+    )
+    return blend == BehaviorBlend(idle: 0, normal: 0, flow: 0, lowEfficiency: 0) ? nil : blend
+}
+
+private func normalizedBehaviorMode(_ raw: String) -> HumanBehaviorMode? {
+    HumanBehaviorMode(
+        rawValue: raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+    )
+}
+
+private func behaviorBlend(for mode: HumanBehaviorMode) -> BehaviorBlend {
+    switch mode {
+    case .idle:
+        return BehaviorBlend(idle: 1, normal: 0, flow: 0, lowEfficiency: 0)
+    case .normal:
+        return BehaviorBlend(idle: 0, normal: 1, flow: 0, lowEfficiency: 0)
+    case .flow:
+        return BehaviorBlend(idle: 0, normal: 0, flow: 1, lowEfficiency: 0)
+    case .lowEfficiency:
+        return BehaviorBlend(idle: 0, normal: 0, flow: 0, lowEfficiency: 1)
+    }
+}
+
+private func parseDoubleRange(_ value: Any?, name: String) throws -> DoubleRange? {
+    if let scalar = number(value) {
+        return DoubleRange(min: scalar, max: scalar)
+    }
+    if let array = value as? [Any], array.count == 2,
+       let first = number(array[0]),
+       let second = number(array[1]) {
+        return DoubleRange(min: min(first, second), max: max(first, second))
+    }
+    guard let object = value as? [String: Any],
+          let minValue = number(object["min"] ?? object["lower"]),
+          let maxValue = number(object["max"] ?? object["upper"]) else {
+        if value == nil {
+            return nil
+        }
+        throw ControlServerError.coded("E_UNKNOWN", "\(name) requires min/max")
+    }
+    return DoubleRange(min: Swift.min(minValue, maxValue), max: Swift.max(minValue, maxValue))
+}
+
+private func parseIntRange(_ value: Any?, name: String) throws -> IntRange? {
+    if let scalar = intValue(value) {
+        return IntRange(min: scalar, max: scalar)
+    }
+    if let array = value as? [Any], array.count == 2,
+       let first = intValue(array[0]),
+       let second = intValue(array[1]) {
+        return IntRange(min: min(first, second), max: max(first, second))
+    }
+    guard let object = value as? [String: Any],
+          let minValue = intValue(object["min"] ?? object["lower"]),
+          let maxValue = intValue(object["max"] ?? object["upper"]) else {
+        if value == nil {
+            return nil
+        }
+        throw ControlServerError.coded("E_UNKNOWN", "\(name) requires min/max")
+    }
+    return IntRange(min: Swift.min(minValue, maxValue), max: Swift.max(minValue, maxValue))
+}
+
+private func parseLandingZone(_ value: Any?, fallback: [String: Any?] = [:]) throws -> LandingZone? {
+    let object = value as? [String: Any]
+    let center = try optionalCGPoint(object?["center"] ?? fallback["center"] ?? nil, name: "landingZone.center")
+    let width = number(object?["width"] ?? object?["w"] ?? fallback["width"] ?? nil)
+    let height = number(object?["height"] ?? object?["h"] ?? fallback["height"] ?? nil)
+    let radius = number(object?["radius"] ?? object?["r"] ?? fallback["radius"] ?? nil)
+    if center == nil, width == nil, height == nil, radius == nil {
+        return nil
+    }
+    return LandingZone(center: center, width: width, height: height, radius: radius)
+}
+
+private func parseOptionalCGPoint(_ object: [String: Any]?) -> CGPoint? {
+    guard let object, let x = number(object["x"]), let y = number(object["y"]) else {
+        return nil
+    }
+    return CGPoint(x: x, y: y)
+}
+
+private func mergedPrimitiveProfile(_ profile: PrimitiveProfile?, motionProfile: MotionProfile?) -> PrimitiveProfile? {
+    guard profile != nil || motionProfile != nil else {
+        return nil
+    }
+    let mergedMotion = motionProfile?.merging(profile?.motionProfile) ?? profile?.motionProfile
+    return PrimitiveProfile(
+        origin: profile?.origin,
+        landingZone: profile?.landingZone,
+        motionProfile: mergedMotion
+    )
+}
+
+private func decodedMotionProfile(from template: ProfileTemplate) -> MotionProfile? {
+    let data = Data(template.paramsJSON.utf8)
+    let decoder = JSONDecoder()
+    if let learned = try? decoder.decode(LearnedMotionTemplate.self, from: data) {
+        return learned.motion
+    }
+    if let direct = try? decoder.decode(MotionProfile.self, from: data) {
+        return direct
+    }
+    guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        return nil
+    }
+    return try? parseMotionProfile(sources: [object["motion"], object["motionProfile"], object])
 }
 
 private extension NSLock {
