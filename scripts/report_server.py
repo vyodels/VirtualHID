@@ -5,13 +5,16 @@ import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+from humanization_analysis import analyze_history, append_history_record, load_history
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 RESULTS = ROOT / "results"
 REPORT_PATH = RESULTS / "browser-report.json"
 CURSOR_PATH = RESULTS / "cursor-command.json"
+ANALYSIS_HISTORY_PATH = RESULTS / "humanization-history.jsonl"
 HID_TIMEOUT_SECONDS = 5.0
 
 
@@ -43,7 +46,8 @@ def call_hid_daemon(method, params):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        path = urlsplit(self.path).path
+        parsed = urlsplit(self.path)
+        path = parsed.path
         if path in ("/", "/index.html"):
             self.serve_file(WEB / "index.html", "text/html; charset=utf-8")
             return
@@ -62,6 +66,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/hid/state":
             self.serve_hid_state()
             return
+        if path == "/analysis/report":
+            self.serve_analysis_report(parsed.query)
+            return
         self.send_error(404)
 
     def do_POST(self):
@@ -71,6 +78,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/hid/rpc":
             self.serve_hid_rpc()
+            return
+        if path == "/analysis/record":
+            self.serve_analysis_record()
             return
         if path != "/report":
             self.send_error(404)
@@ -127,6 +137,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.forward_hid_request(method, params)
 
+    def serve_analysis_record(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            self.send_json_error(400, "E_BAD_REQUEST", "analysis record must be a JSON object")
+            return
+        result = append_history_record(payload, ANALYSIS_HISTORY_PATH)
+        self.send_json(result)
+
+    def serve_analysis_report(self, query):
+        params = parse_qs(query or "")
+        host = first_query_value(params.get("host"))
+        instruction_key = first_query_value(params.get("instructionKey"))
+        report = analyze_history(load_history(ANALYSIS_HISTORY_PATH), host=host, instruction_key=instruction_key)
+        self.send_json(report)
+
     def forward_hid_request(self, method, params):
         try:
             data = call_hid_daemon(method, params)
@@ -144,6 +171,15 @@ class Handler(BaseHTTPRequestHandler):
         payload = {"ok": False, "error": {"code": code, "message": message}}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_json(self, payload):
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
@@ -188,6 +224,12 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def first_query_value(values):
+    if not values:
+        return None
+    return values[0]
 
 
 if __name__ == "__main__":

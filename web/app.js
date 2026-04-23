@@ -31,6 +31,8 @@ const reportEndpoint = `${location.origin}/report`;
 const hidActionEndpoint = `${location.origin}/hid/action`;
 const hidStateEndpoint = `${location.origin}/hid/state`;
 const hidRpcEndpoint = `${location.origin}/hid/rpc`;
+const analysisRecordEndpoint = `${location.origin}/analysis/record`;
+const analysisReportEndpoint = `${location.origin}/analysis/report`;
 const mouseEvents = ['mousemove', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'mouseover', 'mouseenter', 'mouseleave', 'mouseout'];
 const pointerEvents = ['pointermove', 'pointerdown', 'pointerup'];
 const wheelEvents = ['wheel', 'scroll'];
@@ -124,6 +126,7 @@ const learningState = {
   lastRebuild: null,
   daemonState: null,
   daemonTemplates: [],
+  analysisReport: null,
   lastSyncedAt: null,
   error: null,
 };
@@ -133,6 +136,7 @@ window.__virtualHIDLab = {
   getLog: () => structuredClone(eventLog),
   getSummary: () => buildSummary(),
   compare: () => compareRuns(),
+  getAnalysis: () => structuredClone(learningState.analysisReport),
   clear: () => resetState(),
   runVirtualHID: () => runVirtualHIDDemo(),
 };
@@ -159,6 +163,7 @@ function resetState() {
   learningState.lastCommit = null;
   learningState.lastRebuild = null;
   learningState.error = null;
+  learningState.analysisReport = null;
   effectsLayer.innerHTML = '';
   reportState('reset', true);
   renderLearningPanel();
@@ -383,6 +388,10 @@ function compareRuns() {
   syncLearningToDaemon(learned).catch((error) => {
     setHudMessage(`学习回灌失败：${error.message}`, 6000);
   });
+  persistAnalysisRecord(comparison, learned).catch((error) => {
+    learningState.error = error.message;
+    renderLearningPanel();
+  });
   reportState('compare', true);
   return comparison;
 }
@@ -466,6 +475,7 @@ function renderLearningPanel() {
       rebuild: learningState.lastRebuild,
       profiles: learningState.daemonState?.profiles || null,
       templates: learningState.daemonTemplates,
+      analysis: learningState.analysisReport,
       error: learningState.error,
     },
   };
@@ -482,6 +492,11 @@ function learningContextBase() {
     taskId: 'compare-capture',
     stage: 'web-lab',
   };
+}
+
+function analysisInstructionKey() {
+  const base = learningContextBase();
+  return `${base.host}|${base.taskId}|${base.stage}|web-demo-complex-stage`;
 }
 
 async function callHidRpc(method, params = {}) {
@@ -537,6 +552,7 @@ async function syncLearningToDaemon(localHeuristic) {
       learningState.daemonTemplates = compactDaemonTemplates(templatesPayload.result?.templates || []);
       learningState.syncStatus = 'ready';
       learningState.lastSyncedAt = new Date().toISOString();
+      await refreshAnalysisReport();
     } else {
       learningState.syncStatus = commitSummary.errors > 0 ? 'error' : 'skipped';
       if (commitSummary.errors > 0) {
@@ -555,6 +571,28 @@ async function syncLearningToDaemon(localHeuristic) {
   });
 
   return learningSyncPromise;
+}
+
+async function persistAnalysisRecord(comparison, learned) {
+  const record = buildAnalysisRecord(comparison, learned);
+  const response = await fetch(analysisRecordEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+  await readJsonResponse(response, '/analysis/record');
+  await refreshAnalysisReport();
+}
+
+async function refreshAnalysisReport() {
+  const params = new URLSearchParams({
+    host: learningHost(),
+    instructionKey: analysisInstructionKey(),
+  });
+  const response = await fetch(`${analysisReportEndpoint}?${params.toString()}`, { cache: 'no-store' });
+  learningState.analysisReport = await readJsonResponse(response, '/analysis/report');
+  renderLearningPanel();
+  return learningState.analysisReport;
 }
 
 async function commitLearningBatch(commits) {
@@ -844,6 +882,32 @@ function buildLearningCommit(kind, actionType, meta, point, extra, index, payloa
     params.payload = payload;
   }
   return { kind, params };
+}
+
+function buildAnalysisRecord(comparison, learned) {
+  return {
+    version: 1,
+    ts: new Date().toISOString(),
+    runId,
+    host: learningHost(),
+    taskId: learningContextBase().taskId,
+    stage: learningContextBase().stage,
+    instructionKey: analysisInstructionKey(),
+    instructionShape: {
+      expectedEventTypes: expectedEvents.length,
+      userTargets: comparison.user.targetHits.slice(0, 16),
+      hidTargets: comparison.virtual.targetHits.slice(0, 16),
+    },
+    comparison,
+    heuristic: {
+      adaptiveProfile: learned.adaptiveProfile,
+      suggestions: learned.suggestions,
+    },
+    daemonLearning: {
+      profiles: learningState.daemonState?.profiles || null,
+      templates: learningState.daemonTemplates,
+    },
+  };
 }
 
 function collectPathWindow(entries, anchor, predicate, lookbackMs, limit) {
@@ -1814,6 +1878,8 @@ window.addEventListener('pagehide', () => reportState('pagehide', true));
 new ResizeObserver(() => renderTrace()).observe(stage);
 wireComplexDom();
 resetState();
+refreshHidState();
+refreshAnalysisReport().catch(() => {});
 setInterval(pollCursorCommand, 500);
 function animationLoop(now = 0) {
   if (now - lastTraceRenderAt >= 33) {
