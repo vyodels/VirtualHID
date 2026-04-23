@@ -1,11 +1,12 @@
-import AppKit
 import Foundation
+import InjectorCore
 
 struct Configuration {
     let bundleIdentifiers: [String]
     let scenarioNames: [String]
     let resultsDirectory: URL
     let keyInput: String
+    let dryRun: Bool
 }
 
 enum ConfigurationParser {
@@ -21,6 +22,7 @@ enum ConfigurationParser {
         var resultsDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("results", isDirectory: true)
         var keyInput = "abc123"
+        var dryRun = false
 
         var iterator = arguments.dropFirst().makeIterator()
         while let argument = iterator.next() {
@@ -41,6 +43,8 @@ enum ConfigurationParser {
                 if let value = iterator.next() {
                     keyInput = value
                 }
+            case "--dry-run":
+                dryRun = true
             default:
                 continue
             }
@@ -50,31 +54,32 @@ enum ConfigurationParser {
             bundleIdentifiers: bundleIdentifiers,
             scenarioNames: scenarioNames,
             resultsDirectory: resultsDirectory,
-            keyInput: keyInput
+            keyInput: keyInput,
+            dryRun: dryRun
         )
     }
 }
 
-@main
-struct InjectorCLI {
-    static func main() {
-        do {
-            let configuration = ConfigurationParser.parse(arguments: CommandLine.arguments)
-            try FileManager.default.createDirectory(at: configuration.resultsDirectory, withIntermediateDirectories: true)
-            let target = try BrowserResolver.resolve(bundleIdentifiers: configuration.bundleIdentifiers)
-            print("Resolved target: pid=\(target.pid) bundle=\(target.bundleIdentifier) title=\(target.windowTitle ?? "<unknown>") frame=\(NSStringFromRect(target.frame))")
+do {
+    let configuration = ConfigurationParser.parse(arguments: CommandLine.arguments)
+    try FileManager.default.createDirectory(at: configuration.resultsDirectory, withIntermediateDirectories: true)
+    let target = try BrowserResolver.resolve(bundleIdentifiers: configuration.bundleIdentifiers)
+    print("Resolved target: pid=\(target.pid) bundle=\(target.bundleIdentifier) title=\(target.windowTitle ?? "<unknown>") frame=\(NSStringFromRect(target.frame))")
 
-            let runner = ScenarioRunner(target: target, resultsDirectory: configuration.resultsDirectory, keyInput: configuration.keyInput)
-            for scenarioName in configuration.scenarioNames {
-                let result = try runner.run(named: scenarioName)
-                let summaryData = try JSONEncoder.pretty.encode(result)
-                if let summary = String(data: summaryData, encoding: .utf8) {
-                    print(summary)
-                }
-            }
-        } catch {
-            fputs("ERROR: \(error.localizedDescription)\n", stderr)
-            exit(1)
+    let runner = ScenarioRunner(
+        target: target,
+        resultsDirectory: configuration.resultsDirectory,
+        keyInput: configuration.keyInput,
+        dryRun: configuration.dryRun
+    )
+    for scenarioName in configuration.scenarioNames {
+        let result = try runner.run(named: scenarioName)
+        let summaryData = try JSONEncoder.pretty.encode(result)
+        if let summary = String(data: summaryData, encoding: .utf8) {
+            print(summary)
         }
     }
+} catch {
+    fputs("ERROR: \(error.localizedDescription)\n", stderr)
+    exit(1)
 }

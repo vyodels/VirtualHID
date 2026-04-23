@@ -1,0 +1,9 @@
+{
+  "name": "virtualhid-mcp",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2"
+  }
+}

@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import InjectorCore
 
 struct ScenarioResult: Codable {
     let scenario: String
@@ -13,30 +14,20 @@ struct ScenarioResult: Codable {
     let events: [InjectedEvent]
 }
 
-struct InjectedEvent: Codable {
-    let type: String
-    let location: CodablePoint?
-    let key: String?
-    let virtualKey: CGKeyCode?
-    let timestamp: String
-}
-
-struct CodablePoint: Codable {
-    let x: Double
-    let y: Double
-}
-
-struct CodableRect: Codable {
-    let x: Double
-    let y: Double
-    let width: Double
-    let height: Double
-}
-
 struct ScenarioRunner {
     let target: BrowserTarget
     let resultsDirectory: URL
     let keyInput: String
+    let dryRun: Bool
+    let executor: ActionExecutor
+
+    init(target: BrowserTarget, resultsDirectory: URL, keyInput: String, dryRun: Bool) {
+        self.target = target
+        self.resultsDirectory = resultsDirectory
+        self.keyInput = keyInput
+        self.dryRun = dryRun
+        self.executor = ActionExecutor(target: target, defaultPostMode: .global)
+    }
 
     private let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -70,22 +61,17 @@ struct ScenarioRunner {
     private func runMouseMoveClick(active: Bool) throws -> ScenarioResult {
         try prepareFocus(active: active)
         let start = isoFormatter.string(from: Date())
-        let points = interpolatedPath(from: point(xFactor: 0.25, yFactor: 0.32), to: point(xFactor: 0.72, yFactor: 0.58), steps: 18)
-        var events = [InjectedEvent]()
-
-        for point in points {
-            try postMouse(type: .mouseMoved, location: point, button: .left)
-            events.append(record(type: "mouseMoved", location: point))
-            FocusController.sleep(milliseconds: 28)
-        }
-
-        let clickPoint = points.last ?? point(xFactor: 0.72, yFactor: 0.58)
-        try postMouse(type: .leftMouseDown, location: clickPoint, button: .left)
-        events.append(record(type: "leftMouseDown", location: clickPoint))
-        FocusController.sleep(milliseconds: 45)
-        try postMouse(type: .leftMouseUp, location: clickPoint, button: .left)
-        events.append(record(type: "leftMouseUp", location: clickPoint))
-        FocusController.sleep(milliseconds: 120)
+        let clickPoint = point(xFactor: 0.72, yFactor: 0.58)
+        let primitives = [
+            ActionPrimitive.move(to: clickPoint, via: .wind, durationMs: 560),
+            .click(at: clickPoint, button: .left, holdMs: 45, count: 1)
+        ]
+        let actionResult = try executor.execute(
+            request(
+                for: active ? "mouse_move_click_active" : "mouse_move_click_blur",
+                primitives: primitives
+            )
+        )
 
         let end = isoFormatter.string(from: Date())
         let result = ScenarioResult(
@@ -96,7 +82,7 @@ struct ScenarioRunner {
             targetFrame: codableRect(target.frame),
             startTime: start,
             endTime: end,
-            events: events
+            events: actionResult.events
         )
         try persist(result)
         return result
@@ -107,26 +93,12 @@ struct ScenarioRunner {
         let start = isoFormatter.string(from: Date())
         let startPoint = point(xFactor: 0.70, yFactor: 0.76)
         let endPoint = point(xFactor: 0.44, yFactor: 0.48)
-        let dragPath = interpolatedPath(from: startPoint, to: endPoint, steps: 16)
-        var events = [InjectedEvent]()
-
-        try postMouse(type: .mouseMoved, location: startPoint, button: .left)
-        events.append(record(type: "mouseMoved", location: startPoint))
-        FocusController.sleep(milliseconds: 36)
-        try postMouse(type: .leftMouseDown, location: startPoint, button: .left)
-        events.append(record(type: "leftMouseDown", location: startPoint))
-        FocusController.sleep(milliseconds: 48)
-
-        for point in dragPath {
-            try postMouse(type: .leftMouseDragged, location: point, button: .left)
-            events.append(record(type: "leftMouseDragged", location: point))
-            FocusController.sleep(milliseconds: 28)
-        }
-
-        let releasePoint = dragPath.last ?? endPoint
-        try postMouse(type: .leftMouseUp, location: releasePoint, button: .left)
-        events.append(record(type: "leftMouseUp", location: releasePoint))
-        FocusController.sleep(milliseconds: 120)
+        let actionResult = try executor.execute(
+            request(
+                for: "mouse_drag_active",
+                primitives: [.drag(from: startPoint, to: endPoint, button: .left, via: .wind)]
+            )
+        )
 
         let end = isoFormatter.string(from: Date())
         let result = ScenarioResult(
@@ -137,7 +109,7 @@ struct ScenarioRunner {
             targetFrame: codableRect(target.frame),
             startTime: start,
             endTime: end,
-            events: events
+            events: actionResult.events
         )
         try persist(result)
         return result
@@ -146,19 +118,12 @@ struct ScenarioRunner {
     private func runKeyboardType(active: Bool) throws -> ScenarioResult {
         try prepareFocus(active: active)
         let start = isoFormatter.string(from: Date())
-        var events = [InjectedEvent]()
-
-        for scalar in keyInput.unicodeScalars {
-            guard let key = KeyMap.characterEvent(for: scalar) else {
-                continue
-            }
-            try postKeyboard(keyCode: key.keyCode, keyDown: true)
-            events.append(record(type: "keyDown", key: String(scalar), virtualKey: key.keyCode))
-            FocusController.sleep(milliseconds: 32)
-            try postKeyboard(keyCode: key.keyCode, keyDown: false)
-            events.append(record(type: "keyUp", key: String(scalar), virtualKey: key.keyCode))
-            FocusController.sleep(milliseconds: 42)
-        }
+        let actionResult = try executor.execute(
+            request(
+                for: active ? "keyboard_type_active" : "keyboard_type_blur",
+                primitives: [.type(text: keyInput, layout: .us)]
+            )
+        )
 
         let end = isoFormatter.string(from: Date())
         let result = ScenarioResult(
@@ -169,7 +134,7 @@ struct ScenarioRunner {
             targetFrame: codableRect(target.frame),
             startTime: start,
             endTime: end,
-            events: events
+            events: actionResult.events
         )
         try persist(result)
         return result
@@ -188,20 +153,17 @@ struct ScenarioRunner {
         FocusController.sleep(milliseconds: 420)
     }
 
-    private func postMouse(type: CGEventType, location: CGPoint, button: CGMouseButton) throws {
-        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: button) else {
-            throw NSError(domain: "ScenarioRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "无法创建鼠标事件：\(type.rawValue)"])
-        }
-        event.setIntegerValueField(.eventSourceUserData, value: 0x56484944)
-        event.postToPid(target.pid)
-    }
-
-    private func postKeyboard(keyCode: CGKeyCode, keyDown: Bool) throws {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else {
-            throw NSError(domain: "ScenarioRunner", code: 4, userInfo: [NSLocalizedDescriptionKey: "无法创建键盘事件：\(keyCode)"])
-        }
-        event.setIntegerValueField(.eventSourceUserData, value: 0x56484944)
-        event.postToPid(target.pid)
+    private func request(for id: String, primitives: [ActionPrimitive]) -> ActionRequest {
+        ActionRequest(
+            id: id,
+            primitives: primitives,
+            context: ActionContext(
+                host: "scenario.local",
+                url: "about:scenario/\(id)",
+                element: ActionContext.Element(sig: id, role: "test-scenario")
+            ),
+            options: ActionOptions(postMode: .global, dryRun: dryRun)
+        )
     }
 
     private func point(xFactor: CGFloat, yFactor: CGFloat) -> CGPoint {
@@ -211,59 +173,7 @@ struct ScenarioRunner {
         )
     }
 
-    private func interpolatedPath(from start: CGPoint, to end: CGPoint, steps: Int) -> [CGPoint] {
-        guard steps > 1 else { return [start, end] }
-        return (0..<steps).map { index in
-            let progress = CGFloat(index) / CGFloat(steps - 1)
-            let eased = progress * progress * (3 - 2 * progress)
-            return CGPoint(
-                x: start.x + (end.x - start.x) * eased,
-                y: start.y + (end.y - start.y) * eased
-            )
-        }
-    }
-
-    private func record(type: String, location: CGPoint? = nil, key: String? = nil, virtualKey: CGKeyCode? = nil) -> InjectedEvent {
-        InjectedEvent(
-            type: type,
-            location: location.map { CodablePoint(x: $0.x, y: $0.y) },
-            key: key,
-            virtualKey: virtualKey,
-            timestamp: isoFormatter.string(from: Date())
-        )
-    }
-
     private func codableRect(_ rect: CGRect) -> CodableRect {
         CodableRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
-    }
-}
-
-enum KeyMap {
-    private static let mapping: [UnicodeScalar: CGKeyCode] = [
-        "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
-        "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31, "p": 35,
-        "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9, "w": 13, "x": 7,
-        "y": 16, "z": 6,
-        "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25, "0": 29,
-        " ": 49
-    ]
-
-    struct CharacterEvent {
-        let keyCode: CGKeyCode
-    }
-
-    static func characterEvent(for scalar: UnicodeScalar) -> CharacterEvent? {
-        guard let keyCode = mapping[UnicodeScalar(scalar.properties.lowercaseMapping) ?? scalar] ?? mapping[scalar] else {
-            return nil
-        }
-        return CharacterEvent(keyCode: keyCode)
-    }
-}
-
-private extension JSONEncoder {
-    static var pretty: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
     }
 }

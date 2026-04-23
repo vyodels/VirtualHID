@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import json
+import os
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +12,33 @@ WEB = ROOT / "web"
 RESULTS = ROOT / "results"
 REPORT_PATH = RESULTS / "browser-report.json"
 CURSOR_PATH = RESULTS / "cursor-command.json"
+HID_TIMEOUT_SECONDS = 5.0
+
+
+def hid_socket_path():
+    return os.environ.get("VIRTUALHID_SOCKET") or os.path.join(os.environ.get("TMPDIR") or "/tmp", "virtualhid.sock")
+
+
+def call_hid_daemon(method, params):
+    request_id = params.get("id") if isinstance(params, dict) and isinstance(params.get("id"), str) else f"web-{method}"
+    request = {"id": request_id, "method": method, "params": params}
+    data = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(HID_TIMEOUT_SECONDS)
+        client.connect(hid_socket_path())
+        client.sendall(data)
+        buffer = bytearray()
+        while b"\n" not in buffer:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+
+    response, _, _ = bytes(buffer).partition(b"\n")
+    if not response:
+        raise RuntimeError("daemon closed without a response")
+    return response
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -27,10 +56,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/cursor-command":
             self.serve_cursor_command()
             return
+        if path == "/hid/state":
+            self.serve_hid_state()
+            return
         self.send_error(404)
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path == "/hid/action":
+            self.serve_hid_action()
+            return
         if path != "/report":
             self.send_error(404)
             return
@@ -60,6 +95,46 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def serve_hid_state(self):
+        self.forward_hid_request("state", {})
+
+    def serve_hid_action(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json_error(400, "E_BAD_REQUEST", "invalid Content-Length")
+            return
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            params = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self.send_json_error(400, "E_BAD_REQUEST", str(error))
+            return
+        self.forward_hid_request("action", params)
+
+    def forward_hid_request(self, method, params):
+        try:
+            data = call_hid_daemon(method, params)
+        except (OSError, RuntimeError) as error:
+            self.send_json_error(502, "E_DAEMON_UNREACHABLE", str(error))
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_json_error(self, status, code, message):
+        payload = {"ok": False, "error": {"code": code, "message": message}}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def serve_cursor_command(self):
         RESULTS.mkdir(exist_ok=True)
         if not CURSOR_PATH.exists():
@@ -79,7 +154,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", 8123), Handler)
+    port = int(os.environ.get("PORT", "8123"))
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

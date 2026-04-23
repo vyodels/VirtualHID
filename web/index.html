@@ -3,76 +3,105 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CGEventPostToPid 验证页</title>
+    <title>VirtualHID 行为对比实验台</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="layout">
-      <section class="stage-panel">
-        <div class="panel-header">
-          <h1>CGEventPostToPid 浏览器验证</h1>
-          <div class="actions">
-            <button id="focus-input">聚焦输入框</button>
-            <button id="clear-log">清空日志</button>
-            <button id="export-log">导出日志</button>
-          </div>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">VirtualHID Capture Lab</p>
+          <h1>用户行为 vs 虚拟 HID 对比采集</h1>
+          <p class="hero-copy">复杂 DOM、Shadow DOM、iframe、拖拽、滚动和输入场景，用于采集鼠标键盘行为并生成拟人化参数建议。</p>
         </div>
-        <div id="status" class="status-grid"></div>
-        <div id="stage" class="stage" tabindex="0">
-          <canvas id="trace"></canvas>
-          <div id="cursor-ghost" class="cursor-ghost" aria-hidden="true"></div>
-          <div id="trace-hud" class="trace-hud">等待虚拟鼠标轨迹…</div>
-          <div class="stage-copy">
-            <div class="stage-title">Pointer Zone</div>
-            <div class="stage-desc">蓝线是浏览器真实收到的移动轨迹，橙色发光点是最后一个命中位置。</div>
-          </div>
-          <div id="scroll-zone" class="scroll-zone" tabindex="0">
-            <div class="scroll-title">Scroll Zone</div>
-            <div class="scroll-desc">这里用于演示 `wheel` / 双指滑屏对应的滚轮事件。</div>
-            <div class="scroll-inner">
-              <div>Scroll item 01</div>
-              <div>Scroll item 02</div>
-              <div>Scroll item 03</div>
-              <div>Scroll item 04</div>
-              <div>Scroll item 05</div>
-              <div>Scroll item 06</div>
-              <div>Scroll item 07</div>
-              <div>Scroll item 08</div>
-              <div>Scroll item 09</div>
-              <div>Scroll item 10</div>
-              <div>Scroll item 11</div>
-              <div>Scroll item 12</div>
-              <div>Scroll item 13</div>
-              <div>Scroll item 14</div>
-              <div>Scroll item 15</div>
-              <div>Scroll item 16</div>
-              <div>Scroll item 17</div>
-              <div>Scroll item 18</div>
-              <div>Scroll item 19</div>
-              <div>Scroll item 20</div>
-              <div>Scroll item 21</div>
-              <div>Scroll item 22</div>
-              <div>Scroll item 23</div>
-              <div>Scroll item 24</div>
+        <div class="hero-actions">
+          <button id="start-user">开始用户采集</button>
+          <button id="run-vhid">调用 VirtualHID</button>
+          <button id="compare-runs">生成对比</button>
+          <button id="export-log">导出 JSON</button>
+          <button id="clear-log" class="ghost">清空</button>
+        </div>
+      </header>
+
+      <section id="status" class="status-grid"></section>
+
+      <section class="workspace">
+        <section class="lab-panel">
+          <div class="panel-title">
+            <div>
+              <h2>复杂交互场景</h2>
+              <p>先手动操作一遍，再点击“调用 VirtualHID”执行同一组目标动作。</p>
+            </div>
+            <div class="toggles">
+              <label><input id="toggle-persistent" type="checkbox" checked /> 持久轨迹</label>
+              <label><input id="toggle-tail" type="checkbox" checked /> 尾气轨迹</label>
+              <label><input id="toggle-effects" type="checkbox" checked /> 事件特效</label>
+              <label><input id="toggle-dry-run" type="checkbox" /> HID dryRun</label>
             </div>
           </div>
-          <div id="draggable" class="draggable" draggable="true">Drag Me</div>
-        </div>
-        <label class="input-block">
-          <span>Keyboard Zone</span>
-          <textarea id="keyboard-target" rows="5" spellcheck="false" placeholder="这里会记录键盘输入，建议先点“聚焦输入框”"></textarea>
-        </label>
+
+          <div id="stage" class="stage" tabindex="0">
+            <canvas id="trace"></canvas>
+            <div id="effects" aria-hidden="true"></div>
+            <div id="cursor-ghost" class="cursor-ghost" aria-hidden="true"></div>
+            <div id="trace-hud" class="trace-hud">等待采集...</div>
+
+            <section class="target-card primary-target" data-sig="demo-primary">
+              <span>复杂按钮</span>
+              <button id="morph-button" class="morph-button">Hover / Click / Double</button>
+              <button id="split-left" class="split">左半区</button>
+              <button id="split-right" class="split">右半区</button>
+            </section>
+
+            <section class="target-card form-target" data-sig="demo-form">
+              <label>键盘输入区</label>
+              <textarea id="keyboard-target" rows="4" spellcheck="false" placeholder="采集 keydown / beforeinput / input / keyup"></textarea>
+              <div class="form-row">
+                <input id="range-target" type="range" min="0" max="100" value="35" />
+                <label class="check"><input id="check-target" type="checkbox" /> 切换项</label>
+              </div>
+            </section>
+
+            <section id="scroll-zone" class="scroll-zone" tabindex="0" data-sig="demo-scroll">
+              <strong>滚动与惯性区域</strong>
+              <p>记录 wheel、scroll、移动停顿和滚动后指针行为。</p>
+              <div class="scroll-list"></div>
+            </section>
+
+            <div id="draggable" class="draggable" draggable="true" data-sig="demo-drag">Drag Me</div>
+            <div id="drop-zone" class="drop-zone">Drop Zone</div>
+
+            <section class="target-card dom-target">
+              <h3>Shadow DOM</h3>
+              <div id="shadow-host"></div>
+            </section>
+          </div>
+
+          <div class="frames">
+            <iframe id="frame-a" title="同源 iframe A"></iframe>
+            <iframe id="frame-b" title="同源 iframe B"></iframe>
+          </div>
+        </section>
+
+        <aside class="side-panel">
+          <section class="card">
+            <h2>采集与指标</h2>
+            <div id="summary" class="summary"></div>
+          </section>
+          <section class="card">
+            <h2>对比结果</h2>
+            <pre id="comparison">尚未生成对比。</pre>
+          </section>
+          <section class="card">
+            <h2>学习建议</h2>
+            <pre id="learning">先完成用户采集和 VirtualHID 采集。</pre>
+          </section>
+          <section class="card log-card">
+            <h2>事件日志</h2>
+            <pre id="log"></pre>
+          </section>
+        </aside>
       </section>
-      <aside class="log-panel">
-        <section class="summary-card">
-          <h2>Summary</h2>
-          <div id="summary"></div>
-        </section>
-        <section class="summary-card">
-          <h2>Event Log</h2>
-          <pre id="log"></pre>
-        </section>
-      </aside>
     </main>
     <script type="module" src="./app.js"></script>
   </body>
