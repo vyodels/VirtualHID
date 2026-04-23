@@ -10,16 +10,20 @@ const summaryNode = document.getElementById('summary');
 const statusNode = document.getElementById('status');
 const comparisonNode = document.getElementById('comparison');
 const learningNode = document.getElementById('learning');
+const analysisNode = document.getElementById('analysis-output');
+const integrationNode = document.getElementById('integration-output');
 const coverageNode = document.getElementById('coverage');
 const clearLogButton = document.getElementById('clear-log');
 const exportLogButton = document.getElementById('export-log');
 const startUserButton = document.getElementById('start-user');
 const runVhidButton = document.getElementById('run-vhid');
 const compareRunsButton = document.getElementById('compare-runs');
+const restartDaemonButton = document.getElementById('restart-daemon');
 const persistentToggle = document.getElementById('toggle-persistent');
 const tailToggle = document.getElementById('toggle-tail');
 const effectsToggle = document.getElementById('toggle-effects');
 const dryRunToggle = document.getElementById('toggle-dry-run');
+const previewChannelToggle = document.getElementById('toggle-preview-channel');
 const draggable = document.getElementById('draggable');
 const dropZone = document.getElementById('drop-zone');
 const shadowHost = document.getElementById('shadow-host');
@@ -30,6 +34,8 @@ const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const reportEndpoint = `${location.origin}/report`;
 const hidActionEndpoint = `${location.origin}/hid/action`;
 const hidStateEndpoint = `${location.origin}/hid/state`;
+const hidDaemonEndpoint = `${location.origin}/hid/daemon`;
+const hidRestartEndpoint = `${location.origin}/hid/restart`;
 const hidRpcEndpoint = `${location.origin}/hid/rpc`;
 const analysisRecordEndpoint = `${location.origin}/analysis/record`;
 const analysisReportEndpoint = `${location.origin}/analysis/report`;
@@ -130,6 +136,13 @@ const learningState = {
   lastSyncedAt: null,
   error: null,
 };
+const bridgeState = {
+  hidReachable: false,
+  hidError: null,
+  daemonMeta: null,
+  previewChannelEnabled: false,
+  lastRestartAt: null,
+};
 
 window.__virtualHIDLab = {
   runId,
@@ -167,6 +180,8 @@ function resetState() {
   effectsLayer.innerHTML = '';
   reportState('reset', true);
   renderLearningPanel();
+  renderAnalysisPanel();
+  renderIntegrationPanel();
   render();
 }
 
@@ -480,6 +495,76 @@ function renderLearningPanel() {
     },
   };
   learningNode.textContent = JSON.stringify(payload, null, 2);
+  renderAnalysisPanel();
+  renderIntegrationPanel();
+}
+
+function renderAnalysisPanel() {
+  const report = learningState.analysisReport;
+  if (!report?.history?.records) {
+    analysisNode.textContent = '长期分析尚未生成。先完成一轮“用户采集 + VirtualHID + 生成对比”，历史记录会自动写入 results/humanization-history.jsonl。';
+    return;
+  }
+  const primary = report.groups?.[0] || null;
+  analysisNode.textContent = JSON.stringify({
+    history: report.history,
+    primaryInstruction: report.overall?.primaryInstruction || null,
+    recommendedAdjustments: report.overall?.recommendedAdjustments || [],
+    behaviorBlend: primary?.behaviorBlend || null,
+    recommendedProfile: primary?.tuning?.profile || null,
+    note: 'targetSpreadPx 仅供上游随机落点策略参考；VirtualHID 现在只执行固定目标点。',
+  }, null, 2);
+}
+
+function renderIntegrationPanel() {
+  const daemonMeta = bridgeState.daemonMeta || {};
+  const daemonState = bridgeState.hidReachable ? '在线' : '离线';
+  const daemonHint = bridgeState.hidError ? `最近错误：${bridgeState.hidError}` : '通过 /hid/state 与本地 daemon 通讯。';
+  integrationNode.innerHTML = [
+    renderIntegrationGroup('HID 桥接', [
+      `状态：<strong>${escapeHtml(daemonState)}</strong>`,
+      escapeHtml(daemonHint),
+      daemonMeta.socketPath ? `socket：<code>${escapeHtml(daemonMeta.socketPath)}</code>` : 'socket：未获取',
+      daemonMeta.managedPid ? `managed pid：<code>${escapeHtml(String(daemonMeta.managedPid))}</code>` : 'managed pid：未记录',
+      bridgeState.lastRestartAt ? `最近重启：<code>${escapeHtml(bridgeState.lastRestartAt)}</code>` : '最近重启：无',
+    ]),
+    renderIntegrationGroup('接口导航', [
+      `<a href="/hid/state" target="_blank" rel="noreferrer">/hid/state</a>`,
+      `<a href="/hid/daemon" target="_blank" rel="noreferrer">/hid/daemon</a>`,
+      `<a href="/analysis/report" target="_blank" rel="noreferrer">/analysis/report</a>`,
+    ]),
+    renderIntegrationGroup('Codex 分析', [
+      '<code>python3 scripts/humanization_analysis.py --pretty</code>',
+      '<code>python3 scripts/humanization_analysis.py --pretty --host 127.0.0.1:8123</code>',
+      '历史文件：<code>results/humanization-history.jsonl</code>',
+      '模板库：<code>~/Library/Application Support/VirtualHID/profile.sqlite</code>',
+      '页面内也可直接看“学习建议”和“长期分析”两张卡片。',
+    ]),
+    renderIntegrationGroup('预览通道', [
+      `状态：<strong>${bridgeState.previewChannelEnabled ? '开启' : '关闭'}</strong>`,
+      '只影响 /cursor-command 的可视预览，不会自动触发真实 HID。',
+    ]),
+  ].join('');
+}
+
+function renderIntegrationGroup(title, lines) {
+  return `
+    <section class="integration-group">
+      <strong>${escapeHtml(title)}</strong>
+      ${lines.map((line) => `<div>${line.includes('<a ') || line.includes('<code>') || line.includes('<strong>') ? line : escapeHtml(line)}</div>`).join('')}
+    </section>
+  `;
+}
+
+function loadPreviewChannelPreference() {
+  return localStorage.getItem('virtualhid.demo.previewChannel') === '1';
+}
+
+function setPreviewChannelEnabled(enabled) {
+  bridgeState.previewChannelEnabled = Boolean(enabled);
+  previewChannelToggle.checked = bridgeState.previewChannelEnabled;
+  localStorage.setItem('virtualhid.demo.previewChannel', bridgeState.previewChannelEnabled ? '1' : '0');
+  renderIntegrationPanel();
 }
 
 function learningHost() {
@@ -591,6 +676,7 @@ async function refreshAnalysisReport() {
   });
   const response = await fetch(`${analysisReportEndpoint}?${params.toString()}`, { cache: 'no-store' });
   learningState.analysisReport = await readJsonResponse(response, '/analysis/report');
+  renderAnalysisPanel();
   renderLearningPanel();
   return learningState.analysisReport;
 }
@@ -1291,13 +1377,62 @@ async function refreshHidState() {
     const response = await fetch(hidStateEndpoint, { cache: 'no-store' });
     const payload = await readJsonResponse(response, '/hid/state');
     if (payload.ok) {
+      bridgeState.hidReachable = true;
+      bridgeState.hidError = null;
       learningState.daemonState = payload.result;
+      await refreshDaemonMeta();
       renderLearningPanel();
       return payload.result;
     }
+    bridgeState.hidReachable = false;
+    bridgeState.hidError = payload.error?.message || 'hid/state failed';
   } catch (_) {
+    bridgeState.hidReachable = false;
+    bridgeState.hidError = '无法连接本地 HID daemon';
   }
+  renderIntegrationPanel();
   return null;
+}
+
+async function refreshDaemonMeta() {
+  try {
+    const response = await fetch(hidDaemonEndpoint, { cache: 'no-store' });
+    bridgeState.daemonMeta = await readJsonResponse(response, '/hid/daemon');
+  } catch (_) {
+    bridgeState.daemonMeta = null;
+  }
+  renderIntegrationPanel();
+  return bridgeState.daemonMeta;
+}
+
+async function restartHidDaemon() {
+  restartDaemonButton.disabled = true;
+  try {
+    const response = await fetch(hidRestartEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const payload = await readJsonResponse(response, '/hid/restart');
+    bridgeState.lastRestartAt = new Date().toISOString();
+    if (!payload.ok) {
+      throw new Error(payload.error?.message || 'restart failed');
+    }
+    bridgeState.hidReachable = true;
+    bridgeState.hidError = null;
+    bridgeState.daemonMeta = payload.daemon || null;
+    await refreshHidState();
+    renderLearningPanel();
+    renderIntegrationPanel();
+    setHudMessage('本地 HID daemon 已重启。', 5000);
+  } catch (error) {
+    bridgeState.hidReachable = false;
+    bridgeState.hidError = error.message;
+    renderIntegrationPanel();
+    setHudMessage(`重启 HID daemon 失败：${error.message}`, 6000);
+  } finally {
+    restartDaemonButton.disabled = false;
+  }
 }
 
 async function readJsonResponse(response, endpoint) {
@@ -1395,6 +1530,8 @@ function renderStatus(summary) {
     ['模式', effectiveCaptureMode()],
     ['用户事件', String(summary.channelCounters.user)],
     ['虚拟事件', String(summary.channelCounters.virtual)],
+    ['HID桥接', bridgeState.hidReachable ? 'online' : 'offline'],
+    ['预览通道', bridgeState.previewChannelEnabled ? 'on' : 'off'],
     ['前台焦点', String(summary.focus.hasFocus)],
     ['校准', calibrationOffset ? `${round(calibrationOffset.x)}, ${round(calibrationOffset.y)}` : '未校准'],
   ];
@@ -1607,6 +1744,9 @@ function reportState(reason, force = false) {
 }
 
 async function pollCursorCommand() {
+  if (!bridgeState.previewChannelEnabled) {
+    return;
+  }
   try {
     const response = await fetch(`${location.origin}/cursor-command`, { cache: 'no-store' });
     if (!response.ok) {
@@ -1857,6 +1997,8 @@ startUserButton.addEventListener('click', () => {
 });
 runVhidButton.addEventListener('click', runVirtualHIDDemo);
 compareRunsButton.addEventListener('click', compareRuns);
+restartDaemonButton.addEventListener('click', restartHidDaemon);
+previewChannelToggle.addEventListener('change', () => setPreviewChannelEnabled(previewChannelToggle.checked));
 clearLogButton.addEventListener('click', resetState);
 exportLogButton.addEventListener('click', () => {
   const blob = new Blob([JSON.stringify({ runId, summary: buildSummary(), events: eventLog }, null, 2)], {
@@ -1877,6 +2019,7 @@ window.addEventListener('pagehide', () => reportState('pagehide', true));
 
 new ResizeObserver(() => renderTrace()).observe(stage);
 wireComplexDom();
+setPreviewChannelEnabled(loadPreviewChannelPreference());
 resetState();
 refreshHidState();
 refreshAnalysisReport().catch(() => {});

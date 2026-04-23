@@ -59,6 +59,41 @@ button.ghost {
   padding: 14px;
 }
 
+.top-nav {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(10, 15, 25, 0.86);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.top-nav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: var(--text);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.top-nav a:hover {
+  border-color: rgba(85, 215, 255, 0.34);
+  background: rgba(85, 215, 255, 0.1);
+}
+
 .hero {
   display: flex;
   justify-content: space-between;
@@ -111,6 +146,15 @@ h1 {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
+}
+
+#lab-panel,
+#summary-card,
+#comparison-card,
+#learning-card,
+#analysis-card,
+#integration-card {
+  scroll-margin-top: 76px;
 }
 
 .status-chip,
@@ -402,6 +446,36 @@ iframe {
 .card h2 {
   margin-bottom: 10px;
   font-size: 16px;
+}
+
+#integration-output {
+  gap: 10px;
+}
+
+.integration-group {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.integration-group strong {
+  color: var(--text);
+}
+
+.integration-group code,
+.integration-group a {
+  color: #d8f4ff;
+}
+
+.integration-group a {
+  text-decoration: none;
+}
+
+.integration-group a:hover {
+  text-decoration: underline;
 }
 
 .summary {

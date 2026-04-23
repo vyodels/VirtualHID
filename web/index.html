@@ -15,6 +15,7 @@
           <p class="hero-copy">复杂 DOM、隔离组件（Shadow DOM）、iframe、拖拽、滚动和输入场景，用于采集鼠标键盘行为并生成拟人化参数建议。</p>
         </div>
         <div class="hero-actions">
+          <button id="restart-daemon" class="ghost">重启 HID 服务</button>
           <button id="start-user">开始用户采集</button>
           <button id="run-vhid">调用 VirtualHID</button>
           <button id="compare-runs">生成对比</button>
@@ -23,10 +24,19 @@
         </div>
       </header>
 
+      <nav class="top-nav" aria-label="功能导航">
+        <a href="#lab-panel">实验台</a>
+        <a href="#summary-card">指标</a>
+        <a href="#comparison-card">对比</a>
+        <a href="#learning-card">学习</a>
+        <a href="#analysis-card">长期分析</a>
+        <a href="#integration-card">接口与 Codex</a>
+      </nav>
+
       <section id="status" class="status-grid"></section>
 
       <section class="workspace">
-        <section class="lab-panel">
+        <section id="lab-panel" class="lab-panel">
           <div class="panel-title">
             <div>
               <h2>复杂交互场景</h2>
@@ -37,6 +47,7 @@
               <label><input id="toggle-tail" type="checkbox" checked /> 尾气轨迹</label>
               <label><input id="toggle-effects" type="checkbox" checked /> 事件特效</label>
               <label title="只生成事件计划和页面预览，不真正向系统投递鼠标键盘事件"><input id="toggle-dry-run" type="checkbox" /> HID dryRun</label>
+              <label title="只在需要时才消费可视预览命令，避免页面刷新后自动回放"><input id="toggle-preview-channel" type="checkbox" /> 预览通道</label>
             </div>
           </div>
 
@@ -86,7 +97,7 @@
         </section>
 
         <aside class="side-panel">
-          <section class="card">
+          <section id="summary-card" class="card">
             <h2>采集与指标</h2>
             <div id="summary" class="summary"></div>
           </section>
@@ -94,13 +105,21 @@
             <h2>事件覆盖</h2>
             <div id="coverage" class="coverage"></div>
           </section>
-          <section class="card">
+          <section id="comparison-card" class="card">
             <h2>对比结果</h2>
             <pre id="comparison">尚未生成对比。</pre>
           </section>
-          <section class="card">
+          <section id="learning-card" class="card">
             <h2>学习建议</h2>
             <pre id="learning">先完成用户采集和 VirtualHID 采集。</pre>
+          </section>
+          <section id="analysis-card" class="card">
+            <h2>长期分析</h2>
+            <pre id="analysis-output">长期分析尚未生成。</pre>
+          </section>
+          <section id="integration-card" class="card">
+            <h2>接口与 Codex</h2>
+            <div id="integration-output" class="summary"></div>
           </section>
           <section class="card log-card">
             <h2>事件日志</h2>
