@@ -57,4 +57,4 @@ VIRTUALHID_HUD_RESPONSE=/tmp/virtualhid-hud-ui-smoke.json \
 
 预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、移动轨迹、点击/滚动效果、expected/final 标记和 `HID dry-run move+click+scroll ...` 状态文本；不应出现来自网页 mock 的额外轨迹或坐标。
 
-如果输出 `could not create image from display`，说明当前 macOS 图形会话或显示器处于不可截图状态。先唤醒 / 解锁显示器并确认 `pmset -g powerstate IODisplayWrangler` 不是 `Current State 0`，再重新运行脚本。
+如果输出 `could not create image from display`，脚本会同时打印 `screencapture` 退出码、前后 `IODisplayWrangler` 状态和诊断信息。若显示器不是 `Current State 0` 仍失败，通常是当前 macOS GUI session、锁屏状态、空间/外接屏状态或 Screen Recording 权限阻止截图；此时只能标记为视觉证据环境阻塞，不能伪造通过。

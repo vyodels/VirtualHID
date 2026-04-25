@@ -9,7 +9,12 @@ SCREENSHOT="${VIRTUALHID_HUD_SCREENSHOT:-/tmp/virtualhid-hud-manual.png}"
 
 rm -f "$RESPONSE" "$LOG" "$SCREENSHOT"
 
-if pmset -g powerstate IODisplayWrangler 2>/dev/null | grep -q "Current State  *0"; then
+display_state() {
+  pmset -g powerstate IODisplayWrangler 2>/dev/null || true
+}
+
+DISPLAY_STATE_BEFORE="$(display_state)"
+if printf '%s\n' "$DISPLAY_STATE_BEFORE" | grep -q "Current State  *0"; then
   echo "hud-manual-ui requires an awake/unlocked macOS display; IODisplayWrangler is Current State 0" >&2
   exit 1
 fi
@@ -29,9 +34,22 @@ cleanup() {
 trap cleanup EXIT
 
 sleep "${VIRTUALHID_HUD_CAPTURE_DELAY:-0.9}"
-if ! screencapture -x "$SCREENSHOT"; then
+CAPTURE_ERR="$(mktemp /tmp/virtualhid-hud-screencapture.XXXXXX)"
+if screencapture -x "$SCREENSHOT" 2>"$CAPTURE_ERR"; then
+  rm -f "$CAPTURE_ERR"
+else
+  CAPTURE_STATUS=$?
   echo "hud-manual-ui failed to capture screenshot" >&2
+  echo "screencapture exit code: $CAPTURE_STATUS" >&2
+  echo "screencapture stderr:" >&2
+  cat "$CAPTURE_ERR" >&2 || true
+  echo "display state before capture:" >&2
+  printf '%s\n' "$DISPLAY_STATE_BEFORE" >&2
+  echo "display state after capture:" >&2
+  display_state >&2
+  echo "diagnosis: the HUD action path may have run, but screenshot evidence is blocked by the active macOS GUI session, display state, or Screen Recording permission." >&2
   tail -50 "$LOG" >&2 || true
+  rm -f "$CAPTURE_ERR"
   exit 1
 fi
 wait "$HUD_PID"
