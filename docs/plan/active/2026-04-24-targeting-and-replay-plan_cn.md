@@ -1,7 +1,7 @@
 # VirtualHID 下一阶段实施计划 · 目标解析 / 坐标换算 / 回放级指纹
 
 > **文档角色**：M2-M7 完成后的下一阶段活动计划
-> **状态**：🟡 进行中（边界已冻结；固定点契约 / 串行执行 / 服务控制已完成，核心能力待继续实施）
+> **状态**：🟡 进行中（2026-04-25：回放级指纹、坐标换算、计划生成、基础证据已落地；daemon socket / MCP smoke 已通过；真实 tab 激活与 observer 语义回声仍待后续实机联调）
 > **承接文档**：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
 > **目标**：把“摘要级学习”推进到“可回放、可验证、可长期优化”的执行与分析体系
 
@@ -22,13 +22,27 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 本计划启动前，仓库已经先补齐了一批基础能力：
 
-- 固定目标点契约已经收紧；`landingZone / region / targetSpread` 不再属于 VirtualHID 输入
+- 目标锚点 + `landingZone` 契约已经收口；业务目标选择仍由上游 Agent 完成，实际 HID 落点和轨迹由 VirtualHID 生成
 - `click` / `drag` 已有完整前置慢速移动，禁止视觉跳点
 - daemon `action` 已改为全局串行执行，避免键盘和鼠标并发交叉
 - `trace.commit -> profiles.rebuild -> applyProfiles` 学习闭环已打通
 - Web 实验台已提供 `长期分析 / 接口与 Codex` 导航，`report_server.py` 已支持 daemon 自动拉起、`/hid/daemon` 状态查看和 `/hid/restart` 重启
 
 因此，这份活动计划现在只聚焦**还没做完**的那部分：目标激活、坐标换算、回放级指纹、执行证据和 replay-aware 分析。
+
+### 0.2 当前快照（2026-04-25）
+
+本轮已经完成本计划的代码基础层：
+
+- `ReplayTraceStore` 已落地 compact trace 指纹、路径骨架压缩、节奏片段、retention 与 summary。
+- `TargetResolverV2` 已落地纯解析/匹配/置信度策略；真实 Chrome/Edge tab 激活仍需要 AX/AppleScript 或 browser-mcp 提供的上游句柄联调。
+- `ViewportMapper` 已支持 `viewport/document -> screen` 几何换算，并能识别目标是否在当前 viewport。
+- `ExecutionPlanner` 已能把 `target + geometry + primitives` 生成结构化 plan，并把 viewport/document 坐标映射成 screen 坐标；真实滚动后重新采样/二次换算仍待后续。
+- `OutcomeVerifier` 已返回注入事件数、最终指针、期望指针、焦点确认等结构化证据；PassiveObserver 回声和页面语义成功仍由后续链路补齐。
+- `humanization_analysis.py` 已能消费 replay/compact trace 字段并输出 replay-aware tuning 建议。
+- Swift 工具链收口为 `DEVELOPER_DIR=/tmp/OldXcode.app` + `/tmp` module cache + `--disable-sandbox` + scratch path；当前完整 `swift test` 已通过 27 个测试。
+
+真实环境已通过 `control-server-smoke.sh` / `mcp-smoke.sh`，Unix socket daemon 和 MCP shim 端到端可用；这确认剩余阻断不再是 Swift SDK mismatch 或 socket transport。
 
 ---
 
@@ -48,7 +62,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 “回放级 compact trace 指纹”指的是：**不保存完整原始事件流，也不保存 DOM/文本，但保存足以重建节奏与路径骨架的压缩指纹**。它通常包含：
 
 - 指令键：`host + taskId + stage + instructionKey + actionType`
-- 目标锚点：原点、固定目标点、末端收敛误差分布
+- 目标锚点：原点、目标锚点、允许落点区域、末端收敛误差分布
 - 路径骨架：8-24 个控制点或分段控制向量
 - 时间骨架：每段耗时、hesitation、settle、click hold、inter-click、scroll burst
 - 行为标签：`idle / normal / flow / lowEfficiency`、`smooth / gentle / hurried`
@@ -72,6 +86,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 - VirtualHID **不能**把 signature 生成搬进来。
 - `ActionContext` 仍然只允许读白名单字段：`host / element.sig / element.role / taskId / stage / hints.urgency`。
 - 不允许根据 `host/url/text` 做业务判断。
+- 网页目标的 `host` 只能沿用 browser active tab、tab list、snapshot URL 或上游已规范化 `browser_target.host`；`target.host` / `context.host` / `trace.commit.host` 不能由 Agent、脚本或 VirtualHID 按站点名称推断，且同时存在时必须一致。
 
 因此，下面这条边界要明确：
 
@@ -123,7 +138,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 - `target`：目标应用 / 窗口 / tab 的解析信息，**不放进** `ActionContext`
 - `geometry`：由外部提供 viewport 快照，VirtualHID 负责换算
-- `at`：调用方必须传**固定目标点**；随机落点由上游在传入前完成
+- `at`：调用方必须传**目标锚点**；可选 `profile.landingZone` 表达允许落点区域，实际落点由 VirtualHID 在执行前采样
 - `behaviorMode / flavor`：允许显式提示；缺省时由学习模板决定
 
 ---
@@ -147,25 +162,25 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 ### 4.2 Viewport Coordinate Mapper
 
-目标：把“viewport 内固定目标点”转换为 OS 绝对坐标。
+目标：把“viewport 内目标锚点 / landingZone”转换为 OS 绝对坐标。
 
 职责：
 
-- 接收 `viewportInScreen + scrollOffset + pageScale + at`
-- 计算固定目标点对应的屏幕绝对坐标
+- 接收 `viewportInScreen + scrollOffset + pageScale + at / landingZone`
+- 计算目标锚点和允许落点区域对应的屏幕绝对坐标
 - 若目标不在当前 viewport，可按计划滚动后再重新换算
 
 注意：VirtualHID 做的是**几何换算**，不是 DOM 查询。
 
 ### 4.3 Execution Planner
 
-目标：把“点击某固定点”扩展成完整事件流：
+目标：把“点击某目标锚点”扩展成完整事件流：
 
 1. 激活目标 app / window / tab
 2. 如需滚动，先滚动到目标点进入当前 viewport
 3. 生成慢速鼠标轨迹，完整发出 `mouseMoved`
 4. 执行 `mouseDown / mouseUp` 或 `drag` 全流
-5. 落点后保留 settle / hesitation / overshoot 修正，但最终点必须等于请求点
+5. 落点后保留 settle / hesitation / overshoot 修正；若有 `landingZone`，最终点必须等于 VirtualHID 采样出的实际落点
 
 原则：
 
@@ -234,12 +249,12 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 ## 6. 任务拆分
 
-- [ ] W1 `ReplayTraceStore`：新增 compact trace 指纹 schema、压缩与 retention
-- [ ] W2 `TargetResolverV2`：应用 / 窗口 / tab 激活与确认
-- [ ] W3 `ViewportMapper`：viewport↔screen 坐标换算
-- [ ] W4 `ExecutionPlanner`：scroll-to-visible、完整 click/drag 事件流、行为模式切换
-- [ ] W5 `OutcomeVerifier`：注入层 / 指针层 / 焦点层 / observer 层证据
-- [ ] W6 `Codex Analysis Loop v2`：从摘要级分析升级到 replay-aware 分析
+- [x] W1 `ReplayTraceStore`：compact trace 指纹 schema、压缩、retention、summary 已完成；后续可接入持久化存储。
+- [~] W2 `TargetResolverV2`：纯解析/匹配/确认策略已完成；真实应用 / 窗口 / tab 激活仍未实机联调。
+- [x] W3 `ViewportMapper`：viewport↔screen / document↔screen 坐标换算已完成。
+- [~] W4 `ExecutionPlanner`：计划生成、坐标映射、scroll-before-action 计划已完成；真实滚动后二次换算仍未实机联调。
+- [~] W5 `OutcomeVerifier`：注入层 / 指针层 / 焦点层基础证据已完成；observer 回声和页面语义确认仍依赖后续链路。
+- [~] W6 `Codex Analysis Loop v2`：分析器已支持 replay-aware 字段；仍需要真实长期样本验证推荐质量。
 
 已具备的基础：
 
@@ -247,7 +262,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 - [x] 长期摘要分析脚本与 HTTP 接口
 - [x] 行为模式混合与非匀速时间分配
 - [x] `click` 前置缓慢移动
-- [x] 固定目标点契约与非法区域参数拒绝
+- [x] 目标锚点 + `landingZone` 契约；仍拒绝未收敛的含糊区域参数
 - [x] daemon 全局串行动作执行
 - [x] Web 导航、daemon 自动拉起、`/hid/daemon` 与 `/hid/restart`
 
@@ -262,8 +277,8 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 ### 7.2 坐标换算
 
-- 调用方只传 viewport 固定点；VirtualHID 自行换算到 OS 坐标
-- 页面缩放、滚动、窗口移动后仍能点中固定点
+- 调用方只传 viewport 目标锚点和可选 `landingZone`；VirtualHID 自行换算到 OS 坐标并选择实际落点
+- 页面缩放、滚动、窗口移动后仍能点中目标锚点或允许落点区域
 
 ### 7.3 执行流
 

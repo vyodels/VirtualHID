@@ -31,10 +31,6 @@ public enum FocusController {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
             return true
         }
-        if let bundleIdentifier = app.bundleIdentifier,
-           frontmostBundleIdentifierViaAppleScript() == bundleIdentifier {
-            return true
-        }
         return frontmostWindowOwnerPid() == app.processIdentifier
     }
 
@@ -112,23 +108,4 @@ public enum FocusController {
         return nil
     }
 
-    private static func frontmostBundleIdentifierViaAppleScript() -> String? {
-        let source = """
-        tell application "System Events"
-            set frontProcess to first application process whose frontmost is true
-            return bundle identifier of frontProcess
-        end tell
-        """
-
-        guard let script = NSAppleScript(source: source) else {
-            return nil
-        }
-
-        var error: NSDictionary?
-        let result = script.executeAndReturnError(&error)
-        guard error == nil else {
-            return nil
-        }
-        return result.stringValue
-    }
 }

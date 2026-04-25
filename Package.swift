@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "HumanizationKit", targets: ["HumanizationKit"]),
         .library(name: "Supervisor", targets: ["Supervisor"]),
         .library(name: "ProfileStore", targets: ["ProfileStore"]),
+        .library(name: "HIDVisualization", targets: ["HIDVisualization"]),
         .library(name: "ControlServer", targets: ["ControlServer"])
     ],
     targets: [
@@ -42,6 +43,11 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
+            name: "HIDVisualization",
+            dependencies: ["InjectorCore"],
+            path: "Sources/HIDVisualization"
+        ),
+        .target(
             name: "ControlServer",
             dependencies: ["InjectorCore", "HumanizationKit", "Supervisor", "ProfileStore"],
             path: "Sources/ControlServer"
@@ -53,7 +59,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "InjectorDaemon",
-            dependencies: ["ControlServer", "ProfileStore", "Supervisor"],
+            dependencies: ["ControlServer", "HIDVisualization", "ProfileStore", "Supervisor"],
             path: "Sources/InjectorDaemon"
         ),
         .executableTarget(

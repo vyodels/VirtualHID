@@ -3,6 +3,7 @@ import HumanizationKit
 import ProfileStore
 import XCTest
 
+@objcMembers
 final class ProfileStoreTests: XCTestCase {
     func testRebuildAggregatesRichMotionProfiles() throws {
         let store = try ProfileStore(path: ":memory:")

@@ -1,23 +1,24 @@
 # VirtualHID
 
-VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它负责把上层 Agent 给出的目标、固定落点和动作序列，转换成真实的鼠标/键盘事件流，并通过观察、聚合和长期分析不断调整自己的执行参数。
+VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它负责把上层 Agent 给出的目标锚点、允许落点区域和动作序列，转换成真实的鼠标/键盘事件流，并通过观察、聚合和长期分析不断调整自己的执行参数。
 
-## 当前状态（2026-04-24）
+## 当前状态（2026-04-25）
 
 已完成：
 
 - M2-M7 主实施范围已经归档到 `docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
-- 固定目标点契约、完整点击前奏、非匀速时间曲线、全局串行动作执行
+- 目标锚点 + `landingZone` 合同、完整点击前奏、非匀速时间曲线、全局串行动作执行
 - `trace.commit -> profiles.rebuild -> applyProfiles` 学习闭环
 - 长期拟人度分析脚本 / HTTP 接口 / Web 实验台导航
 - `report_server.py` 对 `vhid-daemon` 的自动拉起、状态查看和重启控制
 
-仍在进行：
+新增 / 进行中：
 
-- `windowId / tabId / host` 级目标激活
-- viewport → OS 坐标换算下沉到 VirtualHID
-- 回放级 compact trace 指纹
-- 执行结果证据化与语义确认协作
+- `TargetResolverV2` 的通用匹配/确认策略已落地，真实浏览器 tab 激活仍依赖上游 browser-mcp 或后续 AX/AppleScript 执行适配。
+- `ViewportMapper` 已支持 `viewport/document -> screen` 几何换算，并能在 action 响应里返回执行 plan。
+- `ReplayTraceStore` 已支持回放级 compact trace 指纹、retention 与摘要。
+- `OutcomeVerifier` 已返回注入层、指针层、焦点层证据；页面语义成功仍由 Agent/browser 侧确认。
+- `scripts/humanization_analysis.py` 已能消费 `replayFingerprint / compactTrace`，从摘要级分析升级为 replay-aware 分析。
 
 ## 当前能力
 
@@ -44,18 +45,34 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 ## 常用命令
 
 ```bash
-swift build
-swift test
-.build/x86_64-apple-macosx/debug/vhid-daemon
+env DEVELOPER_DIR=/tmp/OldXcode.app \
+  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
+  xcrun swift build --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
+
+env DEVELOPER_DIR=/tmp/OldXcode.app \
+  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
+  xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
+
+/tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-daemon
 node mcp/server.mjs
 PORT=8123 python3 scripts/report_server.py
 python3 scripts/humanization_analysis.py --pretty
 ```
 
+面向 recruit-agent / Chrome 的常驻 daemon 不要使用 `--self-target`；该参数只用于 VirtualHID 自测，会把 `targetApp` 固定为 daemon 自身而不是 Chrome。smoke harness 如需自测必须同时传 `--allow-self-target-daemon` 显式确认。
+
 如果只做 profile 学习链路冒烟，可运行：
 
 ```bash
 ./scripts/profile-learn-smoke.sh
+```
+
+如果只做 HUD / visualization 验收，可运行：
+
+```bash
+./scripts/hud-smoke.sh
 ```
 
 ## Web 实验台与服务入口
@@ -79,13 +96,20 @@ python3 scripts/humanization_analysis.py --pretty
 4. `profiles.rebuild` 生成学习模板
 5. `action` 时命中模板并应用到 move / click / drag / type / key
 
-长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。当前仍是**摘要级长期分析**；更高一层的 replay-aware 分析见活动计划。
+长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。分析器现在会优先使用 `replayFingerprint / compactTrace` 中的路径骨架、节奏片段和质量分，如果历史里没有这些字段，则自动降级为摘要级长期分析。
+
+如果当前目标是接入 Autonomous Agent 模拟环境任务执行，请优先阅读 `docs/reference/hid-phase1-validation-contract_cn.md`。该文档收口了 Phase-1 为什么已经足够、最小验证 contract，以及与 browser / recruit-agent 的职责边界。
 
 ## 重要边界
 
 - VirtualHID 不访问 DOM、不发网络请求、不解析 HTML
-- VirtualHID 只接收**固定目标点**；落点随机性、区域采样由上游项目负责
+- VirtualHID 接收**目标锚点**和可选 `landingZone`；业务目标选择由上游 Agent 负责，实际 HID 落点和轨迹由 VirtualHID 负责生成
+- 网页目标的 viewport/document → macOS screen 坐标换算由 VirtualHID 负责；browser/recruit-agent 只传页面坐标、target 身份和可选页面证据（如 scrollOffset/pageScale/viewportSize），不要从 browser `screenX/screenY` 合成或信任 `viewportInScreen`
 - `ActionContext` 只读白名单字段：`host / element.sig / element.role / taskId / stage / hints.urgency`
+- 网页目标的 `host` 必须来自 browser active tab、tab list、snapshot URL 或上游已规范化的 `browser_target.host`；`target.host` 与 `context.host` 同时存在时必须一致，不能由 Agent 或 VirtualHID 按站点名编造
+- `hid_action` 必须携带非空 `primitives`；缺失或空数组返回 `E_PRIMITIVES_REQUIRED`。VirtualHID 只返回 HID 执行计划、事件、实际落点和轨迹证据；下载链接、下载记录、本地 artifact 路径和业务完成判断属于 browser / recruit-agent。
+- `target / geometry` 是 action 顶层执行字段，不进入 `ActionContext`，不参与业务语义判断
+- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point 必须来自 VirtualHID action events / verification，不能由网页、browser 或 recruit-agent mock 补造。默认禁用，`--visualize-hid` 开启，`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用。
 - `global` 投递模式下必须先满足 `targetApp.frontmost == true`
 - `pid` 模式只允许 `mouseMoved / scrollWheel`
 - daemon 内 action 执行是**全局串行**的，避免鼠标/键盘并发交叉
@@ -94,5 +118,8 @@ python3 scripts/humanization_analysis.py --pretty
 
 - 已完成实施文档：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
 - 下一阶段活动计划：`docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`
+- 第一阶段最小验证契约：`docs/reference/hid-phase1-validation-contract_cn.md`
+- HUD / 可视化验收契约：`docs/reference/hid-hud-visualization-acceptance_cn.md`
+- 拟人化 / 长期学习 / Replay 审计：`docs/reference/humanization-learning-audit_cn.md`
 - 待办：`docs/TODO_cn.md`
 - 贡献说明：`AGENTS.md` / `AGENTS_cn.md`

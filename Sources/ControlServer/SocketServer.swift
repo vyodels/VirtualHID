@@ -23,6 +23,7 @@ public final class SocketServer {
             running = true
         }
 
+        signal(SIGPIPE, SIG_IGN)
         unlink(socketPath)
         let previousMask = umask(0o077)
         defer { umask(previousMask) }
@@ -31,6 +32,7 @@ public final class SocketServer {
         guard fd >= 0 else {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
         }
+        disableSigPipe(fd)
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -89,6 +91,7 @@ public final class SocketServer {
                 }
                 break
             }
+            disableSigPipe(client)
             clientQueue.async { [weak self] in
                 self?.handleClient(client)
             }
@@ -104,6 +107,9 @@ public final class SocketServer {
         var pending = Data()
         while true {
             let readCount = Darwin.read(fd, &buffer, buffer.count)
+            if readCount < 0, errno == EINTR {
+                continue
+            }
             if readCount <= 0 {
                 return
             }
@@ -116,10 +122,36 @@ public final class SocketServer {
                     continue
                 }
                 let response = service.handleLine(line) + "\n"
-                _ = response.withCString { pointer in
-                    Darwin.write(fd, pointer, strlen(pointer))
+                if !writeAll(Data(response.utf8), to: fd) {
+                    return
                 }
             }
+        }
+    }
+
+    private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+        data.withUnsafeBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                return true
+            }
+            var offset = 0
+            while offset < data.count {
+                let result = Darwin.write(fd, baseAddress.advanced(by: offset), data.count - offset)
+                if result > 0 {
+                    offset += result
+                    continue
+                }
+                if result < 0, errno == EINTR {
+                    continue
+                }
+                // Client-side MCP timeouts close the socket while an action may still be
+                // finishing. Treat that as a per-client disconnect, not a daemon error.
+                if result < 0, errno == EPIPE || errno == ECONNRESET {
+                    return false
+                }
+                return false
+            }
+            return true
         }
     }
 
@@ -136,6 +168,13 @@ public final class SocketServer {
             }
         }
     }
+}
+
+private func disableSigPipe(_ fd: Int32) {
+    #if os(macOS)
+    var value: Int32 = 1
+    _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, socklen_t(MemoryLayout<Int32>.size))
+    #endif
 }
 
 private extension NSLock {

@@ -3,3 +3,5 @@ results/
 .build/
 bin-injector-test
 .DS_Store
+__pycache__/
+*.pyc

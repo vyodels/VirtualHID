@@ -7,6 +7,7 @@ import { daemonUnavailable, mcpError } from "./errors.mjs";
 import { toolMethodMap, tools } from "./tools.mjs";
 
 const socketPath = process.env.VIRTUALHID_SOCKET || path.join(os.tmpdir(), "virtualhid.sock");
+const daemonTimeoutMs = Number(process.env.VIRTUALHID_MCP_DAEMON_TIMEOUT_MS || 15000);
 
 if (process.argv.includes("--smoke-tools")) {
   process.stdout.write(`${JSON.stringify({ tools: tools.map((tool) => tool.name) })}\n`);
@@ -22,8 +23,8 @@ async function callDaemon(method, params) {
     let buffer = "";
     const timeout = setTimeout(() => {
       socket.destroy();
-      reject(daemonUnavailable(`timeout connecting to ${socketPath}`));
-    }, 5000);
+      reject(daemonUnavailable(`timeout waiting for daemon response from ${socketPath} after ${daemonTimeoutMs}ms`));
+    }, daemonTimeoutMs);
 
     socket.on("connect", () => {
       socket.write(payload);

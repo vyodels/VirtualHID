@@ -18,15 +18,20 @@
 当前环境如遇系统 CLT 问题，使用本地 Xcode shim：
 
 ```sh
-env DEVELOPER_DIR=/tmp/OldXcode.app swift build
-env DEVELOPER_DIR=/tmp/OldXcode.app swift test
-env DEVELOPER_DIR=/tmp/OldXcode.app swift test --filter HumanizationKit
+env DEVELOPER_DIR=/tmp/OldXcode.app \
+  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
+  xcrun swift build --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
+env DEVELOPER_DIR=/tmp/OldXcode.app \
+  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
+  xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build --filter HumanizationKit
 ```
 
 本地运行 daemon：
 
 ```sh
-.build/x86_64-apple-macosx/debug/vhid-daemon --no-event-tap
+/tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-daemon --no-event-tap
 ```
 
 运行里程碑 smoke：

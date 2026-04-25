@@ -89,6 +89,7 @@ def analyze_group(key, records):
         "pointCountGap": round_num(median_or_zero(hid_points) - median_or_zero(user_points)),
     }
     tuning = build_tuning(records, divergence)
+    replay = build_replay_summary(records)
     return {
         "instructionKey": key,
         "sampleCount": len(records),
@@ -111,6 +112,7 @@ def analyze_group(key, records):
         },
         "divergence": divergence,
         "behaviorBlend": build_behavior_blend(records),
+        "replay": replay,
         "tuning": tuning,
         "quality": {
             "confidence": round_num(min(0.95, 0.32 + len(records) / 30.0)),
@@ -130,6 +132,7 @@ def build_overall_summary(groups):
         "recommendedProfile": primary["tuning"].get("profile"),
         "recommendedAdjustments": primary["tuning"].get("adjustments", []),
         "primaryInstruction": primary["instructionKey"],
+        "replay": primary.get("replay"),
     }
 
 
@@ -147,6 +150,7 @@ def build_tuning(records, divergence):
     turn_bias = clamp(user_turn / 0.6, 0, 1)
     straight_bias = clamp(1 - user_straightness, 0, 1)
 
+    replay = build_replay_summary(records)
     profile = {
         "moveSpeedPxS": {"min": round_num(speed_low), "max": round_num(speed_high)},
         "pointCount": {
@@ -169,6 +173,9 @@ def build_tuning(records, divergence):
         "targetSpreadPx": round_num(clamp(4 + straight_bias * 10 + turn_bias * 8, 3, 24)),
         "behaviorBlend": build_behavior_blend(records),
     }
+    if replay["available"]:
+        profile["preferredPathSkeleton"] = replay["preferredFingerprint"].get("pathSkeleton", [])
+        profile["preferredRhythm"] = replay["preferredFingerprint"].get("rhythm", {})
 
     adjustments = []
     if divergence["speedRatio"] > 1.15:
@@ -183,11 +190,125 @@ def build_tuning(records, divergence):
         adjustments.append("HID 停顿过少，增加 hesitationProbability 与 settleMs。")
     if divergence["pointCountGap"] < -2:
         adjustments.append("HID 轨迹点过稀，适度提高 pointCount 范围。")
+    if replay["available"] and replay["qualityMedian"] < 0.55:
+        adjustments.append("compact trace 质量偏低，继续采集路径骨架、分段耗时、点击间隔和停顿片段。")
 
     return {
         "profile": profile,
         "adjustments": adjustments or ["当前长期统计已经接近，可继续累积样本再调。"],
     }
+
+
+def build_replay_summary(records):
+    fingerprints = []
+    for record in records:
+        fingerprint = (
+            record.get("replayFingerprint")
+            or record.get("compactTrace")
+            or ((record.get("analysis") or {}).get("replayFingerprint"))
+            or ((record.get("daemonLearning") or {}).get("replayFingerprint"))
+        )
+        if isinstance(fingerprint, dict):
+            fingerprints.append(normalize_replay_fingerprint(fingerprint))
+
+    if not fingerprints:
+        return {
+            "available": False,
+            "fingerprints": 0,
+            "qualityMedian": 0,
+            "preferredFingerprint": None,
+            "recommendations": ["未发现 replayFingerprint/compactTrace；当前仍只能做摘要级调参。"],
+        }
+
+    def quality(item):
+        return number_or_zero(item.get("quality") or item.get("confidence"))
+
+    preferred = sorted(fingerprints, key=quality, reverse=True)[0]
+    skeleton_counts = [
+        len(item.get("pathSkeleton") or [])
+        for item in fingerprints
+    ]
+    segment_counts = [
+        len((item.get("rhythm") or {}).get("segmentMs") or [])
+        for item in fingerprints
+    ]
+    recommendations = []
+    if median_or_zero(skeleton_counts) < 4:
+        recommendations.append("路径骨架点偏少，至少保留 8-16 个控制点以支持节奏重建。")
+    if median_or_zero(segment_counts) < 3:
+        recommendations.append("分段耗时偏少，无法可靠重放加速/巡航/减速节奏。")
+    if not recommendations:
+        recommendations.append("compact trace 已可用于 replay-aware 调参，优先复用高质量指纹并按分布采样。")
+
+    return {
+        "available": True,
+        "fingerprints": len(fingerprints),
+        "qualityMedian": round_num(median_or_zero([quality(item) for item in fingerprints])),
+        "pathSkeletonPointMedian": round_num(median_or_zero(skeleton_counts)),
+        "segmentCountMedian": round_num(median_or_zero(segment_counts)),
+        "preferredFingerprint": preferred,
+        "recommendations": recommendations,
+    }
+
+
+RHYTHM_FIELDS = (
+    "segmentMs",
+    "hesitationMs",
+    "clickHoldMs",
+    "interClickMs",
+    "dwellMs",
+    "interKeyMs",
+)
+
+
+def normalize_replay_fingerprint(fingerprint):
+    normalized = dict(fingerprint)
+    normalized["pathSkeleton"] = normalize_points(
+        fingerprint.get("pathSkeleton")
+        or fingerprint.get("path_skeleton")
+        or fingerprint.get("skeleton")
+        or []
+    )
+    normalized["rhythm"] = normalize_rhythm(fingerprint)
+    if "quality" not in normalized and "confidence" in normalized:
+        normalized["quality"] = number_or_zero(normalized["confidence"])
+    return normalized
+
+
+def normalize_rhythm(fingerprint):
+    rhythm = fingerprint.get("rhythm") if isinstance(fingerprint.get("rhythm"), dict) else {}
+    normalized = {}
+    for field in RHYTHM_FIELDS:
+        value = rhythm.get(field) or rhythm.get(to_snake_case(field)) or fingerprint.get(field) or fingerprint.get(to_snake_case(field))
+        if isinstance(value, list):
+            normalized[field] = [round_num(item) for item in value if isinstance(item, (int, float))]
+    duration = rhythm.get("durationMs") or rhythm.get("duration_ms") or fingerprint.get("durationMs") or fingerprint.get("duration_ms")
+    if isinstance(duration, (int, float)):
+        normalized["durationMs"] = round_num(duration)
+    return normalized
+
+
+def normalize_points(points):
+    normalized = []
+    if not isinstance(points, list):
+        return normalized
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        x = point.get("x")
+        y = point.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            normalized.append({"x": round_num(x), "y": round_num(y)})
+    return normalized
+
+
+def to_snake_case(value):
+    result = []
+    for index, char in enumerate(value):
+        if char.isupper() and index > 0:
+            result.append("_")
+        result.append(char.lower())
+    return "".join(result)
 
 
 def build_behavior_blend(records):
@@ -252,6 +373,12 @@ def safe_ratio(left, right):
     if not right:
         return 0
     return left / right
+
+
+def number_or_zero(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0
 
 
 def clamp(value, lower, upper):

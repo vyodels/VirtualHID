@@ -5,16 +5,36 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/tmp/OldXcode.app}"
-env DEVELOPER_DIR="$DEVELOPER_DIR" swift build >/tmp/virtualhid-control-build.log
+BUILD_PATH="${SWIFT_BUILD_PATH:-/tmp/virtualhid-control-spm-build}"
+env DEVELOPER_DIR="$DEVELOPER_DIR" \
+  CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/virtualhid-control-clang-cache}" \
+  SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/virtualhid-control-swiftpm-cache}" \
+  xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH" >/tmp/virtualhid-control-build.log
 
-SOCKET="$(mktemp -u "${TMPDIR:-/tmp}/virtualhid-smoke.XXXXXX.sock")"
+GUARD_LOG="$(mktemp "${TMPDIR:-/tmp}/virtualhid-self-target-guard.XXXXXX.log")"
+if "$BUILD_PATH/x86_64-apple-macosx/debug/vhid-daemon" --no-event-tap --self-target >"$GUARD_LOG" 2>&1; then
+  echo "control-server-smoke expected --self-target daemon launch to fail without explicit override" >&2
+  cat "$GUARD_LOG" >&2 || true
+  rm -f "$GUARD_LOG"
+  exit 1
+fi
+grep -q -- "--self-target is only for VirtualHID smoke/self-test" "$GUARD_LOG" || {
+  echo "control-server-smoke missing self-target guard error" >&2
+  cat "$GUARD_LOG" >&2 || true
+  rm -f "$GUARD_LOG"
+  exit 1
+}
+rm -f "$GUARD_LOG"
+
+SOCKET="$(mktemp -u "${TMPDIR:-/tmp}/virtualhid-smoke.XXXXXX").sock"
 DB="$(mktemp -u "${TMPDIR:-/tmp}/virtualhid-smoke.XXXXXX").sqlite"
 rm -f "$DB"
 LOG="$(mktemp "${TMPDIR:-/tmp}/virtualhid-daemon.XXXXXX.log")"
 
-"$ROOT/.build/x86_64-apple-macosx/debug/vhid-daemon" \
+"$BUILD_PATH/x86_64-apple-macosx/debug/vhid-daemon" \
   --no-event-tap \
   --self-target \
+  --allow-self-target-daemon \
   --socket-path "$SOCKET" \
   --db-path "$DB" >"$LOG" 2>&1 &
 PID=$!
@@ -24,22 +44,41 @@ for _ in $(seq 1 50); do
   [[ -S "$SOCKET" ]] && break
   sleep 0.1
 done
-[[ -S "$SOCKET" ]]
+if [[ ! -S "$SOCKET" ]]; then
+  echo "control-server-smoke daemon did not create socket: $SOCKET" >&2
+  cat "$LOG" >&2 || true
+  exit 1
+fi
 
-python3 - "$SOCKET" <<'PY'
+python3 - "$SOCKET" "$LOG" <<'PY'
 import json
+import os
 import socket
 import sys
 
 socket_path = sys.argv[1]
+log_path = sys.argv[2]
+
+def fail(message):
+    print(message, file=sys.stderr)
+    if os.path.exists(log_path):
+        print("--- vhid-daemon log ---", file=sys.stderr)
+        print(open(log_path, encoding="utf-8", errors="replace").read(), file=sys.stderr)
+    raise SystemExit(1)
 
 def call(method, params=None, id="1"):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(socket_path)
+        try:
+            client.connect(socket_path)
+        except OSError as error:
+            fail(f"failed to connect to {socket_path}: {error}")
         client.sendall((json.dumps({"id": id, "method": method, "params": params or {}}) + "\n").encode())
         data = b""
         while not data.endswith(b"\n"):
-            data += client.recv(65536)
+            chunk = client.recv(65536)
+            if not chunk:
+                fail(f"daemon closed connection before replying to {method}")
+            data += chunk
     return json.loads(data)
 
 state = call("state", id="state")

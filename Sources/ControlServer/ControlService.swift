@@ -48,6 +48,8 @@ public final class ControlService {
     private let configuration: ControlServerConfiguration
     private let supervisor: SupervisorService
     private let profileStore: ProfileStore
+    private let hidEventSink: HIDEventSink?
+    private let targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)?
     private let actionQueue = DispatchQueue(label: "com.vyodels.virtualhid.control.actions")
     private let lock = NSLock()
     private let isoFormatter: ISO8601DateFormatter
@@ -58,11 +60,15 @@ public final class ControlService {
     public init(
         configuration: ControlServerConfiguration,
         supervisor: SupervisorService,
-        profileStore: ProfileStore
+        profileStore: ProfileStore,
+        hidEventSink: HIDEventSink? = nil,
+        targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil
     ) {
         self.configuration = configuration
         self.supervisor = supervisor
         self.profileStore = profileStore
+        self.hidEventSink = hidEventSink
+        self.targetResolverOverride = targetResolverOverride
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         self.isoFormatter = formatter
@@ -74,7 +80,7 @@ public final class ControlService {
     public func handleLine(_ line: String) -> String {
         do {
             let request = try parseRequest(line)
-            let result = try handle(method: request.method, params: request.params)
+            let result = try handle(method: request.method, params: request.params, requestId: request.id)
             return encodeResponse(id: request.id, ok: true, result: result, error: nil)
         } catch let error as WireRequestError {
             return encodeResponse(id: error.id, ok: false, result: nil, error: (error.code, error.message))
@@ -138,12 +144,12 @@ public final class ControlService {
         ]
     }
 
-    private func handle(method: String, params: [String: Any]) throws -> [String: Any] {
+    private func handle(method: String, params: [String: Any], requestId: String) throws -> [String: Any] {
         switch method {
         case "state":
             return snapshot()
         case "action":
-            return try handleAction(params)
+            return try handleAction(params, requestId: requestId)
         case "stop":
             cancelCurrentAction()
             return ["stopped": true]
@@ -169,30 +175,46 @@ public final class ControlService {
         }
     }
 
-    private func handleAction(_ params: [String: Any]) throws -> [String: Any] {
+    private func handleAction(_ params: [String: Any], requestId: String) throws -> [String: Any] {
         try actionQueue.sync {
-            try performAction(params)
+            try performAction(params, requestId: requestId)
         }
     }
 
-    private func performAction(_ params: [String: Any]) throws -> [String: Any] {
+    private func performAction(_ params: [String: Any], requestId: String) throws -> [String: Any] {
         guard !supervisor.killSwitch.isActive else {
             let triggeredAt = supervisor.killSwitch.triggeredAt.map { isoFormatter.string(from: $0) } ?? "unknown"
             throw ControlServerError.coded("E_KILL_SWITCH", "user triggered kill switch at \(triggeredAt)")
         }
 
-        guard let contextObject = params["context"] as? [String: Any] else {
-            throw ControlServerError.coded("E_CONTEXT_REQUIRED", "missing required field context.host")
-        }
+        let requestedPrimitives = try parsePrimitives(params["primitives"] as? [[String: Any]])
+        let contextObject = try normalizedActionContext(params)
         let context = try parseActionContext(contextObject)
-        let actionId = params["id"] as? String ?? UUID().uuidString
-        let primitives = try parsePrimitives(params["primitives"] as? [[String: Any]])
+        let actionId = params["id"] as? String ?? requestId
+        let targetDescriptor = try parseTargetDescriptor(params["target"] as? [String: Any])
+        let geometryRequest = try parseViewportGeometry(params["geometry"] as? [String: Any])
+        let target = try resolveTarget(descriptor: targetDescriptor)
+        let geometryResolution: ViewportGeometryResolution?
+        do {
+            geometryResolution = try geometryRequest.map {
+                try ViewportGeometryResolver.resolve(request: $0, target: target)
+            }
+        } catch {
+            let mapped = mapError(error)
+            throw ControlServerError.coded(mapped.0, mapped.1)
+        }
+        let geometry = geometryResolution?.geometry
+        let planned = ExecutionPlanner.plan(
+            target: targetDescriptor,
+            geometry: geometry,
+            primitives: requestedPrimitives
+        )
+        let primitives = planned.primitives
         let options = parseOptions(params["options"] as? [String: Any])
-        let target = try resolveTarget()
         let requestedMode = options.postMode ?? configuration.defaultPostMode
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
         let profileResult = applyProfiles(to: primitives, context: context)
-        let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode)
+        let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode, eventSink: hidEventSink)
 
         lock.withLock {
             currentExecutor = executor
@@ -212,6 +234,26 @@ public final class ControlService {
             )
             let result = try executor.execute(request)
             let response = try resultObject(result)
+            let evidence = OutcomeVerifier.evidence(
+                result: result,
+                expectedFinalPoint: expectedFinalPoint(from: profileResult.primitives),
+                focusConfirmed: FocusController.isFrontmost(app: target.app),
+                observerEcho: nil,
+                tolerancePx: expectedFinalTolerancePx(from: profileResult.primitives)
+            )
+            hidEventSink?.hidActionDidFinish(
+                HIDActionVisualSummary(
+                    context: visualContext(
+                        actionId: actionId,
+                        target: target,
+                        options: options,
+                        primitives: profileResult.primitives,
+                        postMode: usedMode
+                    ),
+                    events: result.events,
+                    verification: evidence
+                )
+            )
             lock.withLock {
                 lastPostUsed = usedMode
                 lastAction = [
@@ -228,9 +270,16 @@ public final class ControlService {
                 "applied": profileResult.applied,
                 "templateIds": profileResult.templateIds
             ]
+            enriched["targetApp"] = targetEvidenceObject(target)
+            enriched["plan"] = try encodableObject(planned.plan)
+            if let geometryResolution {
+                enriched["mapping"] = mappingObject(geometryResolution)
+            }
+            enriched["verification"] = try encodableObject(evidence)
             return enriched
         } catch {
             let mapped = mapError(error)
+            hidEventSink?.hidActionDidFail(actionId: actionId, errorCode: mapped.0)
             lock.withLock {
                 lastAction = [
                     "id": actionId,
@@ -345,12 +394,18 @@ public final class ControlService {
         }
     }
 
-    private func resolveTarget() throws -> BrowserTarget {
+    private func resolveTarget(descriptor: TargetDescriptor?) throws -> BrowserTarget {
+        if let targetResolverOverride {
+            return try targetResolverOverride(descriptor)
+        }
         if configuration.allowSelfTarget {
             return selfTarget()
         }
         do {
-            return try BrowserResolver.resolve(bundleIdentifiers: configuration.bundleIdentifiers)
+            return try BrowserResolver.resolve(
+                bundleIdentifiers: configuration.bundleIdentifiers,
+                descriptor: descriptor
+            )
         } catch BrowserResolverError.permissionDenied {
             throw ControlServerError.coded("E_PERMISSION", "accessibility permission missing")
         } catch {
@@ -365,7 +420,9 @@ public final class ControlService {
                 "bundleId": target.bundleIdentifier,
                 "pid": Int(target.pid),
                 "frontmost": FocusController.isFrontmost(app: target.app),
-                "windowTitle": target.windowTitle ?? NSNull()
+                "windowTitle": target.windowTitle ?? NSNull(),
+                "viewportFrame": rectObject(target.viewportFrame),
+                "viewportSource": target.viewportFrameSource ?? NSNull()
             ]
         }
 
@@ -373,11 +430,18 @@ public final class ControlService {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
                 .filter { !$0.isTerminated }
             if let app = apps.first {
+                let target = try? BrowserResolver.resolve(
+                    bundleIdentifiers: [bundleId],
+                    descriptor: TargetDescriptor(bundleId: bundleId),
+                    promptForPermission: false
+                )
                 return [
                     "bundleId": bundleId,
                     "pid": Int(app.processIdentifier),
                     "frontmost": FocusController.isFrontmost(app: app),
-                    "windowTitle": NSNull()
+                    "windowTitle": target?.windowTitle ?? NSNull(),
+                    "viewportFrame": rectObject(target?.viewportFrame),
+                    "viewportSource": target?.viewportFrameSource ?? NSNull()
                 ]
             }
         }
@@ -386,8 +450,47 @@ public final class ControlService {
             "bundleId": configuration.bundleIdentifiers.first ?? NSNull(),
             "pid": NSNull(),
             "frontmost": false,
-            "windowTitle": NSNull()
+            "windowTitle": NSNull(),
+            "viewportFrame": NSNull(),
+            "viewportSource": NSNull()
         ]
+    }
+
+    private func targetEvidenceObject(_ target: BrowserTarget) -> [String: Any] {
+        [
+            "bundleId": target.bundleIdentifier,
+            "pid": Int(target.pid),
+            "frontmost": FocusController.isFrontmost(app: target.app),
+            "windowTitle": target.windowTitle ?? NSNull(),
+            "windowId": target.windowId ?? NSNull(),
+            "windowFrame": rectObject(target.frame),
+            "viewportFrame": rectObject(target.viewportFrame),
+            "viewportSource": target.viewportFrameSource ?? NSNull()
+        ]
+    }
+
+    private func visualContext(
+        actionId: String,
+        target: BrowserTarget,
+        options: ActionOptions,
+        primitives: [ActionPrimitive],
+        postMode: String? = nil
+    ) -> HIDActionVisualContext {
+        return HIDActionVisualContext(
+            actionId: actionId,
+            bundleIdentifier: target.bundleIdentifier,
+            pid: target.pid,
+            windowTitle: target.windowTitle,
+            windowFrame: CodableRect(
+                x: target.frame.origin.x,
+                y: target.frame.origin.y,
+                width: target.frame.width,
+                height: target.frame.height
+            ),
+            dryRun: options.dryRun,
+            postMode: postMode ?? (options.postMode ?? configuration.defaultPostMode).rawValue,
+            actionTypes: primitives.map(\.actionTypeName)
+        )
     }
 
     private func selfTarget() -> BrowserTarget {
@@ -397,7 +500,9 @@ public final class ControlService {
             pid: app.processIdentifier,
             bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.daemon",
             windowTitle: nil,
-            frame: NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+            frame: NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900),
+            viewportFrame: NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900),
+            viewportFrameSource: "self-target-screen"
         )
     }
 
@@ -409,6 +514,7 @@ public final class ControlService {
         let hintsObject = object["hints"] as? [String: Any]
         return ActionContext(
             host: host,
+            url: object["url"] as? String,
             element: ActionContext.Element(
                 sig: elementObject?["sig"] as? String,
                 role: elementObject?["role"] as? String
@@ -417,6 +523,23 @@ public final class ControlService {
             stage: object["stage"] as? String,
             hints: ActionContext.Hints(urgency: hintsObject?["urgency"] as? String)
         )
+    }
+
+    private func normalizedActionContext(_ params: [String: Any]) throws -> [String: Any] {
+        var context = params["context"] as? [String: Any] ?? [:]
+        let target = params["target"] as? [String: Any]
+        let contextHost = nonEmptyString(context["host"])
+        let targetHost = nonEmptyString(target?["host"])
+        if let contextHost, let targetHost, contextHost != targetHost {
+            throw ControlServerError.coded("E_CONTEXT_MISMATCH", "context.host must match target.host for web targets")
+        }
+        if contextHost == nil, let targetHost {
+            context["host"] = targetHost
+        }
+        if context.isEmpty {
+            throw ControlServerError.coded("E_CONTEXT_REQUIRED", "missing required field context.host")
+        }
+        return context
     }
 
     private func parseOptions(_ object: [String: Any]?) -> ActionOptions {
@@ -433,12 +556,12 @@ public final class ControlService {
 
     private func parsePrimitives(_ array: [[String: Any]]?) throws -> [ActionPrimitive] {
         guard let array, !array.isEmpty else {
-            throw ControlServerError.coded("E_CONTEXT_REQUIRED", "action requires primitives")
+            throw ControlServerError.coded("E_PRIMITIVES_REQUIRED", "hid_action requires non-empty primitives derived from browser clickPoint or another observed target region; target/context-only calls are invalid")
         }
 
         return try array.map { primitive in
             guard let type = primitive["type"] as? String else {
-                throw ControlServerError.coded("E_UNKNOWN", "primitive.type is required")
+                throw ControlServerError.coded("E_PRIMITIVE_INVALID", "primitive.type is required")
             }
             try assertFixedPointOnlyPayload(primitive)
             let profile = try primitiveProfile(from: primitive)
@@ -601,8 +724,16 @@ public final class ControlService {
                 return ("E_BUSY", "injector is running another action")
             case .cancelled:
                 return ("E_BUSY", "injector action was cancelled")
+            case .timedOut(let timeoutMs):
+                return ("E_TIMEOUT", "injector action exceeded timeoutMs=\(timeoutMs)")
             case .eventCreationFailed(let detail):
                 return ("E_UNKNOWN", "failed to create event: \(detail)")
+            }
+        }
+        if let error = error as? ViewportGeometryResolverError {
+            switch error {
+            case .unresolvedViewport:
+                return ("E_VIEWPORT_UNRESOLVED", error.localizedDescription)
             }
         }
         if let error = error as? ControlServerError {
@@ -736,6 +867,14 @@ private func number(_ value: Any?) -> Double? {
     return nil
 }
 
+private func nonEmptyString(_ value: Any?) -> String? {
+    guard let string = value as? String else {
+        return nil
+    }
+    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
 private func point(_ object: [String: Any]?, name: String) throws -> CGPoint {
     guard let object, let x = number(object["x"]), let y = number(object["y"]) else {
         throw ControlServerError.coded("E_UNKNOWN", "point \(name) requires x and y")
@@ -748,6 +887,169 @@ private func parseOptionalPoint(_ object: [String: Any]?) -> TracePoint? {
         return nil
     }
     return TracePoint(x: x, y: y)
+}
+
+private func parseTargetDescriptor(_ object: [String: Any]?) throws -> TargetDescriptor? {
+    guard let object else {
+        return nil
+    }
+    let target = TargetDescriptor(
+        bundleId: object["bundleId"] as? String ?? object["bundle_id"] as? String,
+        windowId: intValue(object["windowId"] ?? object["window_id"]),
+        windowTitle: object["windowTitle"] as? String ?? object["window_title"] as? String,
+        tabId: intValue(object["tabId"] ?? object["tab_id"]),
+        host: object["host"] as? String
+    )
+    if target.bundleId == nil, target.windowId == nil, target.windowTitle == nil, target.tabId == nil, target.host == nil {
+        throw ControlServerError.coded("E_CONTEXT_REQUIRED", "target requires at least one of bundleId, windowId, tabId, host")
+    }
+    return target
+}
+
+private func parseViewportGeometry(_ object: [String: Any]?) throws -> ViewportGeometryRequest? {
+    guard let object else {
+        return nil
+    }
+    let coordSpace = CoordinateSpace(
+        rawValue: (object["coordSpace"] as? String ?? object["coord_space"] as? String ?? "viewport")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    )
+    guard let coordSpace else {
+        throw ControlServerError.coded("E_UNKNOWN", "geometry.coordSpace must be screen, viewport, or document")
+    }
+    let viewportObject = object["viewportInScreen"] as? [String: Any]
+        ?? object["viewport_in_screen"] as? [String: Any]
+    let viewportInScreen = try optionalRect(viewportObject, name: "geometry.viewportInScreen")
+    let scrollOffset = parseOptionalCGPoint(
+        object["scrollOffset"] as? [String: Any] ?? object["scroll_offset"] as? [String: Any]
+    ).map { CodablePoint(x: $0.x, y: $0.y) } ?? CodablePoint(x: 0, y: 0)
+    let viewportSize = try optionalRect(
+        object["viewportSize"] as? [String: Any] ?? object["viewport_size"] as? [String: Any],
+        name: "geometry.viewportSize"
+    )
+    return ViewportGeometryRequest(
+        coordSpace: coordSpace,
+        callerViewportInScreen: viewportInScreen,
+        pageScale: number(object["pageScale"] ?? object["page_scale"]) ?? 1,
+        scrollOffset: scrollOffset,
+        viewportSize: viewportSize
+    )
+}
+
+private func rect(_ object: [String: Any], name: String) throws -> CodableRect {
+    guard
+        let x = number(object["x"] ?? object["left"]),
+        let y = number(object["y"] ?? object["top"]),
+        let width = number(object["width"] ?? object["w"]),
+        let height = number(object["height"] ?? object["h"])
+    else {
+        throw ControlServerError.coded("E_UNKNOWN", "\(name) requires x/y/width/height")
+    }
+    return CodableRect(x: x, y: y, width: width, height: height)
+}
+
+private func optionalRect(_ object: [String: Any]?, name: String) throws -> CodableRect? {
+    guard let object else {
+        return nil
+    }
+    return try rect(object, name: name)
+}
+
+private func mappingObject(_ resolution: ViewportGeometryResolution) -> [String: Any] {
+    let geometry = resolution.geometry
+    return [
+        "coordSpace": geometry.coordSpace.rawValue,
+        "viewportInScreen": [
+            "x": geometry.viewportInScreen.x,
+            "y": geometry.viewportInScreen.y,
+            "width": geometry.viewportInScreen.width,
+            "height": geometry.viewportInScreen.height
+        ],
+        "viewportSource": resolution.viewportSource,
+        "ignoredCallerViewportInScreen": resolution.ignoredCallerViewportInScreen,
+        "pageScale": geometry.pageScale,
+        "scrollOffset": [
+            "x": geometry.scrollOffset.x,
+            "y": geometry.scrollOffset.y
+        ],
+        "viewportSize": geometry.viewportSize.map {
+            [
+                "x": $0.x,
+                "y": $0.y,
+                "width": $0.width,
+                "height": $0.height
+            ]
+        } as Any? ?? NSNull()
+    ]
+}
+
+private func rectObject(_ rect: CGRect?) -> Any {
+    guard let rect else {
+        return NSNull()
+    }
+    return [
+        "x": rect.origin.x,
+        "y": rect.origin.y,
+        "width": rect.width,
+        "height": rect.height
+    ]
+}
+
+private func expectedFinalPoint(from primitives: [ActionPrimitive]) -> CGPoint? {
+    for primitive in primitives.reversed() {
+        switch primitive {
+        case .move(let to, _, _, let profile):
+            return expectedLandingCenter(base: to, profile: profile)
+        case .click(let at, _, _, _, let profile):
+            return expectedLandingCenter(base: at, profile: profile)
+        case .drag(_, let to, _, _, let profile):
+            return expectedLandingCenter(base: to, profile: profile)
+        case .scroll(let at, _, _, _):
+            return at
+        case .type, .key:
+            continue
+        }
+    }
+    return nil
+}
+
+private func expectedFinalTolerancePx(from primitives: [ActionPrimitive]) -> Double {
+    for primitive in primitives.reversed() {
+        switch primitive {
+        case .move(_, _, _, let profile),
+             .click(_, _, _, _, let profile),
+             .drag(_, _, _, _, let profile):
+            if let tolerance = landingTolerancePx(profile?.landingZone) {
+                return tolerance
+            }
+            return 2
+        case .scroll:
+            return 2
+        case .type, .key:
+            continue
+        }
+    }
+    return 2
+}
+
+private func expectedLandingCenter(base: CGPoint, profile: PrimitiveProfile?) -> CGPoint {
+    profile?.landingZone?.center ?? base
+}
+
+private func landingTolerancePx(_ zone: LandingZone?) -> Double? {
+    guard let zone else {
+        return nil
+    }
+    if let radius = zone.radius, radius > 0 {
+        return radius
+    }
+    let halfWidth = max((zone.width ?? 0) / 2, 0)
+    let halfHeight = max((zone.height ?? 0) / 2, 0)
+    if halfWidth > 0 || halfHeight > 0 {
+        return hypot(halfWidth, halfHeight)
+    }
+    return nil
 }
 
 private func parseTracePayload(
@@ -862,10 +1164,10 @@ private func primitiveProfile(from primitive: [String: Any]) throws -> Primitive
     let landingZone = try parseLandingZone(
         profileObject?["landingZone"] ?? profileObject?["landing_zone"] ?? primitive["landingZone"] ?? primitive["landing_zone"],
         fallback: [
-            "center": profileObject?["landingCenter"] ?? primitive["landingCenter"],
-            "width": profileObject?["landingWidth"] ?? primitive["landingWidth"],
-            "height": profileObject?["landingHeight"] ?? primitive["landingHeight"],
-            "radius": profileObject?["landingRadius"] ?? primitive["landingRadius"]
+            "center": profileObject?["landingCenter"] ?? profileObject?["landing_center"] ?? primitive["landingCenter"] ?? primitive["landing_center"],
+            "width": profileObject?["landingWidth"] ?? profileObject?["landing_width"] ?? primitive["landingWidth"] ?? primitive["landing_width"],
+            "height": profileObject?["landingHeight"] ?? profileObject?["landing_height"] ?? primitive["landingHeight"] ?? primitive["landing_height"],
+            "radius": profileObject?["landingRadius"] ?? profileObject?["landing_radius"] ?? primitive["landingRadius"] ?? primitive["landing_radius"]
         ]
     )
     let motionProfile = try parseMotionProfile(
@@ -887,16 +1189,6 @@ private func primitiveProfile(from primitive: [String: Any]) throws -> Primitive
 
 private let fixedPointOnlyForbiddenKeys: Set<String> = [
     "region",
-    "landingZone",
-    "landing_zone",
-    "landingCenter",
-    "landing_center",
-    "landingWidth",
-    "landing_width",
-    "landingHeight",
-    "landing_height",
-    "landingRadius",
-    "landing_radius",
     "targetSpreadPx",
     "target_spread_px"
 ]
@@ -910,7 +1202,7 @@ private func assertFixedPointOnlyPayload(_ value: Any?, path: String = "primitiv
             if fixedPointOnlyForbiddenKeys.contains(key) {
                 throw ControlServerError.coded(
                     "E_FIXED_POINT_ONLY",
-                    "VirtualHID 只接受固定落点，\(path).\(key) 必须由上游预先解析为精确点"
+                    "VirtualHID 只接受固定锚点或 landingZone，\(path).\(key) 必须由上游预先解析为精确锚点"
                 )
             }
             try assertFixedPointOnlyPayload(nestedValue, path: "\(path).\(key)")

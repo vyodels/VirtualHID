@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-public struct InjectedEvent: Codable {
+public struct InjectedEvent: Codable, Equatable {
     public let type: String
     public let location: CodablePoint?
     public let key: String?
@@ -17,7 +17,7 @@ public struct InjectedEvent: Codable {
     }
 }
 
-public struct CodablePoint: Codable {
+public struct CodablePoint: Codable, Equatable {
     public let x: Double
     public let y: Double
 
@@ -27,7 +27,7 @@ public struct CodablePoint: Codable {
     }
 }
 
-public struct CodableRect: Codable {
+public struct CodableRect: Codable, Equatable {
     public let x: Double
     public let y: Double
     public let width: Double

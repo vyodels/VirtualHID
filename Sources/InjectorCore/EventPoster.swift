@@ -75,28 +75,33 @@ public final class EventPoster {
     public func post(_ event: CGEvent, type: CGEventType, frontmost: Bool) throws -> PostRoute {
         event.setIntegerValueField(.eventSourceUserData, value: markValue)
 
+        let route = try resolveRoute(type: type, frontmost: frontmost)
+        switch route {
+        case .global:
+            backend.postGlobal(event)
+        case .pid:
+            backend.postToPid(event, pid: targetPid)
+        }
+        return route
+    }
+
+    public func resolveRoute(type: CGEventType, frontmost: Bool) throws -> PostRoute {
         switch mode {
         case .global:
             try preflight(frontmost: frontmost)
-            backend.postGlobal(event)
             return .global
-
         case .pid:
             guard Self.isPidSafe(type) else {
                 throw PosterError.postModeUnsupported(type)
             }
-            backend.postToPid(event, pid: targetPid)
             return .pid
-
         case .auto:
             if Self.isPidSafe(type) {
-                backend.postToPid(event, pid: targetPid)
                 return .pid
             }
             guard frontmost else {
                 throw PosterError.notFrontmost
             }
-            backend.postGlobal(event)
             return .global
         }
     }

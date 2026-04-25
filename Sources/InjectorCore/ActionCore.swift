@@ -112,6 +112,25 @@ public enum ActionPrimitive {
     case key(chord: KeyChord, holdMs: Int?, profile: PrimitiveProfile?)
 }
 
+public extension ActionPrimitive {
+    var actionTypeName: String {
+        switch self {
+        case .move:
+            return "move"
+        case .click:
+            return "click"
+        case .drag:
+            return "drag"
+        case .scroll:
+            return "scroll"
+        case .type:
+            return "type"
+        case .key:
+            return "key"
+        }
+    }
+}
+
 public struct ActionContext: Codable {
     public struct Element: Codable {
         public let sig: String?
@@ -193,6 +212,7 @@ public struct ActionResult: Codable {
 public enum ActionExecutionError: Error, LocalizedError {
     case busy
     case cancelled
+    case timedOut(Int)
     case eventCreationFailed(String)
 
     public var errorDescription: String? {
@@ -201,8 +221,45 @@ public enum ActionExecutionError: Error, LocalizedError {
             return "执行器忙碌中"
         case .cancelled:
             return "执行已取消"
+        case .timedOut(let timeoutMs):
+            return "执行超过超时时间：\(timeoutMs)ms"
         case .eventCreationFailed(let detail):
             return "无法创建事件：\(detail)"
+        }
+    }
+}
+
+private struct ActionDeadline {
+    private let timeoutMs: Int?
+    private let expiresAt: Date?
+
+    init(timeoutMs: Int?, responseReserveMs: Int = 350) {
+        guard let timeoutMs, timeoutMs > 0 else {
+            self.timeoutMs = nil
+            self.expiresAt = nil
+            return
+        }
+        self.timeoutMs = timeoutMs
+        let executableMs = max(50, timeoutMs - responseReserveMs)
+        self.expiresAt = Date().addingTimeInterval(TimeInterval(executableMs) / 1000.0)
+    }
+
+    func assertNotExpired() throws {
+        guard let timeoutMs, let expiresAt else {
+            return
+        }
+        if Date() >= expiresAt {
+            throw ActionExecutionError.timedOut(timeoutMs)
+        }
+    }
+
+    func assertCanSpend(milliseconds: Int) throws {
+        guard let timeoutMs, let expiresAt else {
+            return
+        }
+        let remainingMs = Int(expiresAt.timeIntervalSince(Date()) * 1000)
+        if remainingMs <= max(milliseconds, 0) {
+            throw ActionExecutionError.timedOut(timeoutMs)
         }
     }
 }
@@ -211,19 +268,23 @@ public final class ActionExecutor {
     private let target: BrowserTarget
     private let defaultPostMode: PostMode
     private let humanizationProfile: HumanizationProfile
+    private let eventSink: HIDEventSink?
     private let isoFormatter: ISO8601DateFormatter
     private let lock = NSLock()
     private var busy = false
     private var cancelled = false
+    private var activeVisualContext: HIDActionVisualContext?
 
     public init(
         target: BrowserTarget,
         defaultPostMode: PostMode = .global,
-        humanizationProfile: HumanizationProfile = HumanizationProfile()
+        humanizationProfile: HumanizationProfile = HumanizationProfile(),
+        eventSink: HIDEventSink? = nil
     ) {
         self.target = target
         self.defaultPostMode = defaultPostMode
         self.humanizationProfile = humanizationProfile
+        self.eventSink = eventSink
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         self.isoFormatter = formatter
@@ -246,9 +307,25 @@ public final class ActionExecutor {
         let startedAt = Date()
         let requestedMode = request.options.postMode ?? defaultPostMode
         let dryRun = request.options.dryRun
+        let deadline = ActionDeadline(timeoutMs: request.options.timeoutMs)
         let poster = EventPoster(mode: requestedMode, targetPid: target.pid)
+        let visualContext = HIDActionVisualContext(
+            actionId: request.id,
+            bundleIdentifier: target.bundleIdentifier,
+            pid: target.pid,
+            windowTitle: target.windowTitle,
+            windowFrame: CodableRect(x: target.frame.origin.x, y: target.frame.origin.y, width: target.frame.width, height: target.frame.height),
+            dryRun: dryRun,
+            postMode: requestedMode.rawValue,
+            actionTypes: request.primitives.map(\.actionTypeName)
+        )
         var rng = SystemRandomNumberGenerator()
         var events = [InjectedEvent]()
+        activeVisualContext = visualContext
+        eventSink?.hidActionDidStart(visualContext)
+        defer {
+            activeVisualContext = nil
+        }
 
         if requestedMode == .global, !dryRun {
             try poster.preflight(frontmost: FocusController.isFrontmost(app: target.app))
@@ -258,7 +335,8 @@ public final class ActionExecutor {
 
         for primitive in request.primitives {
             try checkCancelled()
-            let emitted = try emit(primitive, poster: poster, dryRun: dryRun, rng: &rng)
+            try deadline.assertNotExpired()
+            let emitted = try emit(primitive, poster: poster, options: request.options, deadline: deadline, rng: &rng)
             events.append(contentsOf: emitted)
         }
 
@@ -298,12 +376,14 @@ public final class ActionExecutor {
         }
     }
 
-    private func emit(_ primitive: ActionPrimitive, poster: EventPoster, dryRun: Bool, rng: inout SystemRandomNumberGenerator) throws -> [InjectedEvent] {
+    private func emit(_ primitive: ActionPrimitive, poster: EventPoster, options: ActionOptions, deadline: ActionDeadline, rng: inout SystemRandomNumberGenerator) throws -> [InjectedEvent] {
+        let dryRun = options.dryRun
+        try deadline.assertNotExpired()
         switch primitive {
         case .move(let to, let style, let durationMs, let profile):
             let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
             let start = profile?.origin ?? currentMouseLocation(fallback: target.frame.center)
-            let resolvedTarget = to
+            let resolvedTarget = resolvedLandingPoint(base: to, profile: profile, rng: &rng)
             return try emitMovePath(
                 from: start,
                 to: resolvedTarget,
@@ -313,12 +393,13 @@ public final class ActionExecutor {
                 button: .left,
                 poster: poster,
                 dryRun: dryRun,
+                deadline: deadline,
                 rng: &rng
             )
 
         case .click(let at, let button, let holdMs, let count, let profile):
             let motionProfile = profile?.motionProfile
-            let clickPoint = at
+            let clickPoint = resolvedLandingPoint(base: at, profile: profile, rng: &rng)
             let resolvedHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
             let interClickMs = motionProfile?.resolvedInterClickMs(defaultValue: 120, rng: &rng) ?? 120
             var emitted = [InjectedEvent]()
@@ -328,31 +409,33 @@ public final class ActionExecutor {
                     from: start,
                     to: clickPoint,
                     style: pointerActionStyle(for: motionProfile),
-                    durationMs: nil,
+                    durationMs: implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: 72),
                     motionProfile: motionProfile,
                     button: button.cgButton,
                     poster: poster,
                     dryRun: dryRun,
+                    deadline: deadline,
                     rng: &rng
                 ))
             }
             let clickCount = max(count, 1)
             for index in 0..<clickCount {
+                try deadline.assertNotExpired()
                 emitted.append(try postMouse(type: button.downEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
-                FocusController.sleep(milliseconds: resolvedHoldMs)
+                try sleep(milliseconds: resolvedHoldMs, dryRun: dryRun, deadline: deadline)
                 emitted.append(try postMouse(type: button.upEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
                 if index < clickCount - 1 {
-                    FocusController.sleep(milliseconds: interClickMs)
+                    try sleep(milliseconds: interClickMs, dryRun: dryRun, deadline: deadline)
                 }
             }
             let settleMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 72
-            FocusController.sleep(milliseconds: settleMs)
+            try sleep(milliseconds: settleMs, dryRun: dryRun, deadline: deadline)
             return emitted
 
         case .drag(let from, let to, let button, let style, let profile):
             let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
             let start = profile?.origin ?? from
-            let resolvedTarget = to
+            let resolvedTarget = resolvedLandingPoint(base: to, profile: profile, rng: &rng)
             let dragPath = trajectoryPath(
                 from: start,
                 to: resolvedTarget,
@@ -372,28 +455,30 @@ public final class ActionExecutor {
             let dragHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: 56, rng: &rng) ?? 56
             var emitted = [InjectedEvent]()
             emitted.append(try postMouse(type: .mouseMoved, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
-            FocusController.sleep(milliseconds: preHoldMs)
+            try sleep(milliseconds: preHoldMs, dryRun: dryRun, deadline: deadline)
             emitted.append(try postMouse(type: button.downEventType, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
-            FocusController.sleep(milliseconds: dragHoldMs)
+            try sleep(milliseconds: dragHoldMs, dryRun: dryRun, deadline: deadline)
             for (index, point) in dragPath.enumerated() {
+                try deadline.assertNotExpired()
                 emitted.append(try postMouse(type: dragEventType(for: button), location: point, button: button.cgButton, poster: poster, dryRun: dryRun))
                 if index < dragPath.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
-                    FocusController.sleep(milliseconds: timing.delaysMs[index])
+                    try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
                 }
             }
             let releasePoint = dragPath.last ?? resolvedTarget
             emitted.append(try postMouse(type: button.upEventType, location: releasePoint, button: button.cgButton, poster: poster, dryRun: dryRun))
-            FocusController.sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? 92)
+            try sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? 92, dryRun: dryRun, deadline: deadline)
             return emitted
 
         case .scroll(let at, let dx, let dy, _):
+            if dryRun {
+                return [record(type: "scrollWheel", location: at)]
+            }
             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy.rounded()), wheel2: Int32(dx.rounded()), wheel3: 0) else {
                 throw ActionExecutionError.eventCreationFailed("scroll")
             }
             event.location = at
-            if !dryRun {
-                _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
-            }
+            _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
             return [record(type: "scrollWheel", location: at)]
 
         case .type(let text, _, let profile):
@@ -405,7 +490,7 @@ public final class ActionExecutor {
             )
             for keyEvent in schedule {
                 if keyEvent.delayBeforeMs > 0 {
-                    FocusController.sleep(milliseconds: keyEvent.delayBeforeMs)
+                    try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
                 }
 
                 if keyEvent.modifiers.contains(.shift) {
@@ -415,7 +500,7 @@ public final class ActionExecutor {
                 let keyCode = CGKeyCode(keyEvent.keyCode)
                 let recordedKey = String(keyEvent.char)
                 emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
-                FocusController.sleep(milliseconds: keyEvent.dwellMs)
+                try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline)
                 emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
 
                 if keyEvent.modifiers.contains(.shift) {
@@ -428,29 +513,31 @@ public final class ActionExecutor {
             var emitted = [InjectedEvent]()
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
             let keyHold = profile?.motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
-            FocusController.sleep(milliseconds: keyHold)
+            try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
             return emitted
         }
     }
 
     private func postMouse(type: CGEventType, location: CGPoint, button: CGMouseButton, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
+        if dryRun {
+            return record(type: eventName(for: type), location: location)
+        }
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: button) else {
             throw ActionExecutionError.eventCreationFailed(eventTypeDescription(type))
         }
-        if !dryRun {
-            _ = try poster.post(event, type: type, frontmost: FocusController.isFrontmost(app: target.app))
-        }
+        _ = try poster.post(event, type: type, frontmost: FocusController.isFrontmost(app: target.app))
         return record(type: eventName(for: type), location: location)
     }
 
     private func postKey(keyCode: CGKeyCode, keyDown: Bool, recordedKey: String?, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
+        if dryRun {
+            return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
+        }
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else {
             throw ActionExecutionError.eventCreationFailed("keyCode=\(keyCode)")
         }
-        if !dryRun {
-            _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
-        }
+        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
         return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
     }
 
@@ -463,6 +550,7 @@ public final class ActionExecutor {
         button: CGMouseButton,
         poster: EventPoster,
         dryRun: Bool,
+        deadline: ActionDeadline,
         rng: inout SystemRandomNumberGenerator
     ) throws -> [InjectedEvent] {
         let path = trajectoryPath(
@@ -481,22 +569,56 @@ public final class ActionExecutor {
         )
         var emitted = [InjectedEvent]()
         for (index, point) in path.enumerated() {
+            try deadline.assertNotExpired()
             emitted.append(try postMouse(type: .mouseMoved, location: point, button: button, poster: poster, dryRun: dryRun))
             if index < path.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
-                FocusController.sleep(milliseconds: timing.delaysMs[index])
+                try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
             }
         }
         return emitted
     }
 
+    private func implicitPointerTravelDurationMs(options: ActionOptions, holdMs: Int, settleMs: Int) -> Int {
+        let fallback = 650
+        guard let timeoutMs = options.timeoutMs, timeoutMs > 0 else {
+            return fallback
+        }
+        let reservedMs = max(800, holdMs + settleMs + 700)
+        return min(fallback, max(120, timeoutMs - reservedMs))
+    }
+
+    private func sleep(milliseconds: Int, dryRun: Bool, deadline: ActionDeadline) throws {
+        guard milliseconds > 0 else {
+            try deadline.assertNotExpired()
+            return
+        }
+        if dryRun {
+            try deadline.assertNotExpired()
+            return
+        }
+        try deadline.assertCanSpend(milliseconds: milliseconds)
+        var remaining = milliseconds
+        while remaining > 0 {
+            try checkCancelled()
+            try deadline.assertNotExpired()
+            let chunk = min(remaining, 50)
+            FocusController.sleep(milliseconds: chunk)
+            remaining -= chunk
+        }
+    }
+
     private func record(type: String, location: CGPoint? = nil, key: String? = nil, virtualKey: CGKeyCode? = nil) -> InjectedEvent {
-        InjectedEvent(
+        let event = InjectedEvent(
             type: type,
             location: location.map { CodablePoint(x: $0.x, y: $0.y) },
             key: key,
             virtualKey: virtualKey,
             timestamp: isoFormatter.string(from: Date())
         )
+        if let context = activeVisualContext {
+            eventSink?.hidActionDidRecord(event, context: context)
+        }
+        return event
     }
 
     private func dragEventType(for button: MouseButton) -> CGEventType {
@@ -600,8 +722,37 @@ public final class ActionExecutor {
             return pointCount(durationMs: durationMs, fallback: 1)
         case .bezier, .wind, .profile:
             let fallback = pointCount(durationMs: durationMs, fallback: humanizationProfile.movePointCount)
-            return motionProfile?.resolvedPointCount(fallback: fallback, rng: &rng) ?? fallback
+        return motionProfile?.resolvedPointCount(fallback: fallback, rng: &rng) ?? fallback
         }
+    }
+
+    private func resolvedLandingPoint(
+        base: CGPoint,
+        profile: PrimitiveProfile?,
+        rng: inout SystemRandomNumberGenerator
+    ) -> CGPoint {
+        guard let zone = profile?.landingZone else {
+            return base
+        }
+
+        let center = zone.center ?? base
+        if let radius = zone.radius, radius > 0 {
+            let angle = rng.nextDouble(in: 0..<(Double.pi * 2))
+            let distance = sqrt(rng.nextDouble(in: 0..<1)) * radius
+            return CGPoint(
+                x: center.x + CGFloat(cos(angle) * distance),
+                y: center.y + CGFloat(sin(angle) * distance)
+            )
+        }
+
+        if let width = zone.width, let height = zone.height, width > 0, height > 0 {
+            return CGPoint(
+                x: center.x + CGFloat(rng.nextDouble(in: (-(width / 2))..<(width / 2))),
+                y: center.y + CGFloat(rng.nextDouble(in: (-(height / 2))..<(height / 2)))
+            )
+        }
+
+        return center
     }
 
     private func pointCount(durationMs: Int?, fallback: Int) -> Int {

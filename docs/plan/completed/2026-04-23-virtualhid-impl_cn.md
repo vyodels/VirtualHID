@@ -13,6 +13,7 @@
 - M7 的 VirtualHID 侧 daemon / MCP / profile / observer 接口已落地；Agent skill 蒸馏属于本文档明确“不覆盖”的 Agent 端工作。
 - 当前遗留 TODO 仅为后续增强项，例如中文输入 `pasteText` / `imePinyin` 方案，不影响本计划完成状态。
 - 2026-04-24 补充：网页对比学习、长期拟人度分析、`trace.commit -> profiles.rebuild -> applyProfiles` 闭环已经补齐；更高一层的“回放级 compact trace 指纹 / 目标解析与坐标换算下沉 / 执行结果验证”已拆到新的活动计划：`docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`。
+- 2026-04-25 补充：本文档是历史完成记录。当前活动合同已从“只执行固定落点”升级为“上游给目标锚点 / 可选 `landingZone`，VirtualHID 生成实际 HID 落点和轨迹”；以 `docs/reference/hid-phase1-validation-contract_cn.md` 和活动计划为准。
 
 ### 0.1 2026-04-24 补充现状
 
@@ -24,7 +25,7 @@
 - **非匀速时间分配**：执行器已从“均匀每点延迟”切到“加速-巡航-减速 + hesitation + settle”的时间曲线。
 - **完整点击前奏**：`click` 原语现已在需要时先生成缓慢鼠标移动轨迹，再执行 down/up，不再允许视觉上的 A→B 直接跳点。
 - **串行执行保证**：daemon 侧 `action` 已收口到单一串行通道，避免鼠标与键盘动作并发交叉。
-- **固定落点边界**：VirtualHID 已不再接受 `landingZone / region / targetSpread` 一类“区域随机性”输入；这类随机性由上游负责，VirtualHID 只执行固定目标点。
+- **历史固定落点边界**：2026-04-24 时曾收紧为只执行固定目标点；2026-04-25 起当前合同已升级为目标锚点 + 可选 `landingZone`，实际 HID 落点由 VirtualHID 生成，`region / targetSpread` 等未收敛区域仍禁止。
 - **实验台与服务控制**：`web/` 页面已增加 `长期分析 / 接口与 Codex` 导航；`scripts/report_server.py` 已支持 daemon 自动拉起、`/hid/daemon` 状态查看、`/hid/restart` 重启，以及一次性消费的预览通道，避免刷新页面自动回放旧命令。
 
 本补充不改变本文档“已完成”的结论；它只说明完成后又继续补齐了哪些增强项，以及哪些能力被正式推入下一阶段计划。
@@ -869,3 +870,4 @@ MIT 兼容，已有大量开源实现，可直接参考：
 | 2026-04-24 | Cursor Agent | rev-3：补充完成后增强项：①网页 compare → `trace.commit` → `profiles.rebuild` → `applyProfiles` 学习闭环；②长期拟人度分析脚本 / HTTP 入口；③行为模式混合与非匀速时间分配；④`click` 原语补全前置缓慢移动；⑤新增下一阶段活动计划，承接回放级 compact trace 指纹、目标解析 / 坐标换算 / 执行结果验证 |
 | 2026-04-24 | Cursor Agent | rev-4：①收紧输入契约为固定落点；`landingZone / region / targetSpread` 改为上游职责；②daemon `action` 改为全局串行执行，避免鼠标/键盘并发交叉；③文档同步更新 |
 | 2026-04-24 | Cursor Agent | rev-5：①补充 Web 实验台导航、长期分析与 Codex 入口；②`report_server.py` 支持 daemon 自动拉起、状态查看与重启；③预览命令改为一次性消费，避免页面刷新后自动回放旧命令；④文档同步更新 |
+| 2026-04-25 | Codex | rev-6：历史文档补充当前合同指针；最新边界以目标锚点 + `landingZone` 为准，实际 HID 落点和轨迹由 VirtualHID 生成 |

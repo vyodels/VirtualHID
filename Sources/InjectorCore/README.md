@@ -13,7 +13,7 @@
 
 边界说明：
 
-- 只执行**固定目标点**；落点随机性和区域采样不在本模块
+- 只执行上游传入的固定目标点或允许落点区域；`landingZone` 内的最终落点采样由 VirtualHID 执行证据返回，但目标区域本身必须来自上游观察证据
 - `ActionContext` 只读 `host / element.sig / element.role / taskId / stage / hints.urgency`
 - 不得根据 `host/url/text` 做业务分支
 - 目标解析当前仍以 app / window 为主；`windowId / tabId / viewport` 级执行见活动计划：
