@@ -144,6 +144,7 @@ private final class HIDOverlayView: NSView {
     func render(_ data: HIDOverlayFrame) {
         frameData = data
         needsDisplay = true
+        displayIfNeeded()
     }
 
     func markFailure(errorCode: String) {
@@ -158,11 +159,13 @@ private final class HIDOverlayView: NSView {
             errorCode: errorCode
         )
         needsDisplay = true
+        displayIfNeeded()
     }
 
     func clear() {
         frameData = nil
         needsDisplay = true
+        displayIfNeeded()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -175,10 +178,10 @@ private final class HIDOverlayView: NSView {
         drawTrail(frameData.events)
         drawEffects(frameData.events, context: frameData.context)
         if let expected = frameData.expected {
-            drawMarker(point: expected, color: .systemOrange, label: "expected", radius: 9)
+            drawMarker(point: expected, color: .systemOrange, label: "expected", radius: 14)
         }
         if let actual = frameData.actual {
-            drawMarker(point: actual, color: .systemCyan, label: "actual", radius: 6)
+            drawMarker(point: actual, color: .systemRed, label: "actual", radius: 10)
         }
         if let errorCode = frameData.errorCode {
             drawStatus(text: "HID \(frameData.context.actionId) failed: \(errorCode)", color: .systemRed)
@@ -244,13 +247,36 @@ private final class HIDOverlayView: NSView {
 
     private func drawMarker(point: CodablePoint, color: NSColor, label: String, radius: CGFloat) {
         let converted = convert(point)
+        NSColor.black.withAlphaComponent(0.82).setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: converted.x - radius - 6,
+            y: converted.y - radius - 6,
+            width: (radius + 6) * 2,
+            height: (radius + 6) * 2
+        )).fill()
+        color.withAlphaComponent(0.42).setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: converted.x - radius - 2,
+            y: converted.y - radius - 2,
+            width: (radius + 2) * 2,
+            height: (radius + 2) * 2
+        )).fill()
+        NSColor.white.withAlphaComponent(0.92).setStroke()
+        let ring = NSBezierPath(ovalIn: NSRect(
+            x: converted.x - radius,
+            y: converted.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        ))
+        ring.lineWidth = 2
+        ring.stroke()
         color.withAlphaComponent(0.9).setStroke()
         let cross = NSBezierPath()
         cross.move(to: NSPoint(x: converted.x - radius, y: converted.y))
         cross.line(to: NSPoint(x: converted.x + radius, y: converted.y))
         cross.move(to: NSPoint(x: converted.x, y: converted.y - radius))
         cross.line(to: NSPoint(x: converted.x, y: converted.y + radius))
-        cross.lineWidth = 2
+        cross.lineWidth = 3
         cross.stroke()
         drawLabel(label, at: NSPoint(x: converted.x + radius + 4, y: converted.y + radius + 4), color: color)
     }

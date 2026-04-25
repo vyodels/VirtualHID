@@ -251,7 +251,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 
 - [x] W1 `ReplayTraceStore`：compact trace 指纹 schema、压缩、retention、summary 已完成；后续可接入持久化存储。
 - [~] W2 `TargetResolverV2`：纯解析/匹配/确认策略已完成；真实应用 / 窗口 / tab 激活仍未实机联调。
-- [x] W3 `ViewportMapper`：viewport↔screen / document↔screen 坐标换算已完成。
+- [x] W3 `ViewportMapper`：viewport↔screen / document↔screen 坐标换算已完成，primitive 坐标、`PrimitiveProfile.origin` 与 `landingZone` 均会同步映射到屏幕坐标。
 - [~] W4 `ExecutionPlanner`：计划生成、坐标映射、scroll-before-action 计划已完成；真实滚动后二次换算仍未实机联调。
 - [~] W5 `OutcomeVerifier`：注入层 / 指针层 / 焦点层基础证据已完成；observer 回声和页面语义确认仍依赖后续链路。
 - [~] W6 `Codex Analysis Loop v2`：分析器已支持 replay-aware 字段；仍需要真实长期样本验证推荐质量。

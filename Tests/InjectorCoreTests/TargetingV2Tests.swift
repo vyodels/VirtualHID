@@ -84,6 +84,41 @@ final class TargetingV2Tests: XCTestCase {
         }
     }
 
+    func testViewportMapperConvertsProfileOriginAndLandingZoneToScreenSpace() {
+        let geometry = ViewportGeometry(
+            coordSpace: .viewport,
+            viewportInScreen: CodableRect(x: 100, y: 200, width: 1200, height: 800),
+            pageScale: 2,
+            viewportSize: CodableRect(x: 0, y: 0, width: 600, height: 400)
+        )
+        let primitive = ActionPrimitive.click(
+            at: CGPoint(x: 20, y: 30),
+            button: .left,
+            holdMs: 40,
+            count: 1,
+            profile: PrimitiveProfile(
+                origin: CGPoint(x: 5, y: 6),
+                landingZone: LandingZone(center: CGPoint(x: 25, y: 35), width: 20, height: 10, radius: 8)
+            )
+        )
+
+        let mapped = ViewportMapper.mapPrimitive(primitive, geometry: geometry).primitive
+
+        if case .click(let at, _, _, _, let profile) = mapped {
+            XCTAssertEqual(at.x, 140)
+            XCTAssertEqual(at.y, 260)
+            XCTAssertEqual(profile?.origin?.x, 110)
+            XCTAssertEqual(profile?.origin?.y, 212)
+            XCTAssertEqual(profile?.landingZone?.center?.x, 150)
+            XCTAssertEqual(profile?.landingZone?.center?.y, 270)
+            XCTAssertEqual(profile?.landingZone?.width, 40)
+            XCTAssertEqual(profile?.landingZone?.height, 20)
+            XCTAssertEqual(profile?.landingZone?.radius, 16)
+        } else {
+            XCTFail("expected mapped click")
+        }
+    }
+
     func testViewportGeometryResolverRejectsViewportMappingWithoutResolvedViewportFrame() {
         let app = NSRunningApplication.current
         let target = BrowserTarget(

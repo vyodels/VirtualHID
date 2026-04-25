@@ -75,6 +75,12 @@ python3 scripts/humanization_analysis.py --pretty
 ./scripts/hud-smoke.sh
 ```
 
+如果要做真实 macOS 图形会话里的 HUD 视觉验收，可运行：
+
+```bash
+./scripts/hud-manual-ui.sh
+```
+
 ## Web 实验台与服务入口
 
 - 实验台：`http://127.0.0.1:8123/`

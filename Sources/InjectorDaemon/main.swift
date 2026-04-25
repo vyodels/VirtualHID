@@ -61,6 +61,8 @@ enum DaemonArguments {
                 configuration.smoke = "profile-learn"
             case "--smoke-hud-contract":
                 configuration.smoke = "hud-contract"
+            case "--smoke-hud-ui":
+                configuration.smoke = "hud-ui"
             default:
                 continue
             }
@@ -102,6 +104,8 @@ do {
         try runProfileLearnSmoke(configuration: configuration)
     case "hud-contract":
         try runHUDContractSmoke(configuration: configuration)
+    case "hud-ui":
+        try runHUDUISmoke()
     default:
         try runDaemon(configuration: configuration)
     }
@@ -143,7 +147,11 @@ private func runDaemon(configuration: DaemonConfiguration) throws {
     let server = SocketServer(socketPath: configuration.socketPath, service: service)
     try server.start()
     print("vhid-daemon listening \(configuration.socketPath)")
-    RunLoop.main.run()
+    if configuration.visualizeHID {
+        NSApplication.shared.run()
+    } else {
+        RunLoop.main.run()
+    }
 }
 
 private func runKillSwitchSmoke() throws {
@@ -275,6 +283,32 @@ private func runHUDContractSmoke(configuration: DaemonConfiguration) throws {
         "callback": callbackObject
     ]
     try printJSON(output)
+}
+
+private func runHUDUISmoke() throws {
+    NSApplication.shared.setActivationPolicy(.accessory)
+    let sink = HIDOverlayController()
+    let service = ControlService(
+        configuration: ControlServerConfiguration(allowSelfTarget: true),
+        supervisor: SupervisorService(),
+        profileStore: try ProfileStore(path: ":memory:"),
+        hidEventSink: sink
+    )
+    let frame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let origin = CGPoint(x: frame.minX + frame.width * 0.25, y: frame.minY + frame.height * 0.50)
+    let target = CGPoint(x: frame.minX + frame.width * 0.58, y: frame.minY + frame.height * 0.50)
+    let scrollPoint = CGPoint(x: frame.minX + frame.width * 0.62, y: frame.minY + frame.height * 0.54)
+    let line = #"{"id":"hud-ui-smoke","method":"action","params":{"context":{"host":"hud.local","element":{"sig":"hud-visible-button","role":"button"},"taskId":"hud-acceptance","stage":"manual-ui"},"options":{"dryRun":true,"postMode":"global"},"primitives":[{"type":"move","to":{"x":\#(target.x),"y":\#(target.y)},"durationMs":900,"profile":{"origin":{"x":\#(origin.x),"y":\#(origin.y)},"motion":{"pointCount":{"min":30,"max":36},"moveSpeedPxS":{"min":120,"max":180},"wind":4.5,"jitter":0.45,"controlSpread":55,"detourProbability":0.25}}},{"type":"click","at":{"x":\#(target.x),"y":\#(target.y)},"button":"left","holdMs":90,"profile":{"origin":{"x":\#(target.x),"y":\#(target.y)}}},{"type":"scroll","at":{"x":\#(scrollPoint.x),"y":\#(scrollPoint.y)},"dx":0,"dy":-96,"style":"wheel"}]}}"#
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        print(service.handleLine(line))
+        fflush(stdout)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) {
+        NSApplication.shared.terminate(nil)
+    }
+    withExtendedLifetime(sink) {
+        NSApplication.shared.run()
+    }
 }
 
 private final class SmokeHIDSink: HIDEventSink {

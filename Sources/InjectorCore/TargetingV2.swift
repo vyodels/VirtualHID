@@ -294,20 +294,44 @@ public enum ViewportMapper {
         switch primitive {
         case .move(let to, let via, let durationMs, let profile):
             let mapped = map(point: to, coordinateSpace: geometry.coordSpace, geometry: geometry)
-            return (.move(to: mapped.screenPoint, via: via, durationMs: durationMs, profile: profile), mapped.alreadyVisible ? nil : mapped.scrollDelta)
+            return (.move(to: mapped.screenPoint, via: via, durationMs: durationMs, profile: mapProfile(profile, geometry: geometry)), mapped.alreadyVisible ? nil : mapped.scrollDelta)
         case .click(let at, let button, let holdMs, let count, let profile):
             let mapped = map(point: at, coordinateSpace: geometry.coordSpace, geometry: geometry)
-            return (.click(at: mapped.screenPoint, button: button, holdMs: holdMs, count: count, profile: profile), mapped.alreadyVisible ? nil : mapped.scrollDelta)
+            return (.click(at: mapped.screenPoint, button: button, holdMs: holdMs, count: count, profile: mapProfile(profile, geometry: geometry)), mapped.alreadyVisible ? nil : mapped.scrollDelta)
         case .drag(let from, let to, let button, let via, let profile):
             let mappedFrom = map(point: from, coordinateSpace: geometry.coordSpace, geometry: geometry)
             let mappedTo = map(point: to, coordinateSpace: geometry.coordSpace, geometry: geometry)
-            return (.drag(from: mappedFrom.screenPoint, to: mappedTo.screenPoint, button: button, via: via, profile: profile), mappedTo.alreadyVisible ? nil : mappedTo.scrollDelta)
+            return (.drag(from: mappedFrom.screenPoint, to: mappedTo.screenPoint, button: button, via: via, profile: mapProfile(profile, geometry: geometry)), mappedTo.alreadyVisible ? nil : mappedTo.scrollDelta)
         case .scroll(let at, let dx, let dy, let style):
             let mapped = map(point: at, coordinateSpace: geometry.coordSpace, geometry: geometry)
             return (.scroll(at: mapped.screenPoint, dx: dx, dy: dy, style: style), nil)
         case .type, .key:
             return (primitive, nil)
         }
+    }
+
+    private static func mapProfile(_ profile: PrimitiveProfile?, geometry: ViewportGeometry) -> PrimitiveProfile? {
+        guard let profile else {
+            return nil
+        }
+        return PrimitiveProfile(
+            origin: profile.origin.map { map(point: $0, coordinateSpace: geometry.coordSpace, geometry: geometry).screenPoint },
+            landingZone: mapLandingZone(profile.landingZone, geometry: geometry),
+            motionProfile: profile.motionProfile
+        )
+    }
+
+    private static func mapLandingZone(_ zone: LandingZone?, geometry: ViewportGeometry) -> LandingZone? {
+        guard let zone else {
+            return nil
+        }
+        let scale = max(geometry.pageScale, 0.01)
+        return LandingZone(
+            center: zone.center.map { map(point: $0, coordinateSpace: geometry.coordSpace, geometry: geometry).screenPoint },
+            width: zone.width.map { $0 * scale },
+            height: zone.height.map { $0 * scale },
+            radius: zone.radius.map { $0 * scale }
+        )
     }
 }
 

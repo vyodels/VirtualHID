@@ -45,64 +45,16 @@ env DEVELOPER_DIR=/tmp/OldXcode.app \
 
 ## 4. 手动 UI 验收命令
 
-真实 HUD 需要 macOS 图形会话，无法稳定在 headless smoke 中断言。可用以下命令人工确认透明覆盖层、鼠标穿透和绘制内容：
+真实 HUD 需要 macOS 图形会话，无法稳定在 headless smoke 中断言。可用以下脚本人工确认透明覆盖层、鼠标穿透和绘制内容：
 
 ```bash
-BUILD_PATH=/tmp/virtualhid-hud-spm-build
-SOCKET=/tmp/virtualhid-hud-manual.sock
-DB=/tmp/virtualhid-hud-manual.sqlite
-rm -f "$SOCKET" "$DB"
-
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-hud-clang-cache \
-  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-hud-swiftpm-cache \
-  xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH"
-
-"$BUILD_PATH/x86_64-apple-macosx/debug/vhid-daemon" \
-  --visualize-hid \
-  --no-event-tap \
-  --self-target \
-  --allow-self-target-daemon \
-  --socket-path "$SOCKET" \
-  --db-path "$DB" &
-HUD_PID=$!
-trap 'kill "$HUD_PID" 2>/dev/null || true; wait "$HUD_PID" 2>/dev/null || true; rm -f "$SOCKET" "$DB"' EXIT
-
-for _ in $(seq 1 50); do
-  [[ -S "$SOCKET" ]] && break
-  sleep 0.1
-done
-
-python3 - "$SOCKET" <<'PY'
-import json
-import socket
-import sys
-
-payload = {
-    "id": "hud-manual",
-    "method": "action",
-    "params": {
-        "context": {
-            "host": "hud.local",
-            "element": {"sig": "hud-button", "role": "button"},
-            "taskId": "hud-acceptance",
-            "stage": "manual-ui",
-        },
-        "options": {"dryRun": True, "postMode": "global"},
-        "primitives": [
-            {"type": "click", "at": {"x": 160, "y": 120}, "button": "left", "profile": {"origin": {"x": 160, "y": 120}}},
-            {"type": "scroll", "at": {"x": 160, "y": 160}, "dx": 0, "dy": -72, "style": "wheel"},
-        ],
-    },
-}
-
-with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-    client.connect(sys.argv[1])
-    client.sendall((json.dumps(payload) + "\n").encode())
-    print(client.recv(65536).decode(), end="")
-PY
-
-sleep 3
+VIRTUALHID_HUD_SCREENSHOT=/tmp/virtualhid-hud-ui-smoke.png \
+VIRTUALHID_HUD_RESPONSE=/tmp/virtualhid-hud-ui-smoke.json \
+./scripts/hud-manual-ui.sh
 ```
 
-预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、点击/滚动效果、expected/final 标记和 `HID dry-run click+scroll ...` 状态文本；不应出现来自网页 mock 的额外轨迹或坐标。
+该脚本会构建 `vhid-daemon`，在 AppKit 主循环中运行 `--smoke-hud-ui`，触发真实 `ControlService -> ActionExecutor -> HIDOverlayController` 路径，并用 `screencapture` 保存证据图。
+
+预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、移动轨迹、点击/滚动效果、expected/final 标记和 `HID dry-run move+click+scroll ...` 状态文本；不应出现来自网页 mock 的额外轨迹或坐标。
+
+如果输出 `could not create image from display`，说明当前 macOS 图形会话或显示器处于不可截图状态。先唤醒 / 解锁显示器并确认 `pmset -g powerstate IODisplayWrangler` 不是 `Current State 0`，再重新运行脚本。
