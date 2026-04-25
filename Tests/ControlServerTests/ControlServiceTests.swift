@@ -118,6 +118,18 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(error?["code"] as? String, "E_VIEWPORT_UNRESOLVED")
     }
 
+    func testActionRejectsViewportTargetThatRequiresResampleBeforeBlindClick() {
+        let service = try! makeService()
+        let response = service.handleLine(
+            #"{"id":"needs-resample","method":"action","params":{"target":{"bundleId":"com.example.Browser","host":"example.com"},"geometry":{"coordSpace":"document","scrollOffset":{"x":0,"y":0},"viewportSize":{"x":0,"y":0,"width":400,"height":300}},"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":220,"y":920},"button":"left"}]}}"#
+        )
+        let payload = try! decode(response)
+        let error = payload["error"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, false)
+        XCTAssertEqual(error?["code"] as? String, "E_VIEWPORT_RESAMPLE_REQUIRED")
+    }
+
     func testActionAcceptsScreenGeometryWithoutViewport() {
         let service = try! makeService()
         let response = service.handleLine(

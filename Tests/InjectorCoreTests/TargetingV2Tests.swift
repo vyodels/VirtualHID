@@ -226,7 +226,8 @@ final class TargetingV2Tests: XCTestCase {
         )
 
         XCTAssertEqual(planned.plan.geometryApplied, true)
-        XCTAssertEqual(planned.plan.steps.count, 3)
+        XCTAssertEqual(planned.plan.requiresViewportResample, true)
+        XCTAssertEqual(planned.plan.steps.count, 4)
         if case .activateTarget(let plannedTarget) = planned.plan.steps[0] {
             XCTAssertEqual(plannedTarget.tabId, 9)
         } else {
@@ -236,6 +237,10 @@ final class TargetingV2Tests: XCTestCase {
             XCTAssertTrue(dy > 0)
         } else {
             XCTFail("expected scroll step")
+        }
+        if case .requireViewportResample = planned.plan.steps[2] {
+        } else {
+            XCTFail("expected viewport resample step")
         }
     }
 

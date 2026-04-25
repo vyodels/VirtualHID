@@ -209,6 +209,12 @@ public final class ControlService {
             geometry: geometry,
             primitives: requestedPrimitives
         )
+        if planned.plan.requiresViewportResample {
+            throw ControlServerError.coded(
+                "E_VIEWPORT_RESAMPLE_REQUIRED",
+                "target requires scrolling before final action; caller must resample browser viewport/scrollOffset and submit the updated target instead of executing a stale screen point"
+            )
+        }
         let primitives = planned.primitives
         let options = parseOptions(params["options"] as? [String: Any])
         let requestedMode = options.postMode ?? configuration.defaultPostMode

@@ -76,6 +76,12 @@
 
 目标：完成“目标不在 viewport 内 -> 滚动 -> 重新解析 viewport/window -> 重新换算 -> 执行”的闭环。
 
+当前进展（2026-04-26）：
+
+- `ExecutionPlanV2` 已能显式标记 `requiresViewportResample`。
+- 当前 action 遇到目标不在 viewport 内时会返回 `E_VIEWPORT_RESAMPLE_REQUIRED`，禁止继续用滚动前旧 screen 坐标盲点。
+- 这仍不是完整自动二次采样闭环；最终闭环需要上游 browser/Agent 在滚动后重新提供 scrollOffset/pageScale/viewport 证据，再由 VirtualHID 执行更新后的目标。
+
 任务：
 
 - 在 `ExecutionPlanner` 中把 scroll-before-action 从单次计划升级为可重采样阶段。

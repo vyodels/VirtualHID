@@ -338,17 +338,25 @@ public enum ViewportMapper {
 public enum ExecutionPlanStep: Codable, Equatable {
     case activateTarget(TargetDescriptor)
     case scroll(dx: Double, dy: Double)
+    case requireViewportResample
     case emit(String)
 }
 
 public struct ExecutionPlanV2: Codable, Equatable {
     public let target: TargetDescriptor?
     public let geometryApplied: Bool
+    public let requiresViewportResample: Bool
     public let steps: [ExecutionPlanStep]
 
-    public init(target: TargetDescriptor?, geometryApplied: Bool, steps: [ExecutionPlanStep]) {
+    public init(
+        target: TargetDescriptor?,
+        geometryApplied: Bool,
+        requiresViewportResample: Bool = false,
+        steps: [ExecutionPlanStep]
+    ) {
         self.target = target
         self.geometryApplied = geometryApplied
+        self.requiresViewportResample = requiresViewportResample
         self.steps = steps
     }
 }
@@ -361,6 +369,7 @@ public enum ExecutionPlanner {
     ) -> (primitives: [ActionPrimitive], plan: ExecutionPlanV2) {
         var mapped = [ActionPrimitive]()
         var steps = [ExecutionPlanStep]()
+        var requiresViewportResample = false
         if let target {
             steps.append(.activateTarget(target))
         }
@@ -369,6 +378,8 @@ public enum ExecutionPlanner {
             let result = ViewportMapper.mapPrimitive(primitive, geometry: geometry)
             if let scroll = result.scrollDelta, scroll.dx != 0 || scroll.dy != 0 {
                 steps.append(.scroll(dx: scroll.dx, dy: scroll.dy))
+                steps.append(.requireViewportResample)
+                requiresViewportResample = true
             }
             steps.append(.emit(actionName(for: result.primitive)))
             mapped.append(result.primitive)
@@ -376,7 +387,12 @@ public enum ExecutionPlanner {
 
         return (
             mapped,
-            ExecutionPlanV2(target: target, geometryApplied: geometry != nil && geometry?.coordSpace != .screen, steps: steps)
+            ExecutionPlanV2(
+                target: target,
+                geometryApplied: geometry != nil && geometry?.coordSpace != .screen,
+                requiresViewportResample: requiresViewportResample,
+                steps: steps
+            )
         )
     }
 
