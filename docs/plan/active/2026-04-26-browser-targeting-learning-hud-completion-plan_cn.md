@@ -50,6 +50,15 @@
 
 目标：让 `TargetResolverV2` 从纯匹配策略升级到真实浏览器可执行激活。
 
+当前进展（2026-04-26）：
+
+- 已新增 `BrowserPageResolver`，用通用 browser adapter 枚举 Chrome / Chromium / Edge / Safari 的窗口和 tab。
+- 已接入 `BrowserResolver`：当 action target 带 `windowId / tabId / host` 时，先做 page 级解析和激活，再回到 AX/CG 解析真实窗口与 viewport。
+- `targetApp` evidence 已返回 `browserWindowId / tabId / host / url`，便于上游核对目标归因。
+- host-only 多候选会返回 ambiguous，不再因为 active/frontmost 加分而猜一个 tab。
+- 单元测试与 smoke 已通过；真实浏览器 live activation smoke 仍待执行。
+- 当前机器探测到 Chrome / Safari 进程存在，但 AppleScript 可见窗口数为 0；因此本轮没有可复用的真实 tab 做 live activation 验收，后续需要创建或复用一个明确测试 tab。
+
 任务：
 
 - 为 Chrome / Edge / Safari 建立 browser adapter，能力包含列出窗口、列出 tab、按 `windowId/tabId/host` 定位候选。

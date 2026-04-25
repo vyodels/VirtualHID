@@ -9,6 +9,10 @@ public struct BrowserTarget {
     public let bundleIdentifier: String
     public let windowId: Int?
     public let windowTitle: String?
+    public let browserWindowId: Int?
+    public let tabId: Int?
+    public let host: String?
+    public let url: String?
     public let frame: CGRect
     public let viewportFrame: CGRect?
     public let viewportFrameSource: String?
@@ -19,6 +23,10 @@ public struct BrowserTarget {
         bundleIdentifier: String,
         windowId: Int? = nil,
         windowTitle: String?,
+        browserWindowId: Int? = nil,
+        tabId: Int? = nil,
+        host: String? = nil,
+        url: String? = nil,
         frame: CGRect,
         viewportFrame: CGRect? = nil,
         viewportFrameSource: String? = nil
@@ -28,6 +36,10 @@ public struct BrowserTarget {
         self.bundleIdentifier = bundleIdentifier
         self.windowId = windowId
         self.windowTitle = windowTitle
+        self.browserWindowId = browserWindowId
+        self.tabId = tabId
+        self.host = host
+        self.url = url
         self.frame = frame
         self.viewportFrame = viewportFrame
         self.viewportFrameSource = viewportFrameSource
@@ -107,8 +119,14 @@ public enum BrowserResolver {
         var lastWindowError: BrowserResolverError?
 
         let requestedBundleIdentifiers = descriptor?.bundleId.map { [$0] } ?? bundleIdentifiers
+        let pageResolution = try resolvePageIfNeeded(
+            descriptor: descriptor,
+            bundleIdentifiers: requestedBundleIdentifiers
+        )
+        let pageTarget = pageResolution?.page
+        let targetBundleIdentifiers = pageTarget.map { [$0.bundleId] } ?? requestedBundleIdentifiers
         let useFocusedBrowserWindow = requiresFocusedBrowserWindow(descriptor)
-        for bundleIdentifier in requestedBundleIdentifiers {
+        for bundleIdentifier in targetBundleIdentifiers {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
                 .filter { !$0.isTerminated }
                 .sorted {
@@ -143,6 +161,10 @@ public enum BrowserResolver {
                             bundleIdentifier: bundleIdentifier,
                             windowId: window.windowId,
                             windowTitle: window.title,
+                            browserWindowId: pageTarget?.windowId,
+                            tabId: pageTarget?.tabId,
+                            host: pageTarget?.host,
+                            url: pageTarget?.url,
                             frame: window.frame,
                             viewportFrame: window.viewportFrame,
                             viewportFrameSource: window.viewportFrameSource
@@ -165,6 +187,19 @@ public enum BrowserResolver {
             throw lastWindowError
         }
         throw BrowserResolverError.appNotFound(bundleIdentifiers.joined(separator: ", "))
+    }
+
+    private static func resolvePageIfNeeded(
+        descriptor: TargetDescriptor?,
+        bundleIdentifiers: [String]
+    ) throws -> BrowserPageResolution? {
+        guard let descriptor, BrowserPageResolver.requiresPageResolution(descriptor) else {
+            return nil
+        }
+        return try BrowserPageResolver.resolve(
+            descriptor: descriptor,
+            bundleIdentifiers: bundleIdentifiers
+        )
     }
 
     private struct ResolvedWindow {
@@ -237,8 +272,8 @@ public enum BrowserResolver {
         guard let descriptor else {
             return true
         }
-        // Browser windowId/tabId/host are page identities, not macOS window identifiers.
-        // Keep macOS targeting grounded in bundle/title/AX window evidence.
+        // Browser page identity is resolved and activated before AX window lookup.
+        // The AX step stays grounded in macOS window evidence.
         if let requestedTitle = descriptor.windowTitle, window.title?.contains(requestedTitle) != true {
             return false
         }

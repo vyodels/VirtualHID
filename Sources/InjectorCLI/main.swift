@@ -11,7 +11,7 @@ struct Configuration {
 
 enum ConfigurationParser {
     static func parse(arguments: [String]) -> Configuration {
-        var bundleIdentifiers = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac"]
+        var bundleIdentifiers = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac", "com.apple.Safari"]
         var scenarioNames = [
             "mouse_move_click_active",
             "mouse_drag_active",

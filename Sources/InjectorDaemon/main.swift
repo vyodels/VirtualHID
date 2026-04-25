@@ -10,7 +10,7 @@ import Supervisor
 struct DaemonConfiguration {
     var socketPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("virtualhid.sock")
     var dbPath: String?
-    var bundleIdentifiers = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac"]
+    var bundleIdentifiers = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac", "com.apple.Safari"]
     var defaultPostMode = PostMode.global
     var startEventTap = true
     var allowSelfTarget = false

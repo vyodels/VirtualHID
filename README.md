@@ -15,6 +15,7 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 新增 / 进行中：
 
 - `TargetResolverV2` 的通用匹配/确认策略已落地，真实浏览器 tab 激活仍依赖上游 browser-mcp 或后续 AX/AppleScript 执行适配。
+- `BrowserPageResolver` 已增加 Chrome / Chromium / Edge / Safari 的 page 级枚举与激活适配；真实 live activation smoke 仍需在有目标浏览器窗口的 GUI 会话里跑完。
 - `ViewportMapper` 已支持 `viewport/document -> screen` 几何换算，并能在 action 响应里返回执行 plan。
 - `ReplayTraceStore` 已支持回放级 compact trace 指纹、retention 与摘要。
 - `OutcomeVerifier` 已返回注入层、指针层、焦点层证据；页面语义成功仍由 Agent/browser 侧确认。

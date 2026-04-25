@@ -6,6 +6,70 @@ import XCTest
 
 @objcMembers
 final class TargetingV2Tests: XCTestCase {
+    private final class ScriptRecorder {
+        var scripts = [String]()
+    }
+
+    private struct StubScriptRunner: BrowserPageScriptRunning {
+        var outputs: [String]
+        var recorder: ScriptRecorder
+
+        func runAppleScript(_ source: String) throws -> String {
+            recorder.scripts.append(source)
+            return outputs[min(recorder.scripts.count - 1, outputs.count - 1)]
+        }
+    }
+
+    func testBrowserPageResolverSelectsExactTabAndActivatesIt() throws {
+        let recorder = ScriptRecorder()
+        let output = [
+            ["42", "Jobs", "8", "1", "true", "Inbox", "https://example.com/inbox"],
+            ["42", "Jobs", "7", "2", "false", "Jobs", "https://example.com/jobs"]
+        ]
+        .map { $0.joined(separator: "\u{1F}") }
+        .joined(separator: "\u{1E}")
+        let runner = StubScriptRunner(outputs: [output, ""], recorder: recorder)
+
+        let resolution = try BrowserPageResolver.resolve(
+            descriptor: TargetDescriptor(bundleId: "com.google.Chrome", windowId: 42, tabId: 7, host: "example.com"),
+            bundleIdentifiers: ["com.google.Chrome"],
+            runner: runner,
+            requireRunningApplications: false
+        )
+
+        XCTAssertEqual(resolution.page.tabId, 7)
+        XCTAssertEqual(resolution.page.tabIndex, 2)
+        XCTAssertEqual(resolution.page.host, "example.com")
+        XCTAssertEqual(recorder.scripts.count, 2)
+        XCTAssertTrue(recorder.scripts[1].contains("set active tab index of targetWindow to 2"))
+    }
+
+    func testBrowserPageResolverRejectsAmbiguousHostOnlyMatch() throws {
+        let recorder = ScriptRecorder()
+        let output = [
+            ["42", "A", "7", "1", "true", "A", "https://example.com/a"],
+            ["43", "B", "8", "1", "false", "B", "https://example.com/b"]
+        ]
+        .map { $0.joined(separator: "\u{1F}") }
+        .joined(separator: "\u{1E}")
+        let runner = StubScriptRunner(outputs: [output], recorder: recorder)
+
+        XCTAssertThrowsError(
+            try BrowserPageResolver.resolve(
+                descriptor: TargetDescriptor(bundleId: "com.google.Chrome", host: "example.com"),
+                bundleIdentifiers: ["com.google.Chrome"],
+                runner: runner,
+                requireRunningApplications: false
+            )
+        ) { error in
+            if case TargetResolverV2Error.ambiguous(let candidates) = error {
+                XCTAssertEqual(candidates.count, 2)
+            } else {
+                XCTFail("expected ambiguous error, got \(error)")
+            }
+        }
+    }
+
     func testTargetResolverPrefersExactTabAndHost() throws {
         let descriptor = TargetDescriptor(
             bundleId: "com.example.Browser",

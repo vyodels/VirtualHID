@@ -16,7 +16,7 @@ public struct ControlServerConfiguration {
     public let allowSelfTarget: Bool
 
     public init(
-        bundleIdentifiers: [String] = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac"],
+        bundleIdentifiers: [String] = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac", "com.apple.Safari"],
         defaultPostMode: PostMode = .global,
         allowSelfTarget: Bool = false
     ) {
@@ -463,6 +463,10 @@ public final class ControlService {
             "frontmost": FocusController.isFrontmost(app: target.app),
             "windowTitle": target.windowTitle ?? NSNull(),
             "windowId": target.windowId ?? NSNull(),
+            "browserWindowId": target.browserWindowId ?? NSNull(),
+            "tabId": target.tabId ?? NSNull(),
+            "host": target.host ?? NSNull(),
+            "url": target.url ?? NSNull(),
             "windowFrame": rectObject(target.frame),
             "viewportFrame": rectObject(target.viewportFrame),
             "viewportSource": target.viewportFrameSource ?? NSNull()
