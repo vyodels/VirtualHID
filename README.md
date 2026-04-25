@@ -2,7 +2,7 @@
 
 VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它负责把上层 Agent 给出的目标锚点、允许落点区域和动作序列，转换成真实的鼠标/键盘事件流，并通过观察、聚合和长期分析不断调整自己的执行参数。
 
-## 当前状态（2026-04-25）
+## 当前状态（2026-04-26）
 
 已完成：
 
@@ -19,6 +19,7 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 - `ReplayTraceStore` 已支持回放级 compact trace 指纹、retention 与摘要。
 - `OutcomeVerifier` 已返回注入层、指针层、焦点层证据；页面语义成功仍由 Agent/browser 侧确认。
 - `scripts/humanization_analysis.py` 已能消费 `replayFingerprint / compactTrace`，从摘要级分析升级为 replay-aware 分析。
+- `docs/plan/active/2026-04-26-browser-targeting-learning-hud-completion-plan_cn.md` 已把真实浏览器激活、滚动后二次坐标、observer/semantic 证据、长期学习闭环、中文输入和 HUD 最终验收拆成后续收口任务。
 
 ## 当前能力
 
@@ -124,6 +125,7 @@ python3 scripts/humanization_analysis.py --pretty
 
 - 已完成实施文档：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
 - 下一阶段活动计划：`docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`
+- 后续收口计划：`docs/plan/active/2026-04-26-browser-targeting-learning-hud-completion-plan_cn.md`
 - 第一阶段最小验证契约：`docs/reference/hid-phase1-validation-contract_cn.md`
 - HUD / 可视化验收契约：`docs/reference/hid-hud-visualization-acceptance_cn.md`
 - 拟人化 / 长期学习 / Replay 审计：`docs/reference/humanization-learning-audit_cn.md`

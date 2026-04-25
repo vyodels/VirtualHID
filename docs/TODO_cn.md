@@ -9,6 +9,7 @@
 - viewport → OS 坐标换算：当前已支持 primitive 坐标、`PrimitiveProfile.origin` 与 `landingZone` 的基础映射；真实滚动后二次换算和窗口变化后的重采样仍需补齐
 - 执行结果证据化：当前能确认事件已投递，但还缺结构化“是否点中 / 是否被观察到 / 是否语义确认成功”
 - Codex replay-aware 自动调参：当前能消费 `replayFingerprint / compactTrace` 并输出建议；仍缺从真实长期样本到 profile 应用的自动闭环验收
+- HUD / 可视化浮层：已有 VirtualHID 自有 overlay、contract smoke 和 UI smoke 入口；仍缺真实目标窗口、真实截图、透明穿透和事件效果的最终视觉验收
 
 ## 中文输入支持
 
@@ -42,3 +43,4 @@ M2-M7 主计划已经完成，但下一阶段还有一组结构性能力待补�
 详细方案见：
 
 - `docs/plan/active/2026-04-24-targeting-and-replay-plan_cn.md`
+- `docs/plan/active/2026-04-26-browser-targeting-learning-hud-completion-plan_cn.md`

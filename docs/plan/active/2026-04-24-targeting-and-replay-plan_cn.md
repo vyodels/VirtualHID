@@ -3,6 +3,7 @@
 > **文档角色**：M2-M7 完成后的下一阶段活动计划
 > **状态**：🟡 进行中（2026-04-25：回放级指纹、坐标换算、计划生成、基础证据已落地；daemon socket / MCP smoke 已通过；真实 tab 激活与 observer 语义回声仍待后续实机联调）
 > **承接文档**：`docs/plan/completed/2026-04-23-virtualhid-impl_cn.md`
+> **后续收口**：`docs/plan/active/2026-04-26-browser-targeting-learning-hud-completion-plan_cn.md`
 > **目标**：把“摘要级学习”推进到“可回放、可验证、可长期优化”的执行与分析体系
 
 ---
