@@ -18,10 +18,6 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "XCTest",
-            path: "Sources/XCTest"
-        ),
-        .target(
             name: "InjectorCore",
             dependencies: ["HumanizationKit"],
             path: "Sources/InjectorCore",
@@ -73,27 +69,27 @@ let package = Package(
         ),
         .testTarget(
             name: "InjectorCoreTests",
-            dependencies: ["InjectorCore", "XCTest"],
+            dependencies: ["InjectorCore"],
             path: "Tests/InjectorCoreTests"
         ),
         .testTarget(
             name: "HumanizationKitTests",
-            dependencies: ["HumanizationKit", "XCTest"],
+            dependencies: ["HumanizationKit"],
             path: "Tests/HumanizationKitTests"
         ),
         .testTarget(
             name: "SupervisorTests",
-            dependencies: ["Supervisor", "XCTest"],
+            dependencies: ["Supervisor"],
             path: "Tests/SupervisorTests"
         ),
         .testTarget(
             name: "ProfileStoreTests",
-            dependencies: ["ProfileStore", "HumanizationKit", "XCTest"],
+            dependencies: ["ProfileStore", "HumanizationKit"],
             path: "Tests/ProfileStoreTests"
         ),
         .testTarget(
             name: "ControlServerTests",
-            dependencies: ["ControlServer", "ProfileStore", "Supervisor", "XCTest"],
+            dependencies: ["ControlServer", "ProfileStore", "Supervisor"],
             path: "Tests/ControlServerTests"
         )
     ]
