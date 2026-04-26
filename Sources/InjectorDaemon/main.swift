@@ -6,9 +6,10 @@ import HIDVisualization
 import InjectorCore
 import ProfileStore
 import Supervisor
+import VirtualHIDRuntime
 
 struct DaemonConfiguration {
-    var socketPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("virtualhid.sock")
+    var socketPath = VirtualHIDRuntimePaths.defaultSocketPath
     var dbPath: String?
     var bundleIdentifiers = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac", "com.apple.Safari"]
     var defaultPostMode = PostMode.global
@@ -156,45 +157,33 @@ private func runDaemon(configuration: DaemonConfiguration) throws {
     }
 
     setbuf(stdout, nil)
-    let supervisor = SupervisorService()
-    if configuration.startEventTap {
-        do {
-            try supervisor.startEventTap(promptForPermission: false)
-        } catch {
-            fputs("WARN: supervisor event tap unavailable: \(error.localizedDescription)\n", stderr)
-        }
-    }
-
-    let store = try ProfileStore(path: try profileStorePath(configuration.dbPath))
-    let hidOverlay = configuration.hudControl
-        ? HIDOverlayController(
-            settings: configuration.hudSettings,
-            enabled: configuration.visualizeHID,
-            lockedOff: configuration.hudLockedOff
-        )
-        : nil
-    if hidOverlay != nil {
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
-    let service = ControlService(
-        configuration: ControlServerConfiguration(
+    let runtime = try VirtualHIDRuntimeHost(
+        configuration: VirtualHIDRuntimeConfiguration(
+            socketPath: configuration.socketPath,
+            dbPath: configuration.dbPath,
             bundleIdentifiers: configuration.bundleIdentifiers,
             defaultPostMode: configuration.defaultPostMode,
-            allowSelfTarget: configuration.allowSelfTarget
-        ),
-        supervisor: supervisor,
-        profileStore: store,
-        hidEventSink: hidOverlay
+            startEventTap: configuration.startEventTap,
+            allowSelfTarget: configuration.allowSelfTarget,
+            hudAvailable: configuration.hudControl,
+            hudEnabled: configuration.visualizeHID,
+            hudLockedOff: configuration.hudLockedOff,
+            hudSettings: configuration.hudSettings
+        )
     )
-    let server = SocketServer(socketPath: configuration.socketPath, service: service)
-    try server.start()
+    if configuration.hudControl {
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+    try runtime.start()
     print("vhid-daemon listening \(configuration.socketPath)")
-    if hidOverlay != nil {
-        withExtendedLifetime(hidOverlay) {
+    if configuration.hudControl {
+        withExtendedLifetime(runtime) {
             NSApplication.shared.run()
         }
     } else {
-        RunLoop.main.run()
+        withExtendedLifetime(runtime) {
+            RunLoop.main.run()
+        }
     }
 }
 

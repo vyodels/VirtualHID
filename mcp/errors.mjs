@@ -1,7 +1,7 @@
 export function daemonUnavailable(message) {
   return {
     code: "E_DAEMON_UNREACHABLE",
-    message: message || "VirtualHID daemon is not reachable"
+    message: message || "VirtualHID runtime is not reachable"
   };
 }
 

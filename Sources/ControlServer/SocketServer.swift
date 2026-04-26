@@ -20,11 +20,19 @@ public final class SocketServer {
             if running {
                 return
             }
-            running = true
         }
 
         signal(SIGPIPE, SIG_IGN)
-        unlink(socketPath)
+        let parentDirectory = (socketPath as NSString).deletingLastPathComponent
+        if !parentDirectory.isEmpty {
+            try FileManager.default.createDirectory(atPath: parentDirectory, withIntermediateDirectories: true)
+        }
+        if FileManager.default.fileExists(atPath: socketPath) {
+            if socketHasLiveOwner(path: socketPath) {
+                throw POSIXError(.EADDRINUSE)
+            }
+            unlink(socketPath)
+        }
         let previousMask = umask(0o077)
         defer { umask(previousMask) }
 
@@ -57,6 +65,7 @@ public final class SocketServer {
 
         lock.withLock {
             serverFD = fd
+            running = true
         }
 
         queue.async { [weak self] in
@@ -167,6 +176,30 @@ public final class SocketServer {
                 }
             }
         }
+    }
+
+    private func socketHasLiveOwner(path: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return false
+        }
+        defer {
+            close(fd)
+        }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        do {
+            try copy(path: path, into: &address)
+        } catch {
+            return false
+        }
+        let length = socklen_t(MemoryLayout<sa_family_t>.size + path.utf8.count + 1)
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, length)
+            }
+        }
+        return result == 0
     }
 }
 

@@ -14,7 +14,8 @@ let package = Package(
         .library(name: "Supervisor", targets: ["Supervisor"]),
         .library(name: "ProfileStore", targets: ["ProfileStore"]),
         .library(name: "HIDVisualization", targets: ["HIDVisualization"]),
-        .library(name: "ControlServer", targets: ["ControlServer"])
+        .library(name: "ControlServer", targets: ["ControlServer"]),
+        .library(name: "VirtualHIDRuntime", targets: ["VirtualHIDRuntime"])
     ],
     targets: [
         .target(
@@ -49,6 +50,11 @@ let package = Package(
             dependencies: ["InjectorCore", "HumanizationKit", "Supervisor", "ProfileStore"],
             path: "Sources/ControlServer"
         ),
+        .target(
+            name: "VirtualHIDRuntime",
+            dependencies: ["ControlServer", "HIDVisualization", "ProfileStore", "Supervisor"],
+            path: "Sources/VirtualHIDRuntime"
+        ),
         .executableTarget(
             name: "InjectorCLI",
             dependencies: ["InjectorCore", "HumanizationKit"],
@@ -56,11 +62,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "InjectorDaemon",
-            dependencies: ["ControlServer", "HIDVisualization", "ProfileStore", "Supervisor"],
+            dependencies: ["ControlServer", "HIDVisualization", "ProfileStore", "Supervisor", "VirtualHIDRuntime"],
             path: "Sources/InjectorDaemon"
         ),
         .executableTarget(
             name: "VirtualHIDTray",
+            dependencies: ["VirtualHIDRuntime"],
             path: "Sources/VirtualHIDTray"
         ),
         .executableTarget(

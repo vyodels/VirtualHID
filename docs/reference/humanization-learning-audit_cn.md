@@ -22,7 +22,7 @@ VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟�
 - `scripts/humanization_analysis.py` 现在会把 Swift 风格 top-level `segmentMs / hesitationMs / clickHoldMs / interClickMs / dwellMs / interKeyMs` 归一化为 `recommendedProfile.preferredRhythm`，避免 replay-aware report 检测到 compact trace 但推荐 profile 里丢失节奏片段。
 - `ActionCore` dry-run 已使用虚拟时间线推进 `sleep`，因此 click hold、inter-click 和 settle 节奏能在无真实 HID 投递时被测试和沉淀为 replay 指纹。
 - `ProfileStore.lookupTemplate` 已增加全局鼠标习惯模板 fallback：精确 host/sig/task/action 未命中时，可回退到 `__global__` 通用行为模板，避免把站点规则写入执行层。
-- `vhid-tray` 已增加中文学习控制面：开启/关闭学习、选择被动学习或专项训练、填写训练名称/host/action，并提交或丢弃训练样本。
+- `VirtualHID.app` 管理中心已增加中文学习控制面：开启/关闭学习、选择被动学习或专项训练、填写训练名称/host/action，并提交或丢弃训练样本。
 - 新增 `docs/reference/fixtures/humanization-replay-history.jsonl`，用于快速验证 replay-aware report 不依赖真实站点或业务语义。
 - 新增 `scripts/analysis-apply-smoke.sh`，构造 10 条长期样本，验证 `profilePatchProposal -> profiles.apply -> action profiles.applied`。
 - `docs/TODO_cn.md` 已更新为“daemon replay/apply 通路已存在，缺真实长期样本验收”，避免后续 worker 误判为完全未实现。

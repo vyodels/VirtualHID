@@ -212,8 +212,10 @@
 - `./scripts/hud-smoke.sh` 已通过 contract smoke。
 - `./scripts/hud-manual-ui.sh` 已在唤醒显示器后通过真实 GUI 截图验收，证据路径：`/tmp/virtualhid-hud-manual.png`。
 - 脚本已修复 `IODisplayWrangler Current State 0` 的预检，显示器睡眠时会明确标为环境阻塞，不会伪造通过。
-- `vhid-tray` 已作为正式菜单栏控制入口接入 HUD 与学习配置，支持 HUD 常驻、轨迹/落点/事件特效开关、被动学习开关和专项训练控制。
-- `scripts/start-tray.sh`、`scripts/install-tray-launch-agent.sh`、`scripts/uninstall-tray-launch-agent.sh` 已提供开发启动和登录启动入口。
+- `VirtualHID.app` 已作为正式菜单栏控制入口接入 HUD 与学习配置，app 进程直接持有 `VirtualHIDRuntime`。
+- 单击托盘显示快捷配置菜单；双击托盘打开管理中心。
+- `scripts/build-app-bundle.sh` 已提供开发态 app bundle 构建入口；已移除直接启动 `.build/debug/vhid-tray` 的 LaunchAgent/脚本式入口。
+- `scripts/app-runtime-smoke.sh` 已覆盖正式 app 入口到 runtime/socket/state 的最小验收。
 
 任务：
 

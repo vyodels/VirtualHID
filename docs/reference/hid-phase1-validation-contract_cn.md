@@ -25,12 +25,12 @@ Phase-1 的目标不是覆盖真实招聘站点写入，而是把 VirtualHID 收
   输出最少消费：`history.records`、`history.groups`、`overall.recommendedProfile`、`overall.recommendedAdjustments`、`groups[].divergence`。
 
 观测点：`hid_state`、`hid_action(dryRun).events`、`hid_trace_commit`、`analysis/report`。
-HUD / visualization 是 VirtualHID 正式本地观察能力，不是额外数据源，也不是 per-action 业务字段；开启后适用于该 runtime 处理的每一次 `hid_action`，只能展示 VirtualHID events、execution context 与 verification，关闭时不得影响 action 结果。`vhid-tray` 是正式 macOS 菜单栏控制入口，通过 VirtualHID 内部 IPC 调整显示项与清除延迟，但不得影响 action payload、执行计划、事件生成或 verification。对 `recruit-agent` / Agent 而言，正式入口只有 MCP `hid_*` 工具；内部 IPC/socket 只允许 MCP shim、托盘和 VirtualHID 自测使用，不得作为跨项目 mock 招聘流程入口。验收细节见 `docs/reference/hid-hud-visualization-acceptance_cn.md`。
+HUD / visualization 是 VirtualHID 正式本地观察能力，不是额外数据源，也不是 per-action 业务字段；开启后适用于该 runtime 处理的每一次 `hid_action`，只能展示 VirtualHID events、execution context 与 verification，关闭时不得影响 action 结果。`VirtualHID.app` 是正式 macOS 菜单栏控制入口，app 进程直接持有 runtime，并通过管理中心调整显示项与清除延迟，但不得影响 action payload、执行计划、事件生成或 verification。对 `recruit-agent` / Agent 而言，正式入口只有 MCP `hid_*` 工具；内部 IPC/socket 只允许 MCP shim 和 VirtualHID 自测使用，不得作为跨项目 mock 招聘流程入口。验收细节见 `docs/reference/hid-hud-visualization-acceptance_cn.md`。
 失败信号：`E_PRIMITIVES_REQUIRED`、`E_PRIMITIVE_INVALID`、`E_CONTEXT_REQUIRED`、`E_FIXED_POINT_ONLY`、`E_NOT_FRONTMOST`、`E_POST_MODE_UNSUPPORTED`、`E_NO_TARGET`、`E_KILL_SWITCH`、`E_DAEMON_UNREACHABLE`。
 
 ## 3. Responsibility Split With Browser / Recruit-Agent
 
-属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、目标应用激活与 frontmost 校验、浏览器外壳瞬态遮挡 preflight、postMode / kill switch / 输入状态清理 / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。`global` / `auto` 写入由 VirtualHID 在投递前激活目标应用；`pid` 只允许 `mouseMoved / scrollWheel`，不得用于 click / drag / type / pasteText / key。`hid_unlock` 必须清理 kill switch 与卡住修饰键/鼠标按钮状态，不能只返回逻辑解锁。
+属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、目标应用激活与 frontmost 校验、浏览器外壳瞬态遮挡 preflight、postMode / kill switch / 输入状态清理 / 串行执行约束、MCP shim 到 `VirtualHIDRuntime` 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。`global` / `auto` 写入由 VirtualHID 在投递前激活目标应用；`pid` 只允许 `mouseMoved / scrollWheel`，不得用于 click / drag / type / pasteText / key。`hid_unlock` 必须清理 kill switch 与卡住修饰键/鼠标按钮状态，不能只返回逻辑解锁。
 
 Chrome 下载气泡、下载列表、菜单、popover 等浏览器外壳 UI 不属于网页 DOM，也不应由页面 JS / mock 页面 / recruit-agent fallback 处理。网页目标 `hid_action` 默认 `options.browserChromeOverlayPolicy = "auto"`，VirtualHID 通过 macOS AX 检测与目标浏览器窗口重叠的非标准外壳瞬态窗口，必要时发送 Escape 清理，并把结果写入 `result.preflight.browserChromeOverlay`。该 preflight 不进入业务 `events`、HUD 轨迹或 replay 学习样本。
 

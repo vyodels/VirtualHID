@@ -1,6 +1,7 @@
 bin/
 results/
 .build/
+dist/
 bin-injector-test
 .DS_Store
 __pycache__/

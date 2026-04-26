@@ -1,10 +1,9 @@
 import AppKit
 import Darwin
 import Foundation
+import VirtualHIDRuntime
 
-private let defaultBundles = "com.google.Chrome,org.chromium.Chromium,com.microsoft.edgemac,com.apple.Safari"
-
-final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
+final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum Component: String, CaseIterable {
         case windowFrame
         case diagnostic
@@ -37,8 +36,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private let client = VirtualHIDSocketClient()
+    private var runtime: VirtualHIDRuntimeHost?
+    private var runtimeError: String?
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var singleClickTimer: Timer?
+    private var lastStatusClickAt: Date?
+    private var quickMenu: NSMenu?
     private var panel: NSPanel?
     private var statusLabel: NSTextField?
     private var enabledCheckbox: NSButton?
@@ -52,7 +55,6 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
     private var trainingHostField: NSTextField?
     private var trainingActionField: NSTextField?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
-    private var autostartAttempted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -63,8 +65,29 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         button.image?.isTemplate = true
         button.title = " VHID"
         button.target = self
-        button.action = #selector(togglePanel(_:))
-        refreshState(autostartIfNeeded: true)
+        button.action = #selector(statusItemAction(_:))
+        startRuntime()
+        refreshState()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        runtime?.stop()
+    }
+
+    @objc private func statusItemAction(_ sender: Any?) {
+        let now = Date()
+        let isManualDoubleClick = lastStatusClickAt.map { now.timeIntervalSince($0) < 0.35 } ?? false
+        lastStatusClickAt = now
+        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 || isManualDoubleClick {
+            singleClickTimer?.invalidate()
+            singleClickTimer = nil
+            showPanel()
+            return
+        }
+        singleClickTimer?.invalidate()
+        singleClickTimer = Timer.scheduledTimer(withTimeInterval: 0.22, repeats: false) { [weak self] _ in
+            self?.showQuickMenu()
+        }
     }
 
     @objc private func togglePanel(_ sender: Any?) {
@@ -75,8 +98,76 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         showPanel()
     }
 
+    private func showQuickMenu() {
+        refreshState()
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.addItem(NSMenuItem(title: runtime == nil ? "Runtime：离线" : "Runtime：在线", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "HUD：\(lastState.enabled ? "开启" : "关闭")", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "学习：\(lastLearningState.enabled ? "开启" : "关闭") / \(lastLearningState.modeText)", action: nil, keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: lastState.enabled ? "暂停 HUD" : "开启 HUD", action: #selector(toggleHUDAction(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: lastLearningState.enabled ? "暂停学习" : "开启被动学习", action: #selector(toggleLearningAction(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "清除动态轨迹", action: #selector(clearTrailAction(_:)), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "打开管理中心", action: #selector(openManagementAction(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "退出 VirtualHID", action: #selector(quitAction(_:)), keyEquivalent: ""))
+        for item in menu.items {
+            item.target = self
+        }
+        statusItem.menu = menu
+        quickMenu = menu
+        statusItem.button?.performClick(nil)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === quickMenu else {
+            return
+        }
+        statusItem.menu = nil
+        quickMenu = nil
+    }
+
     @objc private func refreshAction(_ sender: Any?) {
         refreshState()
+    }
+
+    @objc private func openManagementAction(_ sender: Any?) {
+        showPanel()
+    }
+
+    @objc private func toggleHUDAction(_ sender: Any?) {
+        do {
+            let response = try call(method: "hud.configure", params: ["enabled": !lastState.enabled])
+            lastState = HUDState(response: response)
+        } catch {
+            lastState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    @objc private func toggleLearningAction(_ sender: Any?) {
+        do {
+            let response = try call(method: "learning.configure", params: [
+                "enabled": !lastLearningState.enabled,
+                "mode": lastLearningState.enabled ? "off" : "passive"
+            ])
+            lastLearningState = LearningState(response: response)
+        } catch {
+            lastLearningState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    @objc private func clearTrailAction(_ sender: Any?) {
+        do {
+            _ = try call(method: "hud.configure", params: ["clearDelaySeconds": 0.1])
+            let response = try call(method: "hud.configure", params: ["clearDelaySeconds": delayField?.doubleValue ?? 2.4])
+            lastState = HUDState(response: response)
+        } catch {
+            lastState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
     }
 
     @objc private func applyAction(_ sender: Any?) {
@@ -92,7 +183,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
             "settings": settings
         ]
         do {
-            let response = try client.call(method: "hud.configure", params: payload)
+            let response = try call(method: "hud.configure", params: payload)
             lastState = HUDState(response: response)
         } catch {
             lastState = .offline(message: localizedErrorMessage(error))
@@ -102,7 +193,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
 
     @objc private func applyLearningAction(_ sender: Any?) {
         do {
-            let response = try client.call(method: "learning.configure", params: [
+            let response = try call(method: "learning.configure", params: [
                 "enabled": learningEnabledCheckbox?.state == .on,
                 "mode": selectedLearningMode()
             ])
@@ -115,7 +206,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
 
     @objc private func startTrainingAction(_ sender: Any?) {
         do {
-            let response = try client.call(method: "learning.session.start", params: [
+            let response = try call(method: "learning.session.start", params: [
                 "label": trainingLabelField?.stringValue ?? "",
                 "host": trainingHostField?.stringValue ?? "",
                 "targetAction": trainingActionField?.stringValue ?? ""
@@ -136,17 +227,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startDaemonAction(_ sender: Any?) {
-        do {
-            try startManagedDaemon()
-            lastState = .offline(message: "正在启动 VirtualHID 执行服务...")
-            lastLearningState = .offline(message: "正在启动 VirtualHID 执行服务...")
-            updateControls()
-            scheduleRefreshAfterDaemonStart()
-        } catch {
-            lastState = .offline(message: localizedErrorMessage(error))
-            lastLearningState = .offline(message: localizedErrorMessage(error))
-            updateControls()
-        }
+        startRuntime(restart: true)
+        refreshState()
     }
 
     @objc private func quitAction(_ sender: Any?) {
@@ -168,195 +250,318 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
 
     private func refreshState(autostartIfNeeded: Bool = false) {
         do {
-            let response = try client.call(method: "hud.state", params: [:])
+            let response = try call(method: "hud.state", params: [:])
             lastState = HUDState(response: response)
-            let learningResponse = try client.call(method: "learning.state", params: [:])
+            let learningResponse = try call(method: "learning.state", params: [:])
             lastLearningState = LearningState(response: learningResponse)
-            autostartAttempted = false
         } catch {
-            if autostartIfNeeded, !autostartAttempted {
-                autostartAttempted = true
-                do {
-                    try startManagedDaemon()
-                    lastState = .offline(message: "正在启动 VirtualHID 执行服务...")
-                    lastLearningState = .offline(message: "正在启动 VirtualHID 执行服务...")
-                    updateControls()
-                    scheduleRefreshAfterDaemonStart()
-                    return
-                } catch {
-                    lastState = .offline(message: localizedErrorMessage(error))
-                    lastLearningState = .offline(message: localizedErrorMessage(error))
-                    updateControls()
-                    return
-                }
-            }
             lastState = .offline(message: localizedErrorMessage(error))
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
         updateControls()
     }
 
-    private func scheduleRefreshAfterDaemonStart() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.refreshState()
+    private func startRuntime(restart: Bool = false) {
+        if restart {
+            runtime?.stop()
+            runtime = nil
+        }
+        guard runtime == nil else {
+            runtimeError = nil
+            return
+        }
+        do {
+            let host = try VirtualHIDRuntimeHost(
+                configuration: VirtualHIDRuntimeConfiguration.appDefault()
+            )
+            try host.start()
+            runtime = host
+            runtimeError = nil
+        } catch {
+            runtimeError = localizedErrorMessage(error)
+            lastState = .offline(message: runtimeError ?? "VirtualHID runtime 启动失败")
+            lastLearningState = .offline(message: runtimeError ?? "VirtualHID runtime 启动失败")
         }
     }
 
     private func buildPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
-        panel.title = "VirtualHID 控制面"
+        panel.title = "VirtualHID 管理中心"
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
 
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.translatesAutoresizingMaskIntoConstraints = false
+
         let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .leading
-        root.spacing = 10
-        root.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        root.orientation = .horizontal
+        root.alignment = .top
+        root.spacing = 16
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = NSTextField(labelWithString: "VirtualHID HUD 可视化配置")
-        title.font = NSFont.boldSystemFont(ofSize: 17)
-        root.addArrangedSubview(title)
+        let sidebar = makeSidebar()
+        sidebar.widthAnchor.constraint(equalToConstant: 148).isActive = true
+        root.addArrangedSubview(sidebar)
 
-        let subtitle = NSTextField(labelWithString: "这是 VirtualHID 的本地控制面。托盘只通过 daemon socket 配置 HUD 显示项，不创建 HID 事件，也不参与业务决策。")
-        subtitle.font = NSFont.systemFont(ofSize: 11)
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.lineBreakMode = .byWordWrapping
-        subtitle.maximumNumberOfLines = 3
-        subtitle.preferredMaxLayoutWidth = 398
-        root.addArrangedSubview(subtitle)
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 14
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        root.addArrangedSubview(content)
 
-        let status = NSTextField(labelWithString: "")
-        status.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-        root.addArrangedSubview(status)
-        statusLabel = status
+        let title = label("VirtualHID 管理中心", size: 24, weight: .bold)
+        let subtitle = label("常驻 macOS runtime，统一管理 HID 可视化、学习训练和 MCP 接入状态。", size: 12, color: .secondaryLabelColor)
+        content.addArrangedSubview(title)
+        content.addArrangedSubview(subtitle)
 
-        let enabled = NSButton(checkboxWithTitle: "开启 HUD 透明可视化浮层", target: self, action: #selector(applyAction(_:)))
-        root.addArrangedSubview(enabled)
+        let overview = NSStackView()
+        overview.orientation = .horizontal
+        overview.spacing = 10
+        overview.addArrangedSubview(metricCard(title: "运行时", value: runtime == nil ? "离线" : "在线", caption: "VirtualHID.app"))
+        overview.addArrangedSubview(metricCard(title: "HUD", value: lastState.enabled ? "开启" : "关闭", caption: "透明轨迹层"))
+        overview.addArrangedSubview(metricCard(title: "学习", value: lastLearningState.enabled ? "开启" : "关闭", caption: lastLearningState.modeText))
+        overview.addArrangedSubview(metricCard(title: "样本", value: "\(lastLearningState.persistedSamples)", caption: "已持久化"))
+        content.addArrangedSubview(overview)
+
+        let middle = NSStackView()
+        middle.orientation = .horizontal
+        middle.alignment = .top
+        middle.spacing = 14
+        middle.addArrangedSubview(makeHUDCard())
+        middle.addArrangedSubview(makeLearningCard())
+        content.addArrangedSubview(middle)
+
+        let runtimeCard = CardView()
+        runtimeCard.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        let runtimeStack = cardStack()
+        runtimeStack.addArrangedSubview(label("运行时与安全", size: 15, weight: .semibold))
+        let runtimeStatus = label("", size: 12, weight: .medium)
+        runtimeStatus.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        runtimeStack.addArrangedSubview(runtimeStatus)
+        statusLabel = runtimeStatus
+        let runtimeButtons = NSStackView()
+        runtimeButtons.orientation = .horizontal
+        runtimeButtons.spacing = 8
+        runtimeButtons.addArrangedSubview(actionButton("刷新状态", action: #selector(refreshAction(_:))))
+        runtimeButtons.addArrangedSubview(actionButton("重启 Runtime", action: #selector(startDaemonAction(_:))))
+        runtimeButtons.addArrangedSubview(actionButton("退出", action: #selector(quitAction(_:))))
+        runtimeStack.addArrangedSubview(runtimeButtons)
+        runtimeCard.addContent(runtimeStack)
+        content.addArrangedSubview(runtimeCard)
+
+        panel.contentView = effect
+        effect.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            root.topAnchor.constraint(equalTo: effect.topAnchor),
+            root.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+        ])
+        return panel
+    }
+
+    private func makeSidebar() -> NSView {
+        let sidebar = CardView()
+        let stack = cardStack(spacing: 12)
+        stack.addArrangedSubview(label("VHID", size: 22, weight: .heavy))
+        stack.addArrangedSubview(label("可视化与学习", size: 11, color: .secondaryLabelColor))
+        for item in ["总览", "HUD 可视化", "学习与训练", "运行时", "安全"] {
+            let row = label(item, size: 13, weight: item == "总览" ? .semibold : .regular)
+            row.textColor = item == "总览" ? .controlAccentColor : .labelColor
+            stack.addArrangedSubview(row)
+        }
+        let spacer = NSView()
+        spacer.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        stack.addArrangedSubview(spacer)
+        stack.addArrangedSubview(label("单击托盘：快捷菜单\n双击托盘：管理中心", size: 11, color: .secondaryLabelColor))
+        sidebar.addContent(stack)
+        return sidebar
+    }
+
+    private func makeHUDCard() -> NSView {
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let stack = cardStack()
+        stack.addArrangedSubview(label("HUD 可视化", size: 16, weight: .semibold))
+        let preview = HUDPreviewView()
+        preview.heightAnchor.constraint(equalToConstant: 118).isActive = true
+        preview.widthAnchor.constraint(equalToConstant: 292).isActive = true
+        stack.addArrangedSubview(preview)
+
+        let enabled = NSButton(checkboxWithTitle: "开启透明浮层", target: self, action: #selector(applyAction(_:)))
+        enabled.controlSize = .large
         enabledCheckbox = enabled
+        stack.addArrangedSubview(enabled)
 
-        let separator = NSBox()
-        separator.boxType = .separator
-        root.addArrangedSubview(separator)
-        separator.widthAnchor.constraint(equalToConstant: 398).isActive = true
-
-        for component in Component.allCases {
-            let checkbox = NSButton(checkboxWithTitle: component.title, target: self, action: #selector(applyAction(_:)))
-            componentCheckboxes[component] = checkbox
-            root.addArrangedSubview(checkbox)
+        let pillRows: [[Component]] = [
+            [.trail, .trailPoints, .expectedPoint],
+            [.actualPoint, .clickEffects, .dragEffects],
+            [.scrollEffects, .keyboardEffects, .persistent]
+        ]
+        for rowComponents in pillRows {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 6
+            for component in rowComponents {
+                row.addArrangedSubview(pill(component))
+            }
+            stack.addArrangedSubview(row)
         }
 
         let delayStack = NSStackView()
         delayStack.orientation = .horizontal
         delayStack.alignment = .centerY
         delayStack.spacing = 8
-        delayStack.addArrangedSubview(NSTextField(labelWithString: "自动清除延迟"))
+        delayStack.addArrangedSubview(label("清除延迟", size: 12, color: .secondaryLabelColor))
         let delay = NSTextField(string: "2.4")
         delay.alignment = .right
         delay.target = self
         delay.action = #selector(applyAction(_:))
-        delay.widthAnchor.constraint(equalToConstant: 64).isActive = true
-        delayStack.addArrangedSubview(delay)
-        delayStack.addArrangedSubview(NSTextField(labelWithString: "秒"))
+        delay.widthAnchor.constraint(equalToConstant: 58).isActive = true
         delayField = delay
-        root.addArrangedSubview(delayStack)
+        delayStack.addArrangedSubview(delay)
+        delayStack.addArrangedSubview(label("秒", size: 12, color: .secondaryLabelColor))
+        stack.addArrangedSubview(delayStack)
+        stack.addArrangedSubview(actionButton("应用 HUD 配置", action: #selector(applyAction(_:))))
+        card.addContent(stack)
+        return card
+    }
 
-        let hudButtons = NSStackView()
-        hudButtons.orientation = .horizontal
-        hudButtons.spacing = 8
-        hudButtons.addArrangedSubview(NSButton(title: "刷新", target: self, action: #selector(refreshAction(_:))))
-        hudButtons.addArrangedSubview(NSButton(title: "应用 HUD", target: self, action: #selector(applyAction(_:))))
-        hudButtons.addArrangedSubview(NSButton(title: "启动服务", target: self, action: #selector(startDaemonAction(_:))))
-        hudButtons.addArrangedSubview(NSButton(title: "退出", target: self, action: #selector(quitAction(_:))))
-        root.addArrangedSubview(hudButtons)
-
-        let learningSeparator = NSBox()
-        learningSeparator.boxType = .separator
-        root.addArrangedSubview(learningSeparator)
-        learningSeparator.widthAnchor.constraint(equalToConstant: 398).isActive = true
-
-        let learningTitle = NSTextField(labelWithString: "鼠标习惯学习")
-        learningTitle.font = NSFont.boldSystemFont(ofSize: 15)
-        root.addArrangedSubview(learningTitle)
-
-        let learningHint = NSTextField(labelWithString: "学习只采集压缩后的鼠标行为指纹：路径骨架、节奏、停顿、点击时间流和速度特征；不保存业务页面内容。")
-        learningHint.font = NSFont.systemFont(ofSize: 11)
-        learningHint.textColor = .secondaryLabelColor
-        learningHint.lineBreakMode = .byWordWrapping
-        learningHint.maximumNumberOfLines = 3
-        learningHint.preferredMaxLayoutWidth = 398
-        root.addArrangedSubview(learningHint)
-
-        let learningStatus = NSTextField(labelWithString: "")
-        learningStatus.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private func makeLearningCard() -> NSView {
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let stack = cardStack()
+        stack.addArrangedSubview(label("学习与训练", size: 16, weight: .semibold))
+        let learningStatus = label("", size: 11, color: .secondaryLabelColor)
         learningStatus.lineBreakMode = .byWordWrapping
         learningStatus.maximumNumberOfLines = 3
-        learningStatus.preferredMaxLayoutWidth = 398
-        root.addArrangedSubview(learningStatus)
+        learningStatus.preferredMaxLayoutWidth = 292
         learningStatusLabel = learningStatus
+        stack.addArrangedSubview(learningStatus)
 
         let learningEnabled = NSButton(checkboxWithTitle: "开启鼠标习惯学习", target: self, action: #selector(applyLearningAction(_:)))
-        root.addArrangedSubview(learningEnabled)
+        learningEnabled.controlSize = .large
         learningEnabledCheckbox = learningEnabled
+        stack.addArrangedSubview(learningEnabled)
 
         let modeStack = NSStackView()
         modeStack.orientation = .horizontal
         modeStack.alignment = .centerY
         modeStack.spacing = 8
-        modeStack.addArrangedSubview(NSTextField(labelWithString: "学习模式"))
+        modeStack.addArrangedSubview(label("模式", size: 12, color: .secondaryLabelColor))
         let modePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         modePopup.addItems(withTitles: ["被动学习", "专项训练", "关闭"])
         modePopup.target = self
         modePopup.action = #selector(applyLearningAction(_:))
         modePopup.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        modeStack.addArrangedSubview(modePopup)
         learningModePopup = modePopup
-        root.addArrangedSubview(modeStack)
+        modeStack.addArrangedSubview(modePopup)
+        stack.addArrangedSubview(modeStack)
+
+        let rhythm = LearningRhythmView()
+        rhythm.heightAnchor.constraint(equalToConstant: 64).isActive = true
+        rhythm.widthAnchor.constraint(equalToConstant: 292).isActive = true
+        stack.addArrangedSubview(rhythm)
 
         let labelField = NSTextField(string: "手动轨迹训练")
         let hostField = NSTextField(string: "")
-        hostField.placeholderString = "可选：训练目标 host"
+        hostField.placeholderString = "可选 host"
         let actionField = NSTextField(string: "click")
         actionField.placeholderString = "click / drag / scroll"
         for field in [labelField, hostField, actionField] {
-            field.widthAnchor.constraint(equalToConstant: 250).isActive = true
+            field.widthAnchor.constraint(equalToConstant: 198).isActive = true
         }
         trainingLabelField = labelField
         trainingHostField = hostField
         trainingActionField = actionField
-
-        let trainingGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "训练名称"), labelField],
-            [NSTextField(labelWithString: "目标 Host"), hostField],
-            [NSTextField(labelWithString: "动作类型"), actionField]
+        let grid = NSGridView(views: [
+            [label("名称", size: 12, color: .secondaryLabelColor), labelField],
+            [label("Host", size: 12, color: .secondaryLabelColor), hostField],
+            [label("动作", size: 12, color: .secondaryLabelColor), actionField]
         ])
-        trainingGrid.rowSpacing = 6
-        trainingGrid.columnSpacing = 8
-        root.addArrangedSubview(trainingGrid)
+        grid.rowSpacing = 6
+        grid.columnSpacing = 8
+        stack.addArrangedSubview(grid)
 
-        let learningButtons = NSStackView()
-        learningButtons.orientation = .horizontal
-        learningButtons.spacing = 8
-        learningButtons.addArrangedSubview(NSButton(title: "应用学习", target: self, action: #selector(applyLearningAction(_:))))
-        learningButtons.addArrangedSubview(NSButton(title: "开始训练", target: self, action: #selector(startTrainingAction(_:))))
-        learningButtons.addArrangedSubview(NSButton(title: "提交训练", target: self, action: #selector(commitTrainingAction(_:))))
-        learningButtons.addArrangedSubview(NSButton(title: "丢弃训练", target: self, action: #selector(discardTrainingAction(_:))))
-        root.addArrangedSubview(learningButtons)
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.addArrangedSubview(actionButton("开始", action: #selector(startTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("提交", action: #selector(commitTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("丢弃", action: #selector(discardTrainingAction(_:))))
+        stack.addArrangedSubview(buttons)
+        card.addContent(stack)
+        return card
+    }
 
-        panel.contentView?.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor),
-            root.topAnchor.constraint(equalTo: panel.contentView!.topAnchor),
-            root.bottomAnchor.constraint(equalTo: panel.contentView!.bottomAnchor)
-        ])
-        return panel
+    private func metricCard(title: String, value: String, caption: String) -> NSView {
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        let stack = cardStack(spacing: 4)
+        stack.addArrangedSubview(label(title, size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(label(value, size: 22, weight: .bold))
+        stack.addArrangedSubview(label(caption, size: 11, color: .secondaryLabelColor))
+        card.addContent(stack, inset: 12)
+        return card
+    }
+
+    private func pill(_ component: Component) -> NSButton {
+        let button = NSButton(checkboxWithTitle: pillTitle(component), target: self, action: #selector(applyAction(_:)))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        componentCheckboxes[component] = button
+        return button
+    }
+
+    private func pillTitle(_ component: Component) -> String {
+        switch component {
+        case .trail: return "轨迹"
+        case .trailPoints: return "采样点"
+        case .expectedPoint: return "预期靶心"
+        case .actualPoint: return "实际 X"
+        case .clickEffects: return "点击"
+        case .dragEffects: return "拖拽"
+        case .scrollEffects: return "滚动"
+        case .keyboardEffects: return "键盘"
+        case .persistent: return "常驻"
+        case .windowFrame: return "窗口框"
+        case .diagnostic: return "诊断"
+        case .status: return "状态"
+        }
+    }
+
+    private func cardStack(spacing: CGFloat = 10) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = spacing
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .labelColor) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = NSFont.systemFont(ofSize: size, weight: weight)
+        field.textColor = color
+        field.lineBreakMode = .byWordWrapping
+        return field
+    }
+
+    private func actionButton(_ title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        return button
     }
 
     private func updateControls() {
@@ -403,38 +608,24 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         panel.setFrameOrigin(origin)
     }
 
-    private func startManagedDaemon() throws {
-        guard let executableURL = Bundle.main.executableURL else {
-            throw TrayError("无法定位 vhid-tray 可执行文件")
-        }
-        let daemonURL = executableURL.deletingLastPathComponent().appendingPathComponent("vhid-daemon")
-        guard FileManager.default.isExecutableFile(atPath: daemonURL.path) else {
-            throw TrayError("未在 vhid-tray 同目录找到 vhid-daemon")
-        }
-        let process = Process()
-        process.executableURL = daemonURL
-        process.arguments = [
-            "--socket-path",
-            client.socketPath,
-            "--bundle",
-            ProcessInfo.processInfo.environment["VIRTUALHID_BUNDLES"] ?? defaultBundles,
-            "--hud-control",
-            "--visualize-hid"
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["VIRTUALHID_SOCKET"] = client.socketPath
-        process.environment = environment
-        try process.run()
-    }
-
     private func stopTraining(commit: Bool) {
         do {
-            let response = try client.call(method: "learning.session.stop", params: ["commit": commit])
+            let response = try call(method: "learning.session.stop", params: ["commit": commit])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
         updateControls()
+    }
+
+    private func call(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+        if runtime == nil {
+            startRuntime()
+        }
+        guard let runtime else {
+            throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
+        }
+        return try runtime.call(method: method, params: params)
     }
 
     private func selectedLearningMode() -> String {
@@ -480,7 +671,7 @@ private struct HUDState {
             return "离线：\(message)"
         }
         if !available {
-            return "HUD 控制不可用：请以 --hud-control 或 --visualize-hid 启动 vhid-daemon。"
+            return "HUD 控制不可用：请从 VirtualHID.app 启动本地运行时，或使用 CLI smoke 显式开启 HUD。"
         }
         if lockedOff {
             return "HUD 已被启动配置强制关闭。"
@@ -538,18 +729,20 @@ private struct LearningState {
     let lastLearnedAt: String?
     let message: String?
 
+    var modeText: String {
+        switch mode {
+        case "training":
+            return "专项训练"
+        case "off":
+            return "关闭"
+        default:
+            return "被动学习"
+        }
+    }
+
     var statusText: String {
         if let message {
             return "学习离线：\(message)"
-        }
-        let modeText: String
-        switch mode {
-        case "training":
-            modeText = "专项训练"
-        case "off":
-            modeText = "关闭"
-        default:
-            modeText = "被动学习"
         }
         let sessionText = activeSessionLabel.map { "，训练：\($0)" } ?? ""
         return "学习：\(enabled ? "开启" : "关闭") / \(modeText)，已产出 \(producedSamples) 个样本，待提交 \(pendingTrainingSamples) 个，已持久化 \(persistedSamples) 个，模板 \(totalTemplates) 个\(sessionText)"
@@ -615,104 +808,6 @@ private struct LearningState {
     }
 }
 
-private final class VirtualHIDSocketClient {
-    let socketPath: String
-
-    init(socketPath: String = VirtualHIDSocketClient.defaultSocketPath()) {
-        self.socketPath = socketPath
-    }
-
-    func call(method: String, params: [String: Any]) throws -> [String: Any] {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw POSIXError(.init(rawValue: errno) ?? .EIO)
-        }
-        defer {
-            close(fd)
-        }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let maxPathLength = MemoryLayout.size(ofValue: address.sun_path)
-        try socketPath.withCString { pathPointer in
-            try withUnsafeMutablePointer(to: &address.sun_path) { tuplePointer in
-                try tuplePointer.withMemoryRebound(to: CChar.self, capacity: maxPathLength) { destination in
-                    guard strlen(pathPointer) < maxPathLength else {
-                        throw POSIXError(.ENAMETOOLONG)
-                    }
-                    strncpy(destination, pathPointer, maxPathLength - 1)
-                }
-            }
-        }
-        let length = socklen_t(MemoryLayout<sa_family_t>.size + socketPath.utf8.count + 1)
-        let connectResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, length)
-            }
-        }
-        guard connectResult == 0 else {
-            throw POSIXError(.init(rawValue: errno) ?? .ECONNREFUSED)
-        }
-
-        let request: [String: Any] = [
-            "id": "tray-\(UUID().uuidString)",
-            "method": method,
-            "params": params
-        ]
-        let data = try JSONSerialization.data(withJSONObject: request)
-        var line = data
-        line.append(0x0A)
-        try writeAll(line, fd: fd)
-        return try readResponse(fd: fd)
-    }
-
-    private func writeAll(_ data: Data, fd: Int32) throws {
-        try data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
-                return
-            }
-            var offset = 0
-            while offset < data.count {
-                let written = Darwin.write(fd, baseAddress.advanced(by: offset), data.count - offset)
-                if written > 0 {
-                    offset += written
-                    continue
-                }
-                if written < 0, errno == EINTR {
-                    continue
-                }
-                throw POSIXError(.init(rawValue: errno) ?? .EIO)
-            }
-        }
-    }
-
-    private func readResponse(fd: Int32) throws -> [String: Any] {
-        var data = Data()
-        var byte: UInt8 = 0
-        while true {
-            let readCount = Darwin.read(fd, &byte, 1)
-            if readCount < 0, errno == EINTR {
-                continue
-            }
-            if readCount <= 0 {
-                break
-            }
-            if byte == 0x0A {
-                break
-            }
-            data.append(byte)
-        }
-        guard !data.isEmpty else {
-            throw TrayError("empty daemon response")
-        }
-        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-    }
-
-    private static func defaultSocketPath() -> String {
-        ProcessInfo.processInfo.environment["VIRTUALHID_SOCKET"]
-            ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("virtualhid.sock")
-    }
-}
-
 private struct TrayError: Error, LocalizedError {
     let message: String
 
@@ -752,4 +847,113 @@ private func intValue(_ value: Any?) -> Int? {
         return Int(string)
     }
     return nil
+}
+
+private final class CardView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 16
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.72).cgColor
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.32).cgColor
+        layer?.borderWidth = 1
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func addContent(_ view: NSView, inset: CGFloat = 14) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
+            view.topAnchor.constraint(equalTo: topAnchor, constant: inset),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset)
+        ])
+    }
+}
+
+private final class HUDPreviewView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.78).cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let bounds = self.bounds.insetBy(dx: 16, dy: 14)
+        NSColor(calibratedRed: 0.10, green: 0.77, blue: 0.78, alpha: 1).setStroke()
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: bounds.minX + 10, y: bounds.minY + 18))
+        path.curve(
+            to: NSPoint(x: bounds.maxX - 62, y: bounds.maxY - 26),
+            controlPoint1: NSPoint(x: bounds.minX + 58, y: bounds.minY + 92),
+            controlPoint2: NSPoint(x: bounds.maxX - 130, y: bounds.midY - 20)
+        )
+        path.lineWidth = 3
+        path.stroke()
+
+        NSColor.white.withAlphaComponent(0.88).setFill()
+        for point in [NSPoint(x: bounds.minX + 44, y: bounds.minY + 52), NSPoint(x: bounds.midX - 4, y: bounds.midY), NSPoint(x: bounds.maxX - 94, y: bounds.maxY - 44)] {
+            NSBezierPath(ovalIn: NSRect(x: point.x - 2.5, y: point.y - 2.5, width: 5, height: 5)).fill()
+        }
+
+        NSColor.systemOrange.setStroke()
+        let target = NSPoint(x: bounds.maxX - 44, y: bounds.maxY - 34)
+        let ring = NSBezierPath(ovalIn: NSRect(x: target.x - 12, y: target.y - 12, width: 24, height: 24))
+        ring.lineWidth = 1.5
+        ring.stroke()
+        NSBezierPath(rect: NSRect(x: target.x - 1, y: target.y - 15, width: 2, height: 30)).stroke()
+        NSBezierPath(rect: NSRect(x: target.x - 15, y: target.y - 1, width: 30, height: 2)).stroke()
+
+        NSColor.systemRed.setStroke()
+        let actual = NSPoint(x: bounds.maxX - 34, y: bounds.maxY - 28)
+        let xPath = NSBezierPath()
+        xPath.move(to: NSPoint(x: actual.x - 9, y: actual.y - 9))
+        xPath.line(to: NSPoint(x: actual.x + 9, y: actual.y + 9))
+        xPath.move(to: NSPoint(x: actual.x + 9, y: actual.y - 9))
+        xPath.line(to: NSPoint(x: actual.x - 9, y: actual.y + 9))
+        xPath.lineWidth = 2
+        xPath.stroke()
+    }
+}
+
+private final class LearningRhythmView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let bars: [CGFloat] = [0.28, 0.62, 0.48, 0.82, 0.36, 0.70, 0.55, 0.88, 0.42]
+        let width = bounds.width / CGFloat(bars.count * 2)
+        for (index, value) in bars.enumerated() {
+            let x = CGFloat(index) * width * 2 + width
+            let height = max(8, bounds.height * value)
+            let rect = NSRect(x: x, y: 8, width: width, height: height - 10)
+            NSColor.controlAccentColor.withAlphaComponent(0.72).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
+        }
+        let text = "速度变化 / 曲率 / 点击节奏"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+        text.draw(at: NSPoint(x: 12, y: bounds.maxY - 20), withAttributes: attrs)
+    }
 }

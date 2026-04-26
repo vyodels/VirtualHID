@@ -15,13 +15,13 @@ HUD 开启时应展示：
 
 ## 2. VirtualHID 正式 HUD / 控制面语义
 
-HUD 是 daemon 启动时确定的 VirtualHID 自有观察层：通过 `--visualize-hid` 或 `VIRTUALHID_VISUALIZE_HID=1` 启动后，应持续作用于该 daemon 处理的每一次 `hid_action`，直到 daemon 退出或被禁用入口关闭。它不是某个 smoke、demo 或单次 action 的专用参数。
+HUD 是 VirtualHID runtime 启动时确定的自有观察层：`VirtualHID.app` 默认持有可管理 HUD；CLI / smoke 入口通过 `--visualize-hid` 或 `VIRTUALHID_VISUALIZE_HID=1` 启动后，应持续作用于该 runtime 处理的每一次 `hid_action`，直到 runtime 退出或被禁用入口关闭。它不是某个 smoke、demo 或单次 action 的专用参数。
 
 HUD 配置属于 VirtualHID 本地观察设置，不属于 `hid_action` 的业务数据。上游 Agent / browser / recruit-agent 不应在 action payload 中传 HUD 绘制开关、视觉样式或坐标修正字段；这些设置只影响 VirtualHID 如何展示自己已经执行和验证的事件，不改变 action 计划、事件生成、落点选择或 verification 结果。
 
 `--no-hud` 或 `VIRTUALHID_NO_HUD=1` 具有最高优先级；关闭时 action、events、verification、trace 与分析链路仍照常产生，只是不挂 HUD sink。
 
-`vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动托盘即代表启动 VirtualHID 本地主程序；如果目标 socket 没有可用 daemon，托盘必须自动拉起带 `--hud-control --visualize-hid` 的 daemon，然后通过 daemon socket 调用 `hud.state / hud.configure`。托盘面板只允许修改 VirtualHID 本地 HUD 展示设置，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本和清除延迟；它不得写入 action payload、不得改变动作计划，也不得作为业务状态来源。
+`VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动 app 即代表启动 VirtualHID 本地主程序；app 进程直接持有 `VirtualHIDRuntime`、HUD、学习控制和供 MCP shim 连接的本机 socket。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理 UI 只允许修改 VirtualHID 本地 HUD / 学习设置，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本、清除延迟、被动学习和专项训练；它不得写入 action payload、不得改变动作计划，也不得作为业务状态来源。
 
 ## 3. 数据来源与边界
 
@@ -37,7 +37,7 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 
 - 窗口框与 viewport/window 诊断。
 - 常驻显示 HUD。
-- daemon / action 状态文本。
+- runtime / action 状态文本。
 - 事件轨迹线与轨迹采样点。
 - expected / final 指针点。
 - click / double-click 命中环。
@@ -50,10 +50,10 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 
 配置入口：
 
-- daemon 启动参数：`--hud-control`、`--hud-show <components>`、`--hud-hide <components>`、`--hud-clear-delay <seconds>`。
+- CLI / smoke 启动参数：`--hud-control`、`--hud-show <components>`、`--hud-hide <components>`、`--hud-clear-delay <seconds>`。
 - 环境变量：`VIRTUALHID_HUD_SHOW`、`VIRTUALHID_HUD_HIDE`、`VIRTUALHID_HUD_CLEAR_DELAY_SECONDS`。
 - 组件名：`all`、`persistent`、`window-frame`、`diagnostic`、`trail`、`trail-points`、`expected-point`、`actual-point`、`click-effects`、`drag-effects`、`scroll-effects`、`keyboard-effects`、`status`。
-- 交互入口：`vhid-tray` 在菜单栏显示 VirtualHID 图标，点击后打开同一批配置项的最小面板。
+- 交互入口：`VirtualHID.app` 在菜单栏显示 VirtualHID 图标；单击显示快捷配置菜单，双击打开管理中心。
 
 ## 5. 自动化验收
 

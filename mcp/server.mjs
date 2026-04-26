@@ -6,13 +6,26 @@ import path from "node:path";
 import { daemonUnavailable, mcpError } from "./errors.mjs";
 import { toolMethodMap, tools } from "./tools.mjs";
 
-const socketPath = process.env.VIRTUALHID_SOCKET || path.join(os.tmpdir(), "virtualhid.sock");
+const socketPath =
+  process.env.VIRTUALHID_SOCKET ||
+  path.join(os.homedir(), "Library", "Application Support", "VirtualHID", "virtualhid.sock");
 const daemonTimeoutMs = Number(process.env.VIRTUALHID_MCP_DAEMON_TIMEOUT_MS || 15000);
 let toolCallQueue = Promise.resolve();
 
 if (process.argv.includes("--smoke-tools")) {
   process.stdout.write(`${JSON.stringify({ tools: tools.map((tool) => tool.name) })}\n`);
   process.exit(0);
+}
+
+if (process.argv.includes("--smoke-state")) {
+  try {
+    const response = await callDaemon("state", {});
+    process.stdout.write(`${JSON.stringify(response)}\n`);
+    process.exit(response?.ok === true ? 0 : 1);
+  } catch (error) {
+    process.stderr.write(`${JSON.stringify(error)}\n`);
+    process.exit(1);
+  }
 }
 
 async function callDaemon(method, params) {
