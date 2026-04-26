@@ -174,12 +174,25 @@ public struct ActionOptions: Codable {
     public var postMode: PostMode?
     public var timeoutMs: Int?
     public var dryRun: Bool
+    public var browserChromeOverlayPolicy: BrowserChromeOverlayPolicy
 
-    public init(postMode: PostMode? = nil, timeoutMs: Int? = nil, dryRun: Bool = false) {
+    public init(
+        postMode: PostMode? = nil,
+        timeoutMs: Int? = nil,
+        dryRun: Bool = false,
+        browserChromeOverlayPolicy: BrowserChromeOverlayPolicy = .auto
+    ) {
         self.postMode = postMode
         self.timeoutMs = timeoutMs
         self.dryRun = dryRun
+        self.browserChromeOverlayPolicy = browserChromeOverlayPolicy
     }
+}
+
+public enum BrowserChromeOverlayPolicy: String, Codable {
+    case auto
+    case force
+    case off
 }
 
 public struct ActionRequest {

@@ -279,6 +279,39 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(error?["code"] as? String, "E_CONTEXT_MISMATCH")
     }
 
+    func testActionCanForceBrowserChromeOverlayPreflightWithoutContaminatingEvents() {
+        let service = try! makeServiceWithBrowserTargetOverride()
+        let response = service.handleLine(
+            #"{"id":"overlay-force","method":"action","params":{"target":{"bundleId":"com.google.Chrome","tabId":17,"host":"example.com"},"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true,"browserChromeOverlayPolicy":"force"},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try! decode(response)
+        let result = payload["result"] as? [String: Any]
+        let preflight = ((result?["preflight"] as? [String: Any])?["browserChromeOverlay"] as? [String: Any])
+        let events = result?["events"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(preflight?["policy"] as? String, "force")
+        XCTAssertEqual(preflight?["status"] as? String, "dryRun")
+        XCTAssertEqual(preflight?["attempted"] as? Bool, true)
+        XCTAssertEqual(preflight?["method"] as? String, "escape")
+        XCTAssertEqual(events?.contains { ($0["virtualKey"] as? Int) == 53 }, false)
+    }
+
+    func testActionCanDisableBrowserChromeOverlayPreflight() {
+        let service = try! makeServiceWithBrowserTargetOverride()
+        let response = service.handleLine(
+            #"{"id":"overlay-off","method":"action","params":{"target":{"bundleId":"com.google.Chrome","tabId":17,"host":"example.com"},"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true,"browserChromeOverlayPolicy":"off"},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try! decode(response)
+        let result = payload["result"] as? [String: Any]
+        let preflight = ((result?["preflight"] as? [String: Any])?["browserChromeOverlay"] as? [String: Any])
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(preflight?["policy"] as? String, "off")
+        XCTAssertEqual(preflight?["status"] as? String, "off")
+        XCTAssertEqual(preflight?["attempted"] as? Bool, false)
+    }
+
     func testActionRejectsMissingPrimitivesBeforeContextErrors() {
         let service = try! makeService()
         let response = service.handleLine(
@@ -387,6 +420,28 @@ final class ControlServiceTests: XCTestCase {
     private func makeServiceWithEphemeralHIDSink(box: HIDSinkBox) throws -> ControlService {
         let sink = BoxedHIDSink(box: box)
         return try makeService(hidEventSink: sink)
+    }
+
+    private func makeServiceWithBrowserTargetOverride() throws -> ControlService {
+        let app = NSRunningApplication.current
+        return try makeService(
+            allowSelfTarget: false,
+            targetResolverOverride: { descriptor in
+                BrowserTarget(
+                    app: app,
+                    pid: app.processIdentifier,
+                    bundleIdentifier: descriptor?.bundleId ?? "com.google.Chrome",
+                    windowTitle: "Jobs",
+                    browserWindowId: descriptor?.windowId,
+                    tabId: descriptor?.tabId,
+                    host: descriptor?.host,
+                    url: "https://example.com/jobs",
+                    frame: CGRect(x: 10, y: 20, width: 1000, height: 800),
+                    viewportFrame: CGRect(x: 10, y: 80, width: 1000, height: 700),
+                    viewportFrameSource: "test"
+                )
+            }
+        )
     }
 }
 

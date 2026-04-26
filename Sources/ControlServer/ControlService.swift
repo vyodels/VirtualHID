@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import HumanizationKit
@@ -263,6 +264,11 @@ public final class ControlService {
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
         let profileResult = applyProfiles(to: primitives, context: context)
         let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode, eventSink: hidEventSink)
+        let browserChromeOverlayPreflight = try handleBrowserChromeOverlayPreflight(
+            target: target,
+            primitives: profileResult.primitives,
+            options: options
+        )
         let observerStartId = supervisor.observer.tail(limit: 1).last?.id
         let observerWasEnabled = supervisor.observer.isEnabled
 
@@ -342,6 +348,9 @@ public final class ControlService {
             if let geometryResolution {
                 enriched["mapping"] = mappingObject(geometryResolution)
             }
+            enriched["preflight"] = [
+                "browserChromeOverlay": browserChromeOverlayPreflight.object
+            ]
             enriched["verification"] = try encodableObject(evidence)
             return enriched
         } catch {
@@ -666,8 +675,159 @@ public final class ControlService {
         return ActionOptions(
             postMode: postMode,
             timeoutMs: intValue(object["timeoutMs"]),
-            dryRun: object["dryRun"] as? Bool ?? false
+            dryRun: object["dryRun"] as? Bool ?? false,
+            browserChromeOverlayPolicy: browserChromeOverlayPolicy(from: object)
         )
+    }
+
+    private func browserChromeOverlayPolicy(from object: [String: Any]) -> BrowserChromeOverlayPolicy {
+        if let raw = nonEmptyString(
+            object["browserChromeOverlayPolicy"]
+                ?? object["chromeOverlayPolicy"]
+                ?? object["transientOverlayPolicy"]
+        )?.lowercased(), let policy = BrowserChromeOverlayPolicy(rawValue: raw) {
+            return policy
+        }
+        if let force = object["dismissBrowserChromeOverlays"] as? Bool
+            ?? object["dismissTransientOverlays"] as? Bool {
+            return force ? .force : .off
+        }
+        return .auto
+    }
+
+    private func handleBrowserChromeOverlayPreflight(
+        target: BrowserTarget,
+        primitives: [ActionPrimitive],
+        options: ActionOptions
+    ) throws -> BrowserChromeOverlayPreflightResult {
+        let policy = options.browserChromeOverlayPolicy
+        guard policy != .off else {
+            return BrowserChromeOverlayPreflightResult(policy: policy, status: "off")
+        }
+        guard isBrowserPageTarget(target) else {
+            return BrowserChromeOverlayPreflightResult(policy: policy, status: "notApplicable", reason: "target is not a browser page")
+        }
+        guard primitives.contains(where: \.canBeOccludedByBrowserChrome) else {
+            return BrowserChromeOverlayPreflightResult(policy: policy, status: "notApplicable", reason: "action has no page-facing primitive")
+        }
+
+        let detection: BrowserChromeOverlayDetection
+        switch policy {
+        case .force:
+            detection = BrowserChromeOverlayDetection(available: false, count: 0, roles: [], reason: "forced by caller")
+        case .auto:
+            detection = detectBrowserChromeTransientOverlays(target: target)
+            guard detection.count > 0 else {
+                return BrowserChromeOverlayPreflightResult(
+                    policy: policy,
+                    status: detection.available ? "clear" : "detectionUnavailable",
+                    reason: detection.reason,
+                    detection: detection
+                )
+            }
+        case .off:
+            return BrowserChromeOverlayPreflightResult(policy: policy, status: "off")
+        }
+
+        if options.dryRun {
+            return BrowserChromeOverlayPreflightResult(
+                policy: policy,
+                status: "dryRun",
+                attempted: true,
+                method: "escape",
+                reason: policy == .force ? "forced by caller" : "transient browser chrome overlay detected",
+                detection: detection
+            )
+        }
+
+        try postEscapeToDismissBrowserChrome(target: target)
+        return BrowserChromeOverlayPreflightResult(
+            policy: policy,
+            status: "dismissed",
+            attempted: true,
+            method: "escape",
+            reason: policy == .force ? "forced by caller" : "transient browser chrome overlay detected",
+            detection: detection
+        )
+    }
+
+    private func isBrowserPageTarget(_ target: BrowserTarget) -> Bool {
+        let browserBundleIds: Set<String> = [
+            "com.google.Chrome",
+            "org.chromium.Chromium",
+            "com.microsoft.edgemac",
+            "com.apple.Safari"
+        ]
+        guard browserBundleIds.contains(target.bundleIdentifier) else {
+            return false
+        }
+        return target.host != nil || target.url != nil || target.tabId != nil
+    }
+
+    private func detectBrowserChromeTransientOverlays(target: BrowserTarget) -> BrowserChromeOverlayDetection {
+        let axApp = AXUIElementCreateApplication(target.pid)
+        AXUIElementSetMessagingTimeout(axApp, 0.2)
+        guard let windows = copyAXElementArrayAttribute(of: axApp, name: kAXWindowsAttribute as String) else {
+            return BrowserChromeOverlayDetection(available: false, count: 0, roles: [], reason: "AX windows unavailable")
+        }
+
+        var roles = [String]()
+        for window in windows {
+            let role = copyStringAttribute(of: window, name: kAXRoleAttribute as String) ?? ""
+            let subrole = copyStringAttribute(of: window, name: kAXSubroleAttribute as String) ?? ""
+            guard let frame = copyFrame(of: window), frame.intersects(target.frame) else {
+                continue
+            }
+            guard isTransientBrowserChromeWindow(role: role, subrole: subrole, frame: frame, targetFrame: target.frame) else {
+                continue
+            }
+            roles.append(subrole.isEmpty ? role : "\(role):\(subrole)")
+        }
+
+        return BrowserChromeOverlayDetection(
+            available: true,
+            count: roles.count,
+            roles: roles,
+            reason: roles.isEmpty ? nil : "non-standard browser chrome window overlaps target"
+        )
+    }
+
+    private func isTransientBrowserChromeWindow(role: String, subrole: String, frame: CGRect, targetFrame: CGRect) -> Bool {
+        guard frame.width >= 16, frame.height >= 16, frame.width <= targetFrame.width, frame.height <= targetFrame.height else {
+            return false
+        }
+        if role == kAXWindowRole as String && subrole == kAXStandardWindowSubrole as String {
+            return false
+        }
+        let transientRoles: Set<String> = [
+            "AXDialog",
+            "AXHelpTag",
+            "AXMenu",
+            "AXPopover",
+            "AXSheet",
+            kAXMenuRole as String
+        ]
+        if transientRoles.contains(role) {
+            return true
+        }
+        return subrole.localizedCaseInsensitiveContains("popover")
+            || subrole.localizedCaseInsensitiveContains("dialog")
+            || subrole.localizedCaseInsensitiveContains("sheet")
+            || subrole.localizedCaseInsensitiveContains("menu")
+    }
+
+    private func postEscapeToDismissBrowserChrome(target: BrowserTarget) throws {
+        guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+            throw PosterError.notFrontmost
+        }
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) else {
+            throw ActionExecutionError.eventCreationFailed("escape")
+        }
+        let poster = EventPoster(mode: .global, targetPid: target.pid)
+        _ = try poster.post(down, type: .keyDown, frontmost: FocusController.isFrontmost(app: target.app))
+        _ = try poster.post(up, type: .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
+        FocusController.sleep(milliseconds: 80)
     }
 
     private func parsePrimitives(_ array: [[String: Any]]?) throws -> [ActionPrimitive] {
@@ -1135,6 +1295,56 @@ public final class ControlService {
     }
 }
 
+private struct BrowserChromeOverlayDetection {
+    let available: Bool
+    let count: Int
+    let roles: [String]
+    let reason: String?
+}
+
+private struct BrowserChromeOverlayPreflightResult {
+    let policy: BrowserChromeOverlayPolicy
+    let status: String
+    let attempted: Bool
+    let method: String?
+    let reason: String?
+    let detection: BrowserChromeOverlayDetection?
+
+    init(
+        policy: BrowserChromeOverlayPolicy,
+        status: String,
+        attempted: Bool = false,
+        method: String? = nil,
+        reason: String? = nil,
+        detection: BrowserChromeOverlayDetection? = nil
+    ) {
+        self.policy = policy
+        self.status = status
+        self.attempted = attempted
+        self.method = method
+        self.reason = reason
+        self.detection = detection
+    }
+
+    var object: [String: Any] {
+        [
+            "policy": policy.rawValue,
+            "status": status,
+            "attempted": attempted,
+            "method": method ?? NSNull(),
+            "reason": reason ?? NSNull(),
+            "detection": detection.map {
+                [
+                    "available": $0.available,
+                    "count": $0.count,
+                    "roles": $0.roles,
+                    "reason": $0.reason ?? NSNull()
+                ] as [String: Any]
+            } ?? NSNull()
+        ]
+    }
+}
+
 private struct WireRequest {
     let id: String
     let method: String
@@ -1218,6 +1428,51 @@ private func nonEmptyString(_ value: Any?) -> String? {
     }
     let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+}
+
+private func copyAXElementArrayAttribute(of element: AXUIElement, name: String) -> [AXUIElement]? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
+        return nil
+    }
+    return value as? [AXUIElement]
+}
+
+private func copyStringAttribute(of element: AXUIElement, name: String) -> String? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
+        return nil
+    }
+    return value as? String
+}
+
+private func copyFrame(of element: AXUIElement) -> CGRect? {
+    guard
+        let positionValue = copyAXValueAttribute(of: element, name: kAXPositionAttribute as String),
+        let sizeValue = copyAXValueAttribute(of: element, name: kAXSizeAttribute as String)
+    else {
+        return nil
+    }
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetType(positionValue) == .cgPoint, AXValueGetValue(positionValue, .cgPoint, &position) else {
+        return nil
+    }
+    guard AXValueGetType(sizeValue) == .cgSize, AXValueGetValue(sizeValue, .cgSize, &size) else {
+        return nil
+    }
+    return CGRect(origin: position, size: size)
+}
+
+private func copyAXValueAttribute(of element: AXUIElement, name: String) -> AXValue? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
+        return nil
+    }
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else {
+        return nil
+    }
+    return (value as! AXValue)
 }
 
 private func point(_ object: [String: Any]?, name: String) throws -> CGPoint {
@@ -1786,6 +2041,15 @@ private extension ActionPrimitive {
             return true
         case .click, .drag, .type, .pasteText, .key:
             return false
+        }
+    }
+
+    var canBeOccludedByBrowserChrome: Bool {
+        switch self {
+        case .move:
+            return false
+        case .click, .drag, .scroll, .type, .pasteText, .key:
+            return true
         }
     }
 }

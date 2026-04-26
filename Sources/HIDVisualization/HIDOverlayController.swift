@@ -508,10 +508,10 @@ private final class HIDOverlayView: NSView {
         }
         drawEffects(frameData.events, context: frameData.context)
         if settings.showExpectedPoint, let expected = frameData.expected {
-            drawMarker(point: expected, color: .systemOrange, label: "expected", radius: 14)
+            drawExpectedReticle(point: expected)
         }
         if settings.showActualPoint, let actual = frameData.actual {
-            drawMarker(point: actual, color: .systemRed, label: "actual", radius: 10)
+            drawActualCrosshair(point: actual)
         }
         if settings.showStatus {
             if let errorCode = frameData.errorCode {
@@ -558,16 +558,13 @@ private final class HIDOverlayView: NSView {
         }
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
-        NSColor.black.withAlphaComponent(0.68).setStroke()
-        path.lineWidth = 12
-        path.stroke()
-        NSColor(calibratedRed: 0.0, green: 0.88, blue: 1.0, alpha: 0.98).setStroke()
-        path.lineWidth = 6
+        NSColor(calibratedRed: 0.0, green: 0.88, blue: 1.0, alpha: 0.54).setStroke()
+        path.lineWidth = 1.25
         path.stroke()
         if settings.showTrailPoints {
             for point in points {
-                NSColor.white.withAlphaComponent(0.88).setFill()
-                NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
+                NSColor.white.withAlphaComponent(0.46).setFill()
+                NSBezierPath(ovalIn: NSRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)).fill()
             }
         }
     }
@@ -602,41 +599,63 @@ private final class HIDOverlayView: NSView {
         }
     }
 
-    private func drawMarker(point: CodablePoint, color: NSColor, label: String, radius: CGFloat) {
+    private func drawExpectedReticle(point: CodablePoint) {
         let converted = convert(point)
-        let markerRadius = max(radius, 22)
-        NSColor.black.withAlphaComponent(0.9).setFill()
-        NSBezierPath(ovalIn: NSRect(
-            x: converted.x - markerRadius - 8,
-            y: converted.y - markerRadius - 8,
-            width: (markerRadius + 8) * 2,
-            height: (markerRadius + 8) * 2
-        )).fill()
-        color.withAlphaComponent(0.72).setFill()
-        NSBezierPath(ovalIn: NSRect(
-            x: converted.x - markerRadius - 2,
-            y: converted.y - markerRadius - 2,
-            width: (markerRadius + 2) * 2,
-            height: (markerRadius + 2) * 2
-        )).fill()
-        NSColor.white.withAlphaComponent(0.92).setStroke()
+        let radius: CGFloat = 7
+        let tickGap: CGFloat = 3
+        let tickLength: CGFloat = 5
+
         let ring = NSBezierPath(ovalIn: NSRect(
-            x: converted.x - markerRadius,
-            y: converted.y - markerRadius,
-            width: markerRadius * 2,
-            height: markerRadius * 2
+            x: converted.x - radius,
+            y: converted.y - radius,
+            width: radius * 2,
+            height: radius * 2
         ))
-        ring.lineWidth = 4
+        ring.lineWidth = 1.25
+        NSColor.systemOrange.withAlphaComponent(0.82).setStroke()
         ring.stroke()
-        color.withAlphaComponent(0.9).setStroke()
+
+        let ticks = NSBezierPath()
+        ticks.move(to: NSPoint(x: converted.x - radius - tickGap - tickLength, y: converted.y))
+        ticks.line(to: NSPoint(x: converted.x - radius - tickGap, y: converted.y))
+        ticks.move(to: NSPoint(x: converted.x + radius + tickGap, y: converted.y))
+        ticks.line(to: NSPoint(x: converted.x + radius + tickGap + tickLength, y: converted.y))
+        ticks.move(to: NSPoint(x: converted.x, y: converted.y - radius - tickGap - tickLength))
+        ticks.line(to: NSPoint(x: converted.x, y: converted.y - radius - tickGap))
+        ticks.move(to: NSPoint(x: converted.x, y: converted.y + radius + tickGap))
+        ticks.line(to: NSPoint(x: converted.x, y: converted.y + radius + tickGap + tickLength))
+        ticks.lineWidth = 1.0
+        ticks.stroke()
+    }
+
+    private func drawActualCrosshair(point: CodablePoint) {
+        let converted = convert(point)
+        let radius: CGFloat = 8
+        let innerGap: CGFloat = 2
+        let outerRadius: CGFloat = 11
+
+        let scope = NSBezierPath(ovalIn: NSRect(
+            x: converted.x - outerRadius,
+            y: converted.y - outerRadius,
+            width: outerRadius * 2,
+            height: outerRadius * 2
+        ))
+        scope.lineWidth = 0.75
+        NSColor.systemRed.withAlphaComponent(0.36).setStroke()
+        scope.stroke()
+
         let cross = NSBezierPath()
-        cross.move(to: NSPoint(x: converted.x - markerRadius, y: converted.y))
-        cross.line(to: NSPoint(x: converted.x + markerRadius, y: converted.y))
-        cross.move(to: NSPoint(x: converted.x, y: converted.y - markerRadius))
-        cross.line(to: NSPoint(x: converted.x, y: converted.y + markerRadius))
-        cross.lineWidth = 5
+        cross.move(to: NSPoint(x: converted.x - radius, y: converted.y - radius))
+        cross.line(to: NSPoint(x: converted.x - innerGap, y: converted.y - innerGap))
+        cross.move(to: NSPoint(x: converted.x + innerGap, y: converted.y + innerGap))
+        cross.line(to: NSPoint(x: converted.x + radius, y: converted.y + radius))
+        cross.move(to: NSPoint(x: converted.x - radius, y: converted.y + radius))
+        cross.line(to: NSPoint(x: converted.x - innerGap, y: converted.y + innerGap))
+        cross.move(to: NSPoint(x: converted.x + innerGap, y: converted.y - innerGap))
+        cross.line(to: NSPoint(x: converted.x + radius, y: converted.y - radius))
+        cross.lineWidth = 1.25
+        NSColor.systemRed.withAlphaComponent(0.82).setStroke()
         cross.stroke()
-        drawLabel(label, at: NSPoint(x: converted.x + markerRadius + 8, y: converted.y + markerRadius + 8), color: color)
     }
 
     private func drawRing(at point: NSPoint, color: NSColor, radius: CGFloat, lineWidth: CGFloat) {

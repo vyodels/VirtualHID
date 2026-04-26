@@ -30,7 +30,9 @@ HUD / visualization 是 VirtualHID 正式本地观察能力，不是额外数据
 
 ## 3. Responsibility Split With Browser / Recruit-Agent
 
-属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、目标应用激活与 frontmost 校验、postMode / kill switch / 输入状态清理 / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。`global` / `auto` 写入由 VirtualHID 在投递前激活目标应用；`pid` 只允许 `mouseMoved / scrollWheel`，不得用于 click / drag / type / pasteText / key。`hid_unlock` 必须清理 kill switch 与卡住修饰键/鼠标按钮状态，不能只返回逻辑解锁。
+属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、目标应用激活与 frontmost 校验、浏览器外壳瞬态遮挡 preflight、postMode / kill switch / 输入状态清理 / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。`global` / `auto` 写入由 VirtualHID 在投递前激活目标应用；`pid` 只允许 `mouseMoved / scrollWheel`，不得用于 click / drag / type / pasteText / key。`hid_unlock` 必须清理 kill switch 与卡住修饰键/鼠标按钮状态，不能只返回逻辑解锁。
+
+Chrome 下载气泡、下载列表、菜单、popover 等浏览器外壳 UI 不属于网页 DOM，也不应由页面 JS / mock 页面 / recruit-agent fallback 处理。网页目标 `hid_action` 默认 `options.browserChromeOverlayPolicy = "auto"`，VirtualHID 通过 macOS AX 检测与目标浏览器窗口重叠的非标准外壳瞬态窗口，必要时发送 Escape 清理，并把结果写入 `result.preflight.browserChromeOverlay`。该 preflight 不进入业务 `events`、HUD 轨迹或 replay 学习样本。
 
 必须由 browser / recruit-agent 做：DOM 读取、元素发现、signature 生成、业务任务推理与执行编排、目标锚点/允许区域求解、页面语义成功判断、招聘站点特有规则、下载链接发现、下载记录 / artifact 本地路径定位与业务完成判断。它们不得生成或补造实际 HID 轨迹。
 
