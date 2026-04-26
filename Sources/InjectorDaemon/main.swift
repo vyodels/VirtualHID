@@ -105,7 +105,7 @@ do {
     case "hud-contract":
         try runHUDContractSmoke(configuration: configuration)
     case "hud-ui":
-        try runHUDUISmoke()
+        try runHUDUISmoke(configuration: configuration)
     default:
         try runDaemon(configuration: configuration)
     }
@@ -285,30 +285,180 @@ private func runHUDContractSmoke(configuration: DaemonConfiguration) throws {
     try printJSON(output)
 }
 
-private func runHUDUISmoke() throws {
+private func runHUDUISmoke(configuration: DaemonConfiguration) throws {
     NSApplication.shared.setActivationPolicy(.accessory)
-    let sink = HIDOverlayController()
+    let sink = HIDOverlayController(
+        clearDelaySeconds: environmentDouble("VIRTUALHID_HUD_CLEAR_DELAY_SECONDS", defaultValue: 2.4)
+    )
+    let smokeTarget = try resolveHUDSmokeTarget(configuration: configuration)
     let service = ControlService(
-        configuration: ControlServerConfiguration(allowSelfTarget: true),
+        configuration: ControlServerConfiguration(
+            bundleIdentifiers: configuration.bundleIdentifiers,
+            defaultPostMode: configuration.defaultPostMode,
+            allowSelfTarget: smokeTarget.usesSelfTarget
+        ),
         supervisor: SupervisorService(),
         profileStore: try ProfileStore(path: ":memory:"),
         hidEventSink: sink
     )
-    let frame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-    let origin = CGPoint(x: frame.minX + frame.width * 0.25, y: frame.minY + frame.height * 0.50)
-    let target = CGPoint(x: frame.minX + frame.width * 0.58, y: frame.minY + frame.height * 0.50)
-    let scrollPoint = CGPoint(x: frame.minX + frame.width * 0.62, y: frame.minY + frame.height * 0.54)
-    let line = #"{"id":"hud-ui-smoke","method":"action","params":{"context":{"host":"hud.local","element":{"sig":"hud-visible-button","role":"button"},"taskId":"hud-acceptance","stage":"manual-ui"},"options":{"dryRun":true,"postMode":"global"},"primitives":[{"type":"move","to":{"x":\#(target.x),"y":\#(target.y)},"durationMs":900,"profile":{"origin":{"x":\#(origin.x),"y":\#(origin.y)},"motion":{"pointCount":{"min":30,"max":36},"moveSpeedPxS":{"min":120,"max":180},"wind":4.5,"jitter":0.45,"controlSpread":55,"detourProbability":0.25}}},{"type":"click","at":{"x":\#(target.x),"y":\#(target.y)},"button":"left","holdMs":90,"profile":{"origin":{"x":\#(target.x),"y":\#(target.y)}}},{"type":"scroll","at":{"x":\#(scrollPoint.x),"y":\#(scrollPoint.y)},"dx":0,"dy":-96,"style":"wheel"}]}}"#
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+    let line = try hudUISmokeActionLine(target: smokeTarget)
+    let actionDelay = environmentDouble("VIRTUALHID_HUD_ACTION_DELAY_SECONDS", defaultValue: 0.15)
+    let exitDelay = environmentDouble("VIRTUALHID_HUD_EXIT_DELAY_SECONDS", defaultValue: 3.4)
+    DispatchQueue.main.asyncAfter(deadline: .now() + actionDelay) {
         print(service.handleLine(line))
         fflush(stdout)
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + exitDelay) {
         NSApplication.shared.terminate(nil)
     }
     withExtendedLifetime(sink) {
         NSApplication.shared.run()
     }
+}
+
+private struct HUDSmokeTarget {
+    let target: [String: Any]?
+    let contextHost: String
+    let viewportSize: CGSize
+    let usesSelfTarget: Bool
+}
+
+private func resolveHUDSmokeTarget(configuration: DaemonConfiguration) throws -> HUDSmokeTarget {
+    if configuration.allowSelfTarget {
+        let frame = selfTargetVisibleFrame()
+        return HUDSmokeTarget(
+            target: nil,
+            contextHost: "hud.local",
+            viewportSize: frame.size,
+            usesSelfTarget: true
+        )
+    }
+
+    let descriptor = bestHUDSmokeBrowserDescriptor(bundleIdentifiers: configuration.bundleIdentifiers)
+    let resolved = try BrowserResolver.resolve(
+        bundleIdentifiers: configuration.bundleIdentifiers,
+        descriptor: descriptor
+    )
+    _ = FocusController.ensureFrontmost(app: resolved.app, timeout: 1.0)
+    let viewport = resolved.viewportFrame ?? resolved.frame
+    var targetObject: [String: Any] = ["bundleId": resolved.bundleIdentifier]
+    if let browserWindowId = resolved.browserWindowId {
+        targetObject["windowId"] = browserWindowId
+    }
+    if let tabId = resolved.tabId {
+        targetObject["tabId"] = tabId
+    }
+    if let host = resolved.host {
+        targetObject["host"] = host
+    }
+    if resolved.host == nil, let title = resolved.windowTitle {
+        targetObject["windowTitle"] = title
+    }
+    return HUDSmokeTarget(
+        target: targetObject,
+        contextHost: resolved.host ?? "hud.local",
+        viewportSize: viewport.size,
+        usesSelfTarget: false
+    )
+}
+
+private func bestHUDSmokeBrowserDescriptor(bundleIdentifiers: [String]) -> TargetDescriptor? {
+    for bundleId in bundleIdentifiers where BrowserPageResolver.supports(bundleId: bundleId) {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).isEmpty else {
+            continue
+        }
+        guard let pages = try? BrowserPageResolver.listPages(bundleId: bundleId), !pages.isEmpty else {
+            continue
+        }
+        let page = pages.first(where: \.active) ?? pages[0]
+        return TargetDescriptor(
+            bundleId: page.bundleId,
+            windowId: page.windowId,
+            windowTitle: page.windowTitle ?? page.tabTitle,
+            tabId: page.tabId,
+            host: page.host
+        )
+    }
+    if let bundleId = bundleIdentifiers.first(where: {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty
+    }) {
+        return TargetDescriptor(bundleId: bundleId)
+    }
+    return nil
+}
+
+private func hudUISmokeActionLine(target: HUDSmokeTarget) throws -> String {
+    let width = max(target.viewportSize.width, 320)
+    let height = max(target.viewportSize.height, 240)
+    let origin = ["x": width * 0.18, "y": height * 0.48]
+    let clickPoint = ["x": width * 0.58, "y": height * 0.50]
+    let scrollPoint = ["x": width * 0.62, "y": height * 0.54]
+    var params: [String: Any] = [
+        "geometry": [
+            "coordSpace": "viewport",
+            "pageScale": 1,
+            "scrollOffset": ["x": 0, "y": 0],
+            "viewportSize": ["x": 0, "y": 0, "width": width, "height": height]
+        ],
+        "context": [
+            "host": target.contextHost,
+            "element": ["sig": "hud-visible-button", "role": "button"],
+            "taskId": "hud-acceptance",
+            "stage": "manual-ui"
+        ],
+        "options": ["dryRun": true, "postMode": "global"],
+        "primitives": [
+            [
+                "type": "click",
+                "at": clickPoint,
+                "button": "left",
+                "holdMs": 90,
+                "profile": [
+                    "origin": origin,
+                    "motion": [
+                        "pointCount": ["min": 34, "max": 42],
+                        "moveSpeedPxS": ["min": 120, "max": 180],
+                        "wind": 4.5,
+                        "jitter": 0.45,
+                        "controlSpread": 55,
+                        "detourProbability": 0.25
+                    ]
+                ]
+            ],
+            [
+                "type": "scroll",
+                "at": scrollPoint,
+                "dx": 0,
+                "dy": -96,
+                "style": "wheel"
+            ]
+        ]
+    ]
+    if let targetObject = target.target {
+        params["target"] = targetObject
+    }
+    let request: [String: Any] = [
+        "id": "hud-ui-smoke",
+        "method": "action",
+        "params": params
+    ]
+    let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+    return String(data: data, encoding: .utf8) ?? "{}"
+}
+
+private func selfTargetVisibleFrame() -> CGRect {
+    guard let screen = NSScreen.main else {
+        return CGRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+    let frame = screen.frame
+    let visible = screen.visibleFrame
+    let topInset = max(0, frame.maxY - visible.maxY)
+    return CGRect(
+        x: visible.minX,
+        y: frame.minY + topInset,
+        width: visible.width,
+        height: visible.height
+    )
 }
 
 private final class SmokeHIDSink: HIDEventSink {
@@ -339,6 +489,17 @@ private func smokePointObject(_ point: CodablePoint?) -> Any {
         return NSNull()
     }
     return ["x": point.x, "y": point.y]
+}
+
+private func environmentDouble(_ name: String, defaultValue: Double) -> Double {
+    guard let value = ProcessInfo.processInfo.environment[name],
+          let parsed = Double(value),
+          parsed.isFinite,
+          parsed > 0
+    else {
+        return defaultValue
+    }
+    return parsed
 }
 
 private func profileStorePath(_ override: String?) throws -> String {

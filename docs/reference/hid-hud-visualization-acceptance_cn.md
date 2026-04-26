@@ -55,6 +55,10 @@ VIRTUALHID_HUD_RESPONSE=/tmp/virtualhid-hud-ui-smoke.json \
 
 该脚本会构建 `vhid-daemon`，在 AppKit 主循环中运行 `--smoke-hud-ui`，触发真实 `ControlService -> ActionExecutor -> HIDOverlayController` 路径，并用 `screencapture` 保存证据图。
 
-预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、移动轨迹、点击/滚动效果、expected/final 标记和 `HID dry-run move+click+scroll ...` 状态文本；不应出现来自网页 mock 的额外轨迹或坐标。
+默认情况下，`--smoke-hud-ui` 会解析当前运行中的 Chrome / Chromium / Edge / Safari 目标窗口，并用 VirtualHID 自己解析出的 `AXWebArea` / browser content viewport 做 viewport 到 screen 的映射。只有显式传 `--self-target` 时才进入自测 fallback；fallback 区域必须是主屏 `visibleFrame`，不得跨桌面或画到不可见区域。
+
+预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、`HUD ACTIVE` 诊断标签、VirtualHID 事件轨迹、点击/滚动效果、expected/final 标记和 `HID dry-run click+scroll ...` 状态文本。`click` primitive 内部会生成拟人化鼠标移动轨迹；demo 不应再显式下发独立 `move` primitive，也不应出现来自网页 mock 的额外轨迹或坐标。
+
+多屏坐标注意事项：Chrome/AX/CG 返回的窗口和事件点可能使用主屏顶部为基准的全局坐标，例如上方外接屏会出现负 Y。HUD 必须在 VirtualHID 内部把该坐标系转换为 AppKit `NSScreen.frame` 坐标后绘制；browser、recruit-agent 或 mock page 不得提供或修正 screen coordinate authority。
 
 如果输出 `could not create image from display`，脚本会同时打印 `screencapture` 退出码、前后 `IODisplayWrangler` 状态和诊断信息。若显示器不是 `Current State 0` 仍失败，通常是当前 macOS GUI session、锁屏状态、空间/外接屏状态或 Screen Recording 权限阻止截图；此时只能标记为视觉证据环境阻塞，不能伪造通过。

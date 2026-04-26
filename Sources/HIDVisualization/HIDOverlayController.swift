@@ -4,12 +4,16 @@ import InjectorCore
 
 public final class HIDOverlayController: HIDEventSink {
     private let queue = DispatchQueue(label: "com.vyodels.virtualhid.hud.state")
+    private let clearDelaySeconds: TimeInterval
     private var eventsByAction = [String: [InjectedEvent]]()
     private var overlayWindow: NSPanel?
     private var overlayView: HIDOverlayView?
+    private var overlayFrame: NSRect?
     private var clearToken = 0
 
-    public init() {}
+    public init(clearDelaySeconds: TimeInterval = 2.4) {
+        self.clearDelaySeconds = max(0.1, clearDelaySeconds)
+    }
 
     public func hidActionDidStart(_ context: HIDActionVisualContext) {
         guard accepts(context) else {
@@ -19,7 +23,7 @@ public final class HIDOverlayController: HIDEventSink {
             eventsByAction[context.actionId] = []
         }
         DispatchQueue.main.async { [weak self] in
-            self?.ensureOverlay()
+            self?.ensureOverlay(for: context)
             self?.overlayView?.render(
                 HIDOverlayFrame(context: context, events: [], expected: nil, actual: nil, errorCode: nil)
             )
@@ -37,7 +41,7 @@ public final class HIDOverlayController: HIDEventSink {
             return current
         }
         DispatchQueue.main.async { [weak self] in
-            self?.ensureOverlay()
+            self?.ensureOverlay(for: context)
             self?.overlayView?.render(
                 HIDOverlayFrame(context: context, events: events, expected: nil, actual: nil, errorCode: nil)
             )
@@ -52,7 +56,7 @@ public final class HIDOverlayController: HIDEventSink {
             eventsByAction[summary.context.actionId] = nil
         }
         DispatchQueue.main.async { [weak self] in
-            self?.ensureOverlay()
+            self?.ensureOverlay(for: summary.context)
             self?.overlayView?.render(
                 HIDOverlayFrame(
                     context: summary.context,
@@ -76,11 +80,16 @@ public final class HIDOverlayController: HIDEventSink {
         }
     }
 
-    private func ensureOverlay() {
-        if overlayWindow != nil {
+    private func ensureOverlay(for context: HIDActionVisualContext) {
+        let frame = overlayPanelFrame(for: context)
+        if let overlayWindow {
+            if overlayFrame != frame {
+                overlayWindow.setFrame(frame, display: true)
+                overlayView?.resize(frame: NSRect(origin: .zero, size: frame.size), screenFrame: frame)
+                overlayFrame = frame
+            }
             return
         }
-        let frame = NSScreen.screens.map(\.frame).reduce(NSScreen.main?.frame ?? .zero) { $0.union($1) }
         let panel = NSPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -93,18 +102,19 @@ public final class HIDOverlayController: HIDEventSink {
         panel.isOpaque = false
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.level = .screenSaver
+        panel.collectionBehavior = [.fullScreenAuxiliary, .stationary, .transient]
         panel.isReleasedWhenClosed = false
         panel.orderFrontRegardless()
         overlayWindow = panel
         overlayView = view
+        overlayFrame = frame
     }
 
     private func scheduleClear() {
         clearToken += 1
         let token = clearToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + clearDelaySeconds) { [weak self] in
             guard self?.clearToken == token else {
                 return
             }
@@ -114,6 +124,36 @@ public final class HIDOverlayController: HIDEventSink {
 
     private func accepts(_ context: HIDActionVisualContext) -> Bool {
         context.source == "hid"
+    }
+
+    private func overlayPanelFrame(for context: HIDActionVisualContext) -> NSRect {
+        let fallback = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let windowRect = appKitRect(from: context.windowFrame)
+        guard windowRect.width > 1, windowRect.height > 1 else {
+            return fallback
+        }
+        if let screen = NSScreen.screens
+            .map({ screen in (screen, screen.frame.intersection(windowRect)) })
+            .filter({ !$0.1.isNull && !$0.1.isEmpty })
+            .max(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height })?
+            .0 {
+            return screen.frame
+        }
+        let center = CGPoint(x: windowRect.midX, y: windowRect.midY)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+            return screen.frame
+        }
+        return fallback
+    }
+
+    private func appKitRect(from rect: CodableRect) -> NSRect {
+        let yReference = primaryScreenTopY()
+        return NSRect(
+            x: rect.x,
+            y: yReference - rect.y - rect.height,
+            width: rect.width,
+            height: rect.height
+        )
     }
 }
 
@@ -126,7 +166,7 @@ private struct HIDOverlayFrame {
 }
 
 private final class HIDOverlayView: NSView {
-    private let screenFrame: NSRect
+    private var screenFrame: NSRect
     private var frameData: HIDOverlayFrame?
 
     init(frame: NSRect, screenFrame: NSRect) {
@@ -143,6 +183,13 @@ private final class HIDOverlayView: NSView {
 
     func render(_ data: HIDOverlayFrame) {
         frameData = data
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    func resize(frame: NSRect, screenFrame: NSRect) {
+        self.frame = frame
+        self.screenFrame = screenFrame
         needsDisplay = true
         displayIfNeeded()
     }
@@ -174,6 +221,7 @@ private final class HIDOverlayView: NSView {
             return
         }
         NSGraphicsContext.current?.shouldAntialias = true
+        drawDiagnostic(frameData)
         drawWindowFrame(frameData.context.windowFrame)
         drawTrail(frameData.events)
         drawEffects(frameData.events, context: frameData.context)
@@ -192,13 +240,26 @@ private final class HIDOverlayView: NSView {
 
     private func drawWindowFrame(_ rect: CodableRect) {
         let path = NSBezierPath(rect: convert(rect))
-        NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.18, alpha: 0.32).setStroke()
-        path.lineWidth = 2
+        NSColor.black.withAlphaComponent(0.58).setStroke()
+        path.lineWidth = 8
+        path.stroke()
+        NSColor(calibratedRed: 1.0, green: 0.68, blue: 0.0, alpha: 0.94).setStroke()
+        path.lineWidth = 4
         let dashPattern: [CGFloat] = [8, 5]
         dashPattern.withUnsafeBufferPointer { buffer in
             path.setLineDash(buffer.baseAddress, count: buffer.count, phase: 0)
         }
         path.stroke()
+    }
+
+    private func drawDiagnostic(_ frameData: HIDOverlayFrame) {
+        let eventCount = frameData.events.count
+        let title = frameData.context.windowTitle ?? frameData.context.bundleIdentifier
+        drawLabel(
+            "HUD ACTIVE events=\(eventCount) target=\(title)",
+            at: NSPoint(x: bounds.minX + 24, y: bounds.maxY - 34),
+            color: .systemYellow
+        )
     }
 
     private func drawTrail(_ events: [InjectedEvent]) {
@@ -211,11 +272,18 @@ private final class HIDOverlayView: NSView {
         for point in points.dropFirst() {
             path.line(to: point)
         }
-        NSColor(calibratedRed: 0.1, green: 0.72, blue: 0.95, alpha: 0.76).setStroke()
-        path.lineWidth = 3
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
+        NSColor.black.withAlphaComponent(0.68).setStroke()
+        path.lineWidth = 12
         path.stroke()
+        NSColor(calibratedRed: 0.0, green: 0.88, blue: 1.0, alpha: 0.98).setStroke()
+        path.lineWidth = 6
+        path.stroke()
+        for point in points {
+            NSColor.white.withAlphaComponent(0.88).setFill()
+            NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
+        }
     }
 
     private func drawEffects(_ events: [InjectedEvent], context: HIDActionVisualContext) {
@@ -247,38 +315,39 @@ private final class HIDOverlayView: NSView {
 
     private func drawMarker(point: CodablePoint, color: NSColor, label: String, radius: CGFloat) {
         let converted = convert(point)
-        NSColor.black.withAlphaComponent(0.82).setFill()
+        let markerRadius = max(radius, 22)
+        NSColor.black.withAlphaComponent(0.9).setFill()
         NSBezierPath(ovalIn: NSRect(
-            x: converted.x - radius - 6,
-            y: converted.y - radius - 6,
-            width: (radius + 6) * 2,
-            height: (radius + 6) * 2
+            x: converted.x - markerRadius - 8,
+            y: converted.y - markerRadius - 8,
+            width: (markerRadius + 8) * 2,
+            height: (markerRadius + 8) * 2
         )).fill()
-        color.withAlphaComponent(0.42).setFill()
+        color.withAlphaComponent(0.72).setFill()
         NSBezierPath(ovalIn: NSRect(
-            x: converted.x - radius - 2,
-            y: converted.y - radius - 2,
-            width: (radius + 2) * 2,
-            height: (radius + 2) * 2
+            x: converted.x - markerRadius - 2,
+            y: converted.y - markerRadius - 2,
+            width: (markerRadius + 2) * 2,
+            height: (markerRadius + 2) * 2
         )).fill()
         NSColor.white.withAlphaComponent(0.92).setStroke()
         let ring = NSBezierPath(ovalIn: NSRect(
-            x: converted.x - radius,
-            y: converted.y - radius,
-            width: radius * 2,
-            height: radius * 2
+            x: converted.x - markerRadius,
+            y: converted.y - markerRadius,
+            width: markerRadius * 2,
+            height: markerRadius * 2
         ))
-        ring.lineWidth = 2
+        ring.lineWidth = 4
         ring.stroke()
         color.withAlphaComponent(0.9).setStroke()
         let cross = NSBezierPath()
-        cross.move(to: NSPoint(x: converted.x - radius, y: converted.y))
-        cross.line(to: NSPoint(x: converted.x + radius, y: converted.y))
-        cross.move(to: NSPoint(x: converted.x, y: converted.y - radius))
-        cross.line(to: NSPoint(x: converted.x, y: converted.y + radius))
-        cross.lineWidth = 3
+        cross.move(to: NSPoint(x: converted.x - markerRadius, y: converted.y))
+        cross.line(to: NSPoint(x: converted.x + markerRadius, y: converted.y))
+        cross.move(to: NSPoint(x: converted.x, y: converted.y - markerRadius))
+        cross.line(to: NSPoint(x: converted.x, y: converted.y + markerRadius))
+        cross.lineWidth = 5
         cross.stroke()
-        drawLabel(label, at: NSPoint(x: converted.x + radius + 4, y: converted.y + radius + 4), color: color)
+        drawLabel(label, at: NSPoint(x: converted.x + markerRadius + 8, y: converted.y + markerRadius + 8), color: color)
     }
 
     private func drawRing(at point: NSPoint, color: NSColor, radius: CGFloat, lineWidth: CGFloat) {
@@ -319,8 +388,13 @@ private final class HIDOverlayView: NSView {
     }
 
     private func drawLabel(_ text: String, at point: NSPoint, color: NSColor) {
+        let size = (text as NSString).size(withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .heavy)
+        ])
+        NSColor.black.withAlphaComponent(0.82).setFill()
+        NSBezierPath(roundedRect: NSRect(x: point.x - 6, y: point.y - 5, width: size.width + 12, height: size.height + 8), xRadius: 5, yRadius: 5).fill()
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
+            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .heavy),
             .foregroundColor: color
         ]
         (text as NSString).draw(at: point, withAttributes: attributes)
@@ -368,15 +442,25 @@ private final class HIDOverlayView: NSView {
     }
 
     private func convert(_ point: CodablePoint) -> NSPoint {
-        NSPoint(x: point.x - screenFrame.minX, y: screenFrame.maxY - point.y)
+        NSPoint(
+            x: point.x - screenFrame.minX,
+            y: primaryScreenTopY() - point.y - screenFrame.minY
+        )
     }
 
     private func convert(_ rect: CodableRect) -> NSRect {
         NSRect(
             x: rect.x - screenFrame.minX,
-            y: screenFrame.maxY - rect.y - rect.height,
+            y: primaryScreenTopY() - rect.y - rect.height - screenFrame.minY,
             width: rect.width,
             height: rect.height
         )
     }
+}
+
+private func primaryScreenTopY() -> CGFloat {
+    if let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) {
+        return primary.frame.maxY
+    }
+    return NSScreen.screens.first?.frame.maxY ?? 0
 }

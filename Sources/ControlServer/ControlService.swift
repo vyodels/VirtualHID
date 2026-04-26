@@ -556,14 +556,30 @@ public final class ControlService {
 
     private func selfTarget() -> BrowserTarget {
         let app = NSRunningApplication.current
+        let frame = selfTargetVisibleFrame()
         return BrowserTarget(
             app: app,
             pid: app.processIdentifier,
             bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.daemon",
             windowTitle: nil,
-            frame: NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900),
-            viewportFrame: NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900),
-            viewportFrameSource: "self-target-screen"
+            frame: frame,
+            viewportFrame: frame,
+            viewportFrameSource: "self-target-visible-screen"
+        )
+    }
+
+    private func selfTargetVisibleFrame() -> CGRect {
+        guard let screen = NSScreen.main else {
+            return CGRect(x: 0, y: 0, width: 1440, height: 900)
+        }
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        let topInset = max(0, frame.maxY - visible.maxY)
+        return CGRect(
+            x: visible.minX,
+            y: frame.minY + topInset,
+            width: visible.width,
+            height: visible.height
         )
     }
 

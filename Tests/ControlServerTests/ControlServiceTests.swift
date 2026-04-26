@@ -65,10 +65,10 @@ final class ControlServiceTests: XCTestCase {
         let mapping = result?["mapping"] as? [String: Any]
         let verification = result?["verification"] as? [String: Any]
         let events = result?["events"] as? [[String: Any]]
-        let selfFrame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let selfFrame = selfTargetVisibleFrame()
 
         XCTAssertEqual(plan?["geometryApplied"] as? Bool, true)
-        XCTAssertEqual(mapping?["viewportSource"] as? String, "self-target-screen")
+        XCTAssertEqual(mapping?["viewportSource"] as? String, "self-target-visible-screen")
         XCTAssertEqual(mapping?["ignoredCallerViewportInScreen"] as? Bool, true)
         XCTAssertTrue((plan?["steps"] as? [[String: Any]])?.count ?? 0 >= 2)
         XCTAssertEqual(verification?["pointerWithinTolerance"] as? Bool, true)
@@ -88,7 +88,7 @@ final class ControlServiceTests: XCTestCase {
         let plan = result?["plan"] as? [String: Any]
 
         XCTAssertEqual(plan?["geometryApplied"] as? Bool, true)
-        XCTAssertEqual(mapping?["viewportSource"] as? String, "self-target-screen")
+        XCTAssertEqual(mapping?["viewportSource"] as? String, "self-target-visible-screen")
         XCTAssertEqual(mapping?["ignoredCallerViewportInScreen"] as? Bool, false)
     }
 
@@ -337,6 +337,21 @@ final class ControlServiceTests: XCTestCase {
 
     private func decode(_ text: String) throws -> [String: Any] {
         try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] ?? [:]
+    }
+
+    private func selfTargetVisibleFrame() -> CGRect {
+        guard let screen = NSScreen.main else {
+            return CGRect(x: 0, y: 0, width: 1440, height: 900)
+        }
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        let topInset = max(0, frame.maxY - visible.maxY)
+        return CGRect(
+            x: visible.minX,
+            y: frame.minY + topInset,
+            width: visible.width,
+            height: visible.height
+        )
     }
 
     private func makeServiceWithEphemeralHIDSink(box: HIDSinkBox) throws -> ControlService {
