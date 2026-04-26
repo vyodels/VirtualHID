@@ -201,6 +201,49 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(try store.listReplayFingerprints(host: "example.com", instructionKey: "task:stage:sig-fixed:click").count, 1)
     }
 
+    func testProfilesApplyWritesTemplate() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+        let response = service.handleLine(
+            #"{"id":"apply","method":"profiles.apply","params":{"host":"example.com","elementSig":"sig-apply","taskId":"task","actionType":"click","sampleSize":10,"confidence":0.66,"params":{"version":2,"strategy":"analysis-patch","actionType":"click","sampleSize":10,"motion":{"moveSpeedPxS":{"min":120,"max":240},"pointCount":{"min":8,"max":12}}}}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let template = result?["template"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(template?["confidence"] as? Double, 0.66)
+        XCTAssertEqual(try store.lookupTemplate(host: "example.com", sig: "sig-apply", taskId: "task", actionType: "click").sampleSize, 10)
+    }
+
+    func testTypeFallsBackToPasteTextForChinese() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"zh-type","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-input","role":"textbox"}},"options":{"dryRun":true},"primitives":[{"type":"type","text":"你好"}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(events?.first?["type"] as? String, "pasteText")
+        XCTAssertEqual(events?.contains { $0["type"] as? String == "keyDown" && $0["virtualKey"] as? Int == 9 }, true)
+    }
+
+    func testExplicitPasteTextPrimitiveDoesNotExposeTextInEvents() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"paste","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-input","role":"textbox"}},"options":{"dryRun":true},"primitives":[{"type":"pasteText","text":"候选人","restoreClipboard":true}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(events?.first?["type"] as? String, "pasteText")
+        XCTAssertEqual(events?.contains { ($0["key"] as? String) == "候选人" }, false)
+    }
+
     func testControlServiceRetainsHidVisualizationSinkForDaemonLifetime() {
         let box = HIDSinkBox()
         let service = try! makeServiceWithEphemeralHIDSink(box: box)

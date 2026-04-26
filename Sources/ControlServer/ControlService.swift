@@ -166,6 +166,8 @@ public final class ControlService {
             return try handleProfilesForget(params)
         case "profiles.rebuild":
             return try handleProfilesRebuild(params)
+        case "profiles.apply":
+            return try handleProfilesApply(params)
         case "trace.tail":
             return handleTraceTail(params)
         case "trace.commit":
@@ -364,6 +366,35 @@ public final class ControlService {
             "generatedTemplates": report.generatedTemplates,
             "updatedTemplates": report.updatedTemplates
         ]
+    }
+
+    private func handleProfilesApply(_ params: [String: Any]) throws -> [String: Any] {
+        let host = params["host"] as? String
+        let elementSig = params["elementSig"] as? String ?? params["element_sig"] as? String ?? params["sig"] as? String
+        let taskId = params["taskId"] as? String ?? params["task_id"] as? String
+        let actionType = params["actionType"] as? String ?? params["action_type"] as? String
+        guard let host, let elementSig, let actionType else {
+            throw ControlServerError.coded("E_CONTEXT_REQUIRED", "profiles.apply requires host, elementSig, and actionType")
+        }
+        let paramsJSON: String
+        if let object = params["params"] as? [String: Any] {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            paramsJSON = String(data: data, encoding: .utf8) ?? "{}"
+        } else if let raw = params["paramsJSON"] as? String ?? params["params_json"] as? String {
+            paramsJSON = raw
+        } else {
+            throw ControlServerError.coded("E_CONTEXT_REQUIRED", "profiles.apply requires params or paramsJSON")
+        }
+        let template = try profileStore.applyTemplate(
+            host: host,
+            elementSig: elementSig,
+            taskId: taskId,
+            actionType: actionType,
+            sampleSize: intValue(params["sampleSize"] ?? params["sample_size"]) ?? 1,
+            confidence: number(params["confidence"]) ?? 0.5,
+            paramsJSON: paramsJSON
+        )
+        return ["template": try templateObject(template)]
     }
 
     private func handleTraceTail(_ params: [String: Any]) -> [String: Any] {
@@ -630,6 +661,12 @@ public final class ControlService {
                 return .type(
                     text: primitive["text"] as? String ?? "",
                     layout: KeyboardLayout(rawValue: primitive["layout"] as? String ?? "us") ?? .us,
+                    profile: profile
+                )
+            case "pasteText":
+                return .pasteText(
+                    text: primitive["text"] as? String ?? "",
+                    restoreClipboard: primitive["restoreClipboard"] as? Bool ?? true,
                     profile: profile
                 )
             case "key":
@@ -917,6 +954,12 @@ public final class ControlService {
                     layout: layout,
                     profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
                 )
+            case .pasteText(let text, let restoreClipboard, let profile):
+                return .pasteText(
+                    text: text,
+                    restoreClipboard: restoreClipboard,
+                    profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
+                )
             case .key(let chord, let holdMs, let profile):
                 return .key(
                     chord: chord,
@@ -938,7 +981,7 @@ public final class ControlService {
             return "drag"
         case .scroll:
             return "scroll"
-        case .type, .key:
+        case .type, .pasteText, .key:
             return "type"
         case .move:
             return "move"
@@ -1254,7 +1297,7 @@ private func expectedFinalPoint(from primitives: [ActionPrimitive]) -> CGPoint? 
             return expectedLandingCenter(base: to, profile: profile)
         case .scroll(let at, _, _, _):
             return at
-        case .type, .key:
+        case .type, .pasteText, .key:
             continue
         }
     }
@@ -1273,7 +1316,7 @@ private func expectedFinalTolerancePx(from primitives: [ActionPrimitive]) -> Dou
             return 2
         case .scroll:
             return 2
-        case .type, .key:
+        case .type, .pasteText, .key:
             continue
         }
     }
@@ -1686,7 +1729,7 @@ private extension ActionPrimitive {
         switch self {
         case .move, .scroll:
             return true
-        case .click, .drag, .type, .key:
+        case .click, .drag, .type, .pasteText, .key:
             return false
         }
     }

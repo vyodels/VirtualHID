@@ -127,8 +127,7 @@ public enum BrowserResolver {
         let targetBundleIdentifiers = pageTarget.map { [$0.bundleId] } ?? requestedBundleIdentifiers
         let useFocusedBrowserWindow = requiresFocusedBrowserWindow(descriptor)
         for bundleIdentifier in targetBundleIdentifiers {
-            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-                .filter { !$0.isTerminated }
+            let apps = runningApplications(bundleIdentifier: bundleIdentifier, waitForRegistration: pageTarget != nil)
                 .sorted {
                     let lhsFrontmost = FocusController.isFrontmost(app: $0)
                     let rhsFrontmost = FocusController.isFrontmost(app: $1)
@@ -148,12 +147,26 @@ public enum BrowserResolver {
                     if useFocusedBrowserWindow {
                         _ = FocusController.ensureFrontmost(app: app, timeout: 0.8)
                     }
-                    let window = try resolveMainWindow(
-                        for: app,
-                        bundleIdentifier: bundleIdentifier,
-                        descriptor: descriptor,
-                        focusedOnly: useFocusedBrowserWindow
-                    )
+                    let window: ResolvedWindow
+                    do {
+                        window = try resolveMainWindow(
+                            for: app,
+                            bundleIdentifier: bundleIdentifier,
+                            descriptor: descriptor,
+                            focusedOnly: useFocusedBrowserWindow
+                        )
+                    } catch BrowserResolverError.windowNotFound where useFocusedBrowserWindow {
+                        // Some Chrome sessions do not expose AXFocusedWindow even after
+                        // AppleScript activates the requested tab/window. Page identity
+                        // remains grounded in BrowserPageResolver; this fallback only
+                        // recovers macOS window/viewport evidence.
+                        window = try resolveMainWindow(
+                            for: app,
+                            bundleIdentifier: bundleIdentifier,
+                            descriptor: descriptor,
+                            focusedOnly: false
+                        )
+                    }
                     resolvedTargets.append(
                         BrowserTarget(
                             app: app,
@@ -187,6 +200,25 @@ public enum BrowserResolver {
             throw lastWindowError
         }
         throw BrowserResolverError.appNotFound(bundleIdentifiers.joined(separator: ", "))
+    }
+
+    private static func runningApplications(bundleIdentifier: String, waitForRegistration: Bool) -> [NSRunningApplication] {
+        let attempts = waitForRegistration ? 20 : 1
+        for attempt in 0..<attempts {
+            let direct = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            let workspace = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleIdentifier }
+            let merged = (direct + workspace).reduce(into: [pid_t: NSRunningApplication]()) { result, app in
+                if !app.isTerminated {
+                    result[app.processIdentifier] = app
+                }
+            }
+            let apps = Array(merged.values)
+            if !apps.isEmpty || attempt == attempts - 1 {
+                return apps
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        return []
     }
 
     private static func resolvePageIfNeeded(
@@ -381,12 +413,13 @@ public enum BrowserResolver {
             if let requestedTitle = descriptor?.windowTitle, title?.contains(requestedTitle) != true {
                 continue
             }
+            let fallbackViewport = browserContentFallbackFrame(windowFrame: frame)
             return ResolvedWindow(
                 title: title,
                 frame: frame,
                 windowId: windowId,
-                viewportFrame: nil,
-                viewportFrameSource: nil
+                viewportFrame: fallbackViewport,
+                viewportFrameSource: fallbackViewport == nil ? nil : "browserWindowContentHeuristic"
             )
         }
 
@@ -422,6 +455,12 @@ public enum BrowserResolver {
             }
             return (contentGroup.frame, contentGroup.source)
         }
+        if let fallback = browserContentFallbackFrame(windowFrame: windowFrame) {
+            if let cacheKey {
+                viewportCache.set((fallback, "browserWindowContentHeuristic"), for: cacheKey)
+            }
+            return (fallback, "browserWindowContentHeuristic")
+        }
         return nil
     }
 
@@ -447,9 +486,9 @@ public enum BrowserResolver {
         var candidates = [ViewportCandidate]()
         var queue: [(element: AXUIElement, depth: Int)] = [(root, 0)]
         var visited = 0
-        let maxDepth = 6
-        let maxVisited = 120
-        let deadline = Date().addingTimeInterval(0.75)
+        let maxDepth = 9
+        let maxVisited = 420
+        let deadline = Date().addingTimeInterval(1.5)
 
         while !queue.isEmpty, visited < maxVisited, Date() < deadline {
             let current = queue.removeFirst()
@@ -507,5 +546,22 @@ public enum BrowserResolver {
             return false
         }
         return abs(frame.maxY - windowFrame.maxY) <= 4
+    }
+
+    private static func browserContentFallbackFrame(windowFrame: CGRect) -> CGRect? {
+        guard windowFrame.width >= 300, windowFrame.height >= 240 else {
+            return nil
+        }
+        let topChromeHeight = min(max(windowFrame.height * 0.08, 88), 132)
+        let frame = CGRect(
+            x: windowFrame.minX,
+            y: windowFrame.minY + topChromeHeight,
+            width: windowFrame.width,
+            height: windowFrame.height - topChromeHeight
+        )
+        guard frame.height >= 120 else {
+            return nil
+        }
+        return frame
     }
 }

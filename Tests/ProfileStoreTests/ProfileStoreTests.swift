@@ -199,4 +199,26 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(result.dropped, true)
         XCTAssertEqual(try store.traceCount(host: "example.com"), 0)
     }
+
+    func testApplyTemplateWritesValidatedProfilePatch() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let params = """
+        {"version":2,"strategy":"analysis-patch","actionType":"click","sampleSize":12,"motion":{"moveSpeedPxS":{"min":180,"max":320},"pointCount":{"min":8,"max":16},"behaviorBlend":{"idle":0,"normal":1,"flow":0,"lowEfficiency":0}}}
+        """
+
+        let template = try store.applyTemplate(
+            host: "example.com",
+            elementSig: "sig-apply",
+            taskId: "task",
+            actionType: "click",
+            sampleSize: 12,
+            confidence: 0.72,
+            paramsJSON: params
+        )
+        let fetched = try store.lookupTemplate(host: "example.com", sig: "sig-apply", taskId: "task", actionType: "click")
+
+        XCTAssertEqual(template.confidence, 0.72)
+        XCTAssertEqual(fetched.sampleSize, 12)
+        XCTAssertEqual(fetched.actionType, "click")
+    }
 }

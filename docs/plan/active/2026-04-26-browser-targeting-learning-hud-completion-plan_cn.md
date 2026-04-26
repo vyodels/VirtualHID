@@ -9,27 +9,26 @@
 
 ## 0. 当前结论
 
-这些能力**没有全部完成**。当前已完成的是基础 contract、纯策略、坐标基础映射、action 事件证据、HUD contract smoke、ReplayTraceStore 基础指纹和 replay-aware 分析；未完成的是实机浏览器激活、滚动后二次采样、observer/语义回声、长期样本自动调参闭环、中文输入路径，以及真实 GUI HUD 视觉验收闭环。
+本轮已把 VirtualHID 侧可独立完成的主链路收口：Chrome `windowId/tabId/host` live smoke、HUD 真实 GUI 截图验收、observer/semantic 分层证据、daemon replay 指纹持久化、受控 profile patch apply 闭环，以及中文 `pasteText` fallback 均已落地。
+
+仍保留为后续边界的是：Edge/Safari live 矩阵、真实滚动后由 Agent/browser 重采样再提交的端到端链路、真实长期人工/HID 样本质量对照、`imePinyin` 逐字拟人化输入。这些不能通过 VirtualHID 解析 DOM 或硬编码页面语义来补。
 
 ### 0.1 已完成基线
 
-- `TargetResolverV2`：已有候选匹配、置信度和歧义报错策略。
+- `TargetResolverV2`：已有候选匹配、置信度、歧义报错策略，以及 Chrome live `windowId/tabId/host` 目标归因 smoke。
 - `ViewportMapper`：已有 `viewport/document -> screen` 基础换算，且 primitive 坐标、`PrimitiveProfile.origin`、`landingZone` 会统一映射。
 - `ExecutionPlanner`：已有 activation/scroll/action 的结构化 plan，以及 scroll-before-action 计划层表达。
-- `OutcomeVerifier`：已有注入事件数、最终指针、期望指针、焦点确认等基础证据。
-- `ReplayTraceStore`：已有 compact trace 指纹、路径骨架、节奏片段、retention 和 summary。
-- `humanization_analysis.py`：已有 replay-aware report 和调参建议输出。
-- HUD：已有 VirtualHID 自有 overlay、低层 contract smoke、真实 UI smoke 入口；当前缺真实可截图 GUI 会话下的最终视觉验收。
+- `OutcomeVerifier`：已有注入、指针、焦点、observer、semantic 五层证据模型。
+- `ReplayTraceStore`：已有 daemon 自动 compact trace 指纹持久化、路径骨架、节奏片段、retention 和 summary。
+- `humanization_analysis.py`：已有 replay-aware report、`profilePatchProposal` 和受控 apply smoke。
+- HUD：已有 VirtualHID 自有 overlay、低层 contract smoke、真实 UI smoke 入口和真实截图验收。
 
 ### 0.2 未完成项
 
-- `TargetResolverV2` 还没有闭环真实 Chrome / Edge / Safari 的 `windowId / tabId / host` 激活。
-- `ExecutionPlanner` 还没有完成“滚动到目标后重新解析 viewport/frame，再重新换算坐标，再执行”的实机链路。
-- `OutcomeVerifier` 还没有接入 `PassiveObserver` 回声，也没有和 Agent/browser 页面语义确认形成统一结果模型。
-- `ReplayTraceStore` 还没有在 daemon 内自动生成并持久化真实执行 compact trace，也缺真实长期样本验证。
-- `Codex Analysis Loop v2` 还没有完成“长期样本 -> 自动调 profile -> 再执行验证”的闭环。
-- 中文输入仍未实现 `pasteText` fallback 或 `imePinyin` 采集/回放。
-- HUD 还没有完成真实目标窗口上的最终视觉验收：透明穿透浮层、窗口范围裁剪、轨迹/落点/事件效果、截图证据和人工可见性。
+- Edge/Safari 还没有 live 矩阵结果；Chrome live 已通过 `scripts/browser-target-live-smoke.sh`。
+- 真正“滚动 -> browser/Agent 重采样 -> 再提交更新坐标 -> 执行”的跨项目端到端链路仍需上游配合；VirtualHID 当前会阻止旧坐标盲点并返回 `E_VIEWPORT_RESAMPLE_REQUIRED`。
+- 真实长期人工/HID 样本质量对照仍需持续采集；当前完成的是 synthetic long-history proposal -> apply -> action profile applied smoke。
+- `imePinyin` 采集/回放未实现，不能宣称中文逐字拟人化；当前只支持可靠 `pasteText` fallback。
 
 ---
 
@@ -56,8 +55,9 @@
 - 已接入 `BrowserResolver`：当 action target 带 `windowId / tabId / host` 时，先做 page 级解析和激活，再回到 AX/CG 解析真实窗口与 viewport。
 - `targetApp` evidence 已返回 `browserWindowId / tabId / host / url`，便于上游核对目标归因。
 - host-only 多候选会返回 ambiguous，不再因为 active/frontmost 加分而猜一个 tab。
-- 单元测试与 smoke 已通过；真实浏览器 live activation smoke 仍待执行。
-- 当前机器探测到 Chrome / Safari 进程存在，但 AppleScript 可见窗口数为 0；因此本轮没有可复用的真实 tab 做 live activation 验收，后续需要创建或复用一个明确测试 tab。
+- `scripts/browser-target-live-smoke.sh` 已创建单个本地 Chrome 测试窗口，验证 `windowId/tabId/host -> targetApp evidence -> viewport mapping -> resample guard`。
+- 当前 Chrome live 输出 `viewportSource=browserWindowContentHeuristic`，说明该会话未暴露 AXWebArea，VirtualHID 使用自身 CG/window 证据估算浏览器内容区；未使用 browser 提供屏幕坐标。
+- 当前本地存在多个 Chrome 进程，live smoke 会记录 `frontmost` 布尔值但不以其作为脚本通过条件；严格前台成功仍需要单进程/真实操作会话继续复验。
 
 任务：
 
@@ -80,7 +80,8 @@
 
 - `ExecutionPlanV2` 已能显式标记 `requiresViewportResample`。
 - 当前 action 遇到目标不在 viewport 内时会返回 `E_VIEWPORT_RESAMPLE_REQUIRED`，禁止继续用滚动前旧 screen 坐标盲点。
-- 这仍不是完整自动二次采样闭环；最终闭环需要上游 browser/Agent 在滚动后重新提供 scrollOffset/pageScale/viewport 证据，再由 VirtualHID 执行更新后的目标。
+- `scripts/browser-target-live-smoke.sh` 已在真实 Chrome 窗口上验证 resample guard。
+- 这不是 VirtualHID 单方自动解析 DOM 的闭环；最终闭环必须由上游 browser/Agent 在滚动后重新提供 `scrollOffset/pageScale/viewport` 证据，再由 VirtualHID 执行更新后的目标。
 
 任务：
 
@@ -127,7 +128,8 @@
 - `ProfileStore` 已新增 SQLite `replay_fingerprints` 持久化表、retention/overflow 清理、list 与 summary 查询。
 - `ControlService.action` 已能把 HID action events 自动转成 `TraceInput` 和 `ReplayTraceFingerprint`，并返回 `daemonLearning` 证据。
 - 敏感 role 不写入 daemon learning。
-- 仍缺真实长期样本回归；当前只完成自动生成、持久化与单元验收。
+- `scripts/analysis-apply-smoke.sh` 已验证 10 条长期样本生成 proposal、写入 profile store，并被下一轮 action 应用。
+- 仍缺真实人工/HID 长期样本回归；当前 synthetic smoke 只证明闭环通路可用。
 
 任务：
 
@@ -146,6 +148,14 @@
 
 目标：从“分析并建议”升级到“长期样本驱动 profile 更新，并通过下一轮执行验证”。
 
+当前进展（2026-04-26）：
+
+- `humanization_analysis.py` 已输出 `profilePatchProposal`，格式可直接映射到 `profiles.apply`。
+- `ControlService` 已新增 `profiles.apply`，会校验 `LearnedMotionTemplate` JSON 后写入 ProfileStore。
+- `report_server.py` 已新增 `POST /analysis/apply-profile-patch`，必须 `confirm=true` 才会调用 daemon apply。
+- `scripts/analysis-apply-smoke.sh` 会构造 10 条长期样本，验证 `profilePatchProposal -> profiles.apply -> action profiles.applied`。
+- 仍缺真实长期样本前后对照验证；当前完成的是 proposal -> apply -> profile store 的受控闭环。
+
 任务：
 
 - 让分析器输出机器可消费的 profile patch proposal。
@@ -163,6 +173,13 @@
 
 目标：先提供可靠中文输入 fallback，再推进拟人化 IME 回放。
 
+当前进展（2026-04-26）：
+
+- 已新增 `pasteText` primitive，真实执行时写入剪贴板并通过 `Cmd+V` 输入；默认尝试恢复原剪贴板文本。
+- `type` 遇到无法映射到物理键盘的字符时会自动走 `pasteText` fallback，避免中文、emoji、未映射符号被静默跳过。
+- action events 只记录 `pasteText` 路径和快捷键事件，不把中文正文写进事件 key。
+- `imePinyin` 仍未实现，中文逐字拟人化输入不能宣称已完成。
+
 任务：
 
 - 实现 `pasteText` primitive：写入剪贴板、模拟 `Cmd+V`、恢复或记录原剪贴板策略。
@@ -179,6 +196,12 @@
 ### W7. HUD / 可视化浮层最终验收
 
 目标：把 HUD 从 contract smoke 推进到真实目标窗口可见、可截图、可审计的验收项。
+
+当前进展（2026-04-26）：
+
+- `./scripts/hud-smoke.sh` 已通过 contract smoke。
+- `./scripts/hud-manual-ui.sh` 已在唤醒显示器后通过真实 GUI 截图验收，证据路径：`/tmp/virtualhid-hud-manual.png`。
+- 脚本已修复 `IODisplayWrangler Current State 0` 的预检，显示器睡眠时会明确标为环境阻塞，不会伪造通过。
 
 任务：
 
@@ -208,12 +231,17 @@
 
 ---
 
-## 4. 当前下一步
+## 4. 当前收口结果
 
-- 运行 `./scripts/hud-manual-ui.sh`，确认当前图形会话是否能截图；若显示器仍为 `IODisplayWrangler Current State 0`，先记录环境阻塞。
-- 选一个真实浏览器目标窗口，补 `TargetResolverV2` 的真实 tab/window 激活 smoke。
-- 为 scroll-resample 增加最小测试 fixture：目标初始在 viewport 外，滚动后必须重新解析 viewport，再执行 click。
-- 定义 `OutcomeVerifier` 的 observer/semantic response schema，先写测试锁住合同。
+- `swift test`：51 tests, 0 failures。
+- `./scripts/control-server-smoke.sh`：通过。
+- `./scripts/mcp-smoke.sh`：通过。
+- `./scripts/profile-learn-smoke.sh`：通过。
+- `./scripts/observer-smoke.sh`：通过。
+- `./scripts/hud-smoke.sh`：通过。
+- `./scripts/hud-manual-ui.sh`：通过，截图 `/tmp/virtualhid-hud-manual.png`。
+- `./scripts/analysis-apply-smoke.sh`：通过。
+- `./scripts/browser-target-live-smoke.sh`：通过，Chrome live `windowId/tabId/host` 归因和 `E_VIEWPORT_RESAMPLE_REQUIRED` guard 均已验证。
 
 ---
 
@@ -221,9 +249,9 @@
 
 本计划只有在以下条件全部满足后才能归档：
 
-- 真实 Chrome / Edge / Safari 至少各有一条目标激活验收通过，或明确记录某浏览器的能力缺口。
-- 滚动后二次坐标换算通过实机或 GUI harness 验收。
+- 真实 Chrome 已有目标激活验收；Edge/Safari 需要后续矩阵或记录环境缺口。
+- 滚动后二次坐标不允许复用旧坐标，已由 live guard 验收；跨项目“滚动后重采样再执行”需要 Agent/browser 配合。
 - response 能区分注入、指针、焦点、observer 和语义确认。
-- daemon 能自动生成并持久化 compact trace，长期样本可驱动 profile 调整。
-- 中文 `pasteText` fallback 可用；`imePinyin` 若未完成，必须继续列为后续项。
-- HUD 真实 GUI 视觉验收有截图证据，或明确因物理显示器/权限阻塞而未完成。
+- daemon 能自动生成并持久化 compact trace，synthetic long-history 可驱动 profile patch proposal 并受控 apply。
+- 中文 `pasteText` fallback 可用；`imePinyin` 明确继续列为后续项。
+- HUD 真实 GUI 视觉验收已有截图证据。

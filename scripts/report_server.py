@@ -233,6 +233,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/analysis/record":
             self.serve_analysis_record()
             return
+        if path == "/analysis/apply-profile-patch":
+            self.serve_analysis_apply_profile_patch()
+            return
         if path != "/report":
             self.send_error(404)
             return
@@ -304,6 +307,47 @@ class Handler(BaseHTTPRequestHandler):
             return
         result = append_history_record(payload, ANALYSIS_HISTORY_PATH)
         self.send_json(result)
+
+    def serve_analysis_apply_profile_patch(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            self.send_json_error(400, "E_BAD_REQUEST", "profile patch request must be a JSON object")
+            return
+        if payload.get("confirm") is not True:
+            self.send_json_error(400, "E_CONFIRM_REQUIRED", "set confirm=true to apply an analysis profile patch")
+            return
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, dict):
+            proposal = self.profile_patch_from_current_report(payload)
+        if not isinstance(proposal, dict):
+            self.send_json_error(400, "E_PATCH_REQUIRED", "request requires proposal or a matching analysis report")
+            return
+        if proposal.get("applicable") is False:
+            self.send_json_error(400, "E_PATCH_NOT_APPLICABLE", proposal.get("reason") or "profile patch proposal is not applicable")
+            return
+        if proposal.get("method") != "profiles.apply" or not isinstance(proposal.get("params"), dict):
+            self.send_json_error(400, "E_PATCH_INVALID", "proposal must target profiles.apply with params")
+            return
+        try:
+            response = json.loads(call_hid_daemon("profiles.apply", proposal["params"]).decode("utf-8"))
+        except Exception as error:
+            self.send_json_error(502, "E_PATCH_APPLY_FAILED", str(error))
+            return
+        self.send_json({"ok": bool(response.get("ok")), "proposal": proposal, "daemon": response})
+
+    def profile_patch_from_current_report(self, payload):
+        report = analyze_history(
+            load_history(ANALYSIS_HISTORY_PATH),
+            host=payload.get("host"),
+            instruction_key=payload.get("instructionKey"),
+        )
+        for group in report.get("groups", []):
+            proposal = group.get("profilePatchProposal")
+            if isinstance(proposal, dict) and proposal.get("applicable"):
+                return proposal
+        return None
 
     def serve_analysis_report(self, query):
         params = parse_qs(query or "")

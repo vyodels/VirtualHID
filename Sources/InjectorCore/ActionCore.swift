@@ -109,6 +109,7 @@ public enum ActionPrimitive {
     case drag(from: CGPoint, to: CGPoint, button: MouseButton, via: TrajectoryStyle, profile: PrimitiveProfile?)
     case scroll(at: CGPoint, dx: Double, dy: Double, style: ScrollStyle)
     case type(text: String, layout: KeyboardLayout, profile: PrimitiveProfile?)
+    case pasteText(text: String, restoreClipboard: Bool, profile: PrimitiveProfile?)
     case key(chord: KeyChord, holdMs: Int?, profile: PrimitiveProfile?)
 }
 
@@ -125,6 +126,8 @@ public extension ActionPrimitive {
             return "scroll"
         case .type:
             return "type"
+        case .pasteText:
+            return "pasteText"
         case .key:
             return "key"
         }
@@ -488,6 +491,9 @@ public final class ActionExecutor {
                 params: resolvedKeyRhythmParams(profile?.motionProfile),
                 rng: &rng
             )
+            if schedule.count != text.unicodeScalars.count {
+                return try emitPasteText(text, restoreClipboard: true, poster: poster, dryRun: dryRun, deadline: deadline)
+            }
             for keyEvent in schedule {
                 if keyEvent.delayBeforeMs > 0 {
                     try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
@@ -509,6 +515,9 @@ public final class ActionExecutor {
             }
             return emitted
 
+        case .pasteText(let text, let restoreClipboard, _):
+            return try emitPasteText(text, restoreClipboard: restoreClipboard, poster: poster, dryRun: dryRun, deadline: deadline)
+
         case .key(let chord, let holdMs, let profile):
             var emitted = [InjectedEvent]()
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
@@ -517,6 +526,41 @@ public final class ActionExecutor {
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
             return emitted
         }
+    }
+
+    private func emitPasteText(
+        _ text: String,
+        restoreClipboard: Bool,
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline
+    ) throws -> [InjectedEvent] {
+        var emitted = [record(type: "pasteText", key: "clipboard")]
+        let oldClipboard: String?
+        if dryRun {
+            oldClipboard = nil
+        } else {
+            let pasteboard = NSPasteboard.general
+            oldClipboard = pasteboard.string(forType: .string)
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
+
+        emitted.append(try postKey(keyCode: 55, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
+        emitted.append(try postKey(keyCode: 9, keyDown: true, recordedKey: "v", poster: poster, dryRun: dryRun))
+        try sleep(milliseconds: 36, dryRun: dryRun, deadline: deadline)
+        emitted.append(try postKey(keyCode: 9, keyDown: false, recordedKey: "v", poster: poster, dryRun: dryRun))
+        emitted.append(try postKey(keyCode: 55, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+
+        if !dryRun, restoreClipboard {
+            try sleep(milliseconds: 120, dryRun: false, deadline: deadline)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            if let oldClipboard {
+                pasteboard.setString(oldClipboard, forType: .string)
+            }
+        }
+        return emitted
     }
 
     private func postMouse(type: CGEventType, location: CGPoint, button: CGMouseButton, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
@@ -923,6 +967,8 @@ private extension ActionPrimitive {
         case .drag:
             return .leftMouseDown
         case .type:
+            return .keyDown
+        case .pasteText:
             return .keyDown
         case .key:
             return .keyDown

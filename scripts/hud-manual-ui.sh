@@ -14,7 +14,8 @@ display_state() {
 }
 
 DISPLAY_STATE_BEFORE="$(display_state)"
-if printf '%s\n' "$DISPLAY_STATE_BEFORE" | grep -q "Current State  *0"; then
+DISPLAY_CURRENT_STATE="$(printf '%s\n' "$DISPLAY_STATE_BEFORE" | awk '/IODisplayWrangler/ { print $2; exit }')"
+if [[ "$DISPLAY_CURRENT_STATE" == "0" ]]; then
   echo "hud-manual-ui requires an awake/unlocked macOS display; IODisplayWrangler is Current State 0" >&2
   exit 1
 fi

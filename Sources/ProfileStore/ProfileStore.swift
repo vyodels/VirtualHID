@@ -511,6 +511,44 @@ public final class ProfileStore {
         return store.summarize(key: key)
     }
 
+    public func applyTemplate(
+        host: String,
+        elementSig: String,
+        taskId: String?,
+        actionType: String,
+        sampleSize: Int,
+        confidence: Double,
+        paramsJSON: String
+    ) throws -> ProfileTemplate {
+        guard !host.isEmpty else {
+            throw ProfileStoreError.invalidInput("host is required")
+        }
+        guard !elementSig.isEmpty else {
+            throw ProfileStoreError.invalidInput("element_sig is required")
+        }
+        guard !actionType.isEmpty else {
+            throw ProfileStoreError.invalidInput("action_type is required")
+        }
+        guard let data = paramsJSON.data(using: .utf8),
+              (try? decoder.decode(LearnedMotionTemplate.self, from: data)) != nil else {
+            throw ProfileStoreError.invalidInput("params must be a LearnedMotionTemplate JSON object")
+        }
+        let template = ProfileTemplate(
+            host: host,
+            elementSig: elementSig,
+            taskId: taskId,
+            actionType: actionType,
+            sampleSize: max(1, sampleSize),
+            confidence: clamp(confidence, min: 0, max: 1),
+            paramsJSON: paramsJSON,
+            updatedAt: currentTimeMs()
+        )
+        try lock.withLock {
+            try upsertTemplate(template)
+        }
+        return template
+    }
+
     public func rebuild(host: String? = nil) throws -> AggregateReport {
         try lock.withLock { [self] in
             try self.performRetentionIfNeeded(nowMs: self.currentTimeMs(), force: true)
@@ -795,6 +833,20 @@ public final class ProfileStore {
     }
 
     private func insertTemplate(group: TemplateGroup, paramsJSON: String) throws {
+        let template = ProfileTemplate(
+            host: group.host,
+            elementSig: group.elementSig,
+            taskId: group.taskId,
+            actionType: group.actionType,
+            sampleSize: group.sampleSize,
+            confidence: min(1.0, Double(group.sampleSize) / 50.0),
+            paramsJSON: paramsJSON,
+            updatedAt: currentTimeMs()
+        )
+        try upsertTemplate(template)
+    }
+
+    private func upsertTemplate(_ template: ProfileTemplate) throws {
         let sql = """
         INSERT OR REPLACE INTO templates
           (host, element_sig, task_id, action_type, sample_size, confidence, params, updated_at)
@@ -803,14 +855,14 @@ public final class ProfileStore {
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
 
-        bindText(group.host, to: statement, at: 1)
-        bindText(group.elementSig, to: statement, at: 2)
-        bindText(group.taskId ?? "", to: statement, at: 3)
-        bindText(group.actionType, to: statement, at: 4)
-        sqlite3_bind_int(statement, 5, Int32(group.sampleSize))
-        sqlite3_bind_double(statement, 6, min(1.0, Double(group.sampleSize) / 50.0))
-        bindText(paramsJSON, to: statement, at: 7)
-        sqlite3_bind_int64(statement, 8, currentTimeMs())
+        bindText(template.host, to: statement, at: 1)
+        bindText(template.elementSig, to: statement, at: 2)
+        bindText(template.taskId ?? "", to: statement, at: 3)
+        bindText(template.actionType, to: statement, at: 4)
+        sqlite3_bind_int(statement, 5, Int32(template.sampleSize))
+        sqlite3_bind_double(statement, 6, template.confidence)
+        bindText(template.paramsJSON, to: statement, at: 7)
+        sqlite3_bind_int64(statement, 8, template.updatedAt)
 
         try stepDone(statement)
     }

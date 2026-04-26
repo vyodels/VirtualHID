@@ -90,6 +90,10 @@ def analyze_group(key, records):
     }
     tuning = build_tuning(records, divergence)
     replay = build_replay_summary(records)
+    quality = {
+        "confidence": round_num(min(0.95, 0.32 + len(records) / 30.0)),
+        "improving": improvement_signal(records),
+    }
     return {
         "instructionKey": key,
         "sampleCount": len(records),
@@ -114,10 +118,8 @@ def analyze_group(key, records):
         "behaviorBlend": build_behavior_blend(records),
         "replay": replay,
         "tuning": tuning,
-        "quality": {
-            "confidence": round_num(min(0.95, 0.32 + len(records) / 30.0)),
-            "improving": improvement_signal(records),
-        },
+        "quality": quality,
+        "profilePatchProposal": build_profile_patch_proposal(key, records, tuning, quality),
     }
 
 
@@ -197,6 +199,76 @@ def build_tuning(records, divergence):
         "profile": profile,
         "adjustments": adjustments or ["当前长期统计已经接近，可继续累积样本再调。"],
     }
+
+
+def build_profile_patch_proposal(instruction_key, records, tuning, quality):
+    host = first_nonempty(record_value(record, "host") for record in records)
+    element_sig = first_nonempty(record_value(record, "elementSig", "element_sig", "context.element.sig") for record in records)
+    task_id = first_nonempty(record_value(record, "taskId", "task_id", "context.taskId") for record in records)
+    action_type = first_nonempty(record_value(record, "actionType", "action_type") for record in records) or infer_action_type(instruction_key)
+    profile = dict(tuning.get("profile") or {})
+    motion_profile = {key: value for key, value in profile.items() if key not in {"preferredPathSkeleton", "preferredRhythm"}}
+    sample_size = len(records)
+    confidence = quality.get("confidence") or 0
+    missing = [
+        name
+        for name, value in {
+            "host": host,
+            "elementSig": element_sig,
+            "actionType": action_type,
+        }.items()
+        if not value
+    ]
+    params = {
+        "version": 2,
+        "strategy": "analysis-patch",
+        "actionType": action_type or "move",
+        "sampleSize": sample_size,
+        "motion": motion_profile,
+    }
+    proposal = {
+        "version": 1,
+        "applicable": not missing,
+        "reason": None if not missing else f"missing required target fields: {', '.join(missing)}",
+        "instructionKey": instruction_key,
+        "confidence": confidence,
+        "sampleSize": sample_size,
+        "method": "profiles.apply",
+        "params": {
+            "host": host,
+            "elementSig": element_sig,
+            "taskId": task_id,
+            "actionType": action_type,
+            "sampleSize": sample_size,
+            "confidence": confidence,
+            "params": params,
+        },
+    }
+    return proposal
+
+
+def record_value(record, *paths):
+    for path in paths:
+        value = nested_get(record, path)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def first_nonempty(values):
+    for value in values:
+        if value:
+            return value
+    return None
+
+
+def infer_action_type(instruction_key):
+    if not instruction_key:
+        return None
+    tail = instruction_key.split(":")[-1]
+    if tail in {"move", "click", "drag", "scroll", "type", "key"}:
+        return "type" if tail == "key" else tail
+    return None
 
 
 def build_replay_summary(records):

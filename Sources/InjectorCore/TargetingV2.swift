@@ -305,7 +305,7 @@ public enum ViewportMapper {
         case .scroll(let at, let dx, let dy, let style):
             let mapped = map(point: at, coordinateSpace: geometry.coordSpace, geometry: geometry)
             return (.scroll(at: mapped.screenPoint, dx: dx, dy: dy, style: style), nil)
-        case .type, .key:
+        case .type, .pasteText, .key:
             return (primitive, nil)
         }
     }
@@ -403,6 +403,7 @@ public enum ExecutionPlanner {
         case .drag: return "drag"
         case .scroll: return "scroll"
         case .type: return "type"
+        case .pasteText: return "pasteText"
         case .key: return "key"
         }
     }
