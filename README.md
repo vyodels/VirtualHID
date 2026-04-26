@@ -29,7 +29,7 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 - `Supervisor`：kill switch、被动观察、事件 tap
 - `ProfileStore`：SQLite trace/template 存储、聚合、遗忘与 retention
 - `ControlServer` + `InjectorDaemon`：Unix socket JSON-RPC 后端
-- `mcp/`：MCP stdio shim，向 Agent 暴露 `hid_*` 工具
+- `mcp/`：MCP stdio shim，向 Agent 暴露 `hid_*` 工具，并按 FIFO 串行转发工具调用，避免多个键鼠动作从 MCP 入口并发交叉
 - `web/`：复杂页面、人工/HID 对比采集、长期拟人度分析实验台
 
 ## 仓库结构

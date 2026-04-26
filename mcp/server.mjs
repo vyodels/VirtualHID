@@ -8,6 +8,7 @@ import { toolMethodMap, tools } from "./tools.mjs";
 
 const socketPath = process.env.VIRTUALHID_SOCKET || path.join(os.tmpdir(), "virtualhid.sock");
 const daemonTimeoutMs = Number(process.env.VIRTUALHID_MCP_DAEMON_TIMEOUT_MS || 15000);
+let toolCallQueue = Promise.resolve();
 
 if (process.argv.includes("--smoke-tools")) {
   process.stdout.write(`${JSON.stringify({ tools: tools.map((tool) => tool.name) })}\n`);
@@ -73,6 +74,12 @@ async function handleToolCall(name, args) {
   }
 }
 
+function enqueueToolCall(name, args) {
+  const run = () => handleToolCall(name, args);
+  toolCallQueue = toolCallQueue.then(run, run);
+  return toolCallQueue;
+}
+
 async function runWithSdk() {
   const [{ Server }, { StdioServerTransport }, types] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/index.js"),
@@ -88,7 +95,7 @@ async function runWithSdk() {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return await handleToolCall(name, args);
+    return await enqueueToolCall(name, args);
   });
 
   await server.connect(new StdioServerTransport());
@@ -119,7 +126,7 @@ async function runFallbackJsonRpc() {
       if (request.method === "tools/list") {
         writeRpc(request.id, null, { tools });
       } else if (request.method === "tools/call") {
-        const result = await handleToolCall(request.params?.name, request.params?.arguments || {});
+        const result = await enqueueToolCall(request.params?.name, request.params?.arguments || {});
         writeRpc(request.id, null, result);
       } else {
         writeRpc(request.id, { code: -32601, message: `unknown method ${request.method}` });
