@@ -518,14 +518,25 @@ function renderAnalysisPanel() {
 
 function renderIntegrationPanel() {
   const daemonMeta = bridgeState.daemonMeta || {};
+  const hudMeta = daemonMeta.hud || {};
   const daemonState = bridgeState.hidReachable ? '在线' : '离线';
   const daemonHint = bridgeState.hidError ? `最近错误：${bridgeState.hidError}` : '通过 /hid/state 与本地 daemon 通讯。';
+  const hudState = hudMeta.lockedOff
+    ? '强制关闭'
+    : (hudMeta.visualizeRequested ? '请求开启' : '未请求开启');
+  const hudControlState = hudMeta.controlRequested || hudMeta.visualizeRequested ? '可配置' : '未启用';
   integrationNode.innerHTML = [
     renderIntegrationGroup('HID 桥接', [
       `状态：<strong>${escapeHtml(daemonState)}</strong>`,
       escapeHtml(daemonHint),
       daemonMeta.socketPath ? `socket：<code>${escapeHtml(daemonMeta.socketPath)}</code>` : 'socket：未获取',
       daemonMeta.managedPid ? `managed pid：<code>${escapeHtml(String(daemonMeta.managedPid))}</code>` : 'managed pid：未记录',
+      `HUD：<strong>${escapeHtml(hudState)}</strong>`,
+      `HUD control：<strong>${escapeHtml(hudControlState)}</strong>`,
+      daemonMeta.daemonArgs?.length ? `daemon args：<code>${escapeHtml(daemonMeta.daemonArgs.join(' '))}</code>` : 'daemon args：无 HUD control 参数',
+      hudMeta.hudShow ? `HUD show：<code>${escapeHtml(hudMeta.hudShow)}</code>` : 'HUD show：默认',
+      hudMeta.hudHide ? `HUD hide：<code>${escapeHtml(hudMeta.hudHide)}</code>` : 'HUD hide：默认',
+      hudMeta.clearDelaySeconds ? `HUD clear delay：<code>${escapeHtml(hudMeta.clearDelaySeconds)}s</code>` : 'HUD clear delay：默认',
       bridgeState.lastRestartAt ? `最近重启：<code>${escapeHtml(bridgeState.lastRestartAt)}</code>` : '最近重启：无',
     ]),
     renderIntegrationGroup('接口导航', [

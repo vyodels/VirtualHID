@@ -30,4 +30,30 @@ final class KillSwitchTests: XCTestCase {
         killSwitch.unlock()
         XCTAssertEqual(killSwitch.isActive, false)
     }
+
+    func testSupervisorUnlockClearsTrackedModifierState() {
+        let supervisor = SupervisorService()
+        supervisor.feedKeyEvent(
+            type: .keyDown,
+            keyCode: 0x37,
+            sourceUserData: 0,
+            now: Date(timeIntervalSince1970: 0)
+        )
+        supervisor.feedKeyEvent(
+            type: .keyDown,
+            keyCode: 0x38,
+            sourceUserData: 0,
+            now: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(supervisor.modifierSnapshot().cmd, true)
+        XCTAssertEqual(supervisor.modifierSnapshot().shift, true)
+
+        supervisor.unlock()
+        let snapshot = supervisor.modifierSnapshot()
+        XCTAssertEqual(snapshot.cmd, false)
+        XCTAssertEqual(snapshot.shift, false)
+        XCTAssertEqual(snapshot.stuck, [])
+        XCTAssertEqual(supervisor.killSwitch.isActive, false)
+    }
 }

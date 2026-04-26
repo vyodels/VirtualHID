@@ -58,10 +58,19 @@ env DEVELOPER_DIR=/tmp/OldXcode.app \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 
 /tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-daemon
+/tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-tray
 node mcp/server.mjs
 PORT=8123 python3 scripts/report_server.py
 python3 scripts/humanization_analysis.py --pretty
 ```
+
+仅在 VirtualHID Web 实验台自测时，才使用实验台自动拉起带 HUD 控制能力的内部执行服务：
+
+```bash
+VIRTUALHID_HUD_CONTROL=1 VIRTUALHID_VISUALIZE_HID=1 PORT=8123 python3 scripts/report_server.py
+```
+
+跨项目 mock 招聘演示不得把这个 Web 实验台入口当成执行链路。`recruit-agent` 侧只能通过 VirtualHID MCP 调用 `hid_*` 工具；MCP shim 到 Swift runtime 之间的本机 IPC/socket 是 VirtualHID 内部实现细节，不是 Agent 业务接口。
 
 面向 recruit-agent / Chrome 的常驻 daemon 不要使用 `--self-target`；该参数只用于 VirtualHID 自测，会把 `targetApp` 固定为 daemon 自身而不是 Chrome。smoke harness 如需自测必须同时传 `--allow-self-target-daemon` 显式确认。
 
@@ -111,6 +120,7 @@ python3 scripts/humanization_analysis.py --pretty
 ## 重要边界
 
 - VirtualHID 不访问 DOM、不发网络请求、不解析 HTML
+- 面向 `recruit-agent` / Agent 的正式入口只有 MCP `hid_*` 工具；本机 IPC/socket 只连接 MCP shim、`vhid-tray` 和 Swift HID/HUD runtime，不能被跨项目 mock 招聘流程直接调用。
 - VirtualHID 接收**目标锚点**和可选 `landingZone`；业务目标选择由上游 Agent 负责，实际 HID 落点和轨迹由 VirtualHID 负责生成
 - MCP 对外不暴露独立 `move` 操作；网页点击由上游传 `click` 原语，VirtualHID 在内部生成拟人化鼠标移动轨迹、实际落点和点击事件
 - 网页目标的 viewport/document → macOS screen 坐标换算由 VirtualHID 负责；browser/recruit-agent 只传页面坐标、target 身份和可选页面证据（如 scrollOffset/pageScale/viewportSize），不要从 browser `screenX/screenY` 合成或信任 `viewportInScreen`
@@ -118,9 +128,11 @@ python3 scripts/humanization_analysis.py --pretty
 - 网页目标的 `host` 必须来自 browser active tab、tab list、snapshot URL 或上游已规范化的 `browser_target.host`；`target.host` 与 `context.host` 同时存在时必须一致，不能由 Agent 或 VirtualHID 按站点名编造
 - `hid_action` 必须携带非空 `primitives`；缺失或空数组返回 `E_PRIMITIVES_REQUIRED`。VirtualHID 只返回 HID 执行计划、事件、实际落点和轨迹证据；下载链接、下载记录、本地 artifact 路径和业务完成判断属于 browser / recruit-agent。
 - `target / geometry` 是 action 顶层执行字段，不进入 `ActionContext`，不参与业务语义判断
-- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point 必须来自 VirtualHID action events / verification，不能由网页、browser 或 recruit-agent mock 补造。默认禁用，`--visualize-hid` 开启，`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用。
-- `global` 投递模式下必须先满足 `targetApp.frontmost == true`
-- `pid` 模式只允许 `mouseMoved / scrollWheel`
+- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力，可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 在 daemon 启动时开启，开启后作用于该 daemon 处理的每一次 `hid_action`；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
+- `vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动托盘即代表启动 VirtualHID 本地主程序，托盘会自动拉起带 `--hud-control --visualize-hid` 的 daemon。点击图标打开 HUD 配置面板，可切换 HUD、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本和清除延迟。托盘通过 daemon socket 调用 `hud.state / hud.configure`；这些开关只影响 VirtualHID 本地可视化，不进入 `hid_action` payload，也不改变执行/验证结果。
+- `global` / `auto` 写入会先由 VirtualHID 激活目标应用，再校验 `targetApp.frontmost == true`
+- `pid` 模式只允许 `mouseMoved / scrollWheel`，不可用于 click / drag / type / pasteText / key
+- `hid_unlock` 不只是解除 kill switch，也必须释放/清空 VirtualHID 观测到的卡住修饰键和鼠标按钮状态，避免下一次动作继承脏输入状态
 - daemon 内 action 执行是**全局串行**的，避免鼠标/键盘并发交叉
 
 ## 相关文档

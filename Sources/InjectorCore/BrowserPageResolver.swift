@@ -317,10 +317,14 @@ public enum BrowserPageResolver {
     }
 
     private static func normalizedHost(from url: String?) -> String? {
-        guard let url, let host = URL(string: url)?.host else {
+        guard let url, let components = URLComponents(string: url), let host = components.host else {
             return nil
         }
-        return host.lowercased()
+        let normalizedHost = host.lowercased()
+        guard let port = components.port else {
+            return normalizedHost
+        }
+        return "\(normalizedHost):\(port)"
     }
 
     private static func emptyToNil(_ value: String) -> String? {

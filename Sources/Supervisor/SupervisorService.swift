@@ -107,6 +107,11 @@ public final class SupervisorService {
     public func modifierSnapshot() -> ModifierSnapshot {
         modifierTracker.snapshot()
     }
+
+    public func unlock() {
+        killSwitch.unlock()
+        modifierTracker.reset()
+    }
 }
 
 private final class ModifierTracker {
@@ -157,6 +162,12 @@ private final class ModifierTracker {
                 fn: names.contains("fn"),
                 stuck: stuck
             )
+        }
+    }
+
+    func reset() {
+        lock.withLock {
+            pressed.removeAll()
         }
     }
 

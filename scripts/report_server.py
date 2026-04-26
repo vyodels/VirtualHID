@@ -46,6 +46,44 @@ def daemon_bundles():
     return os.environ.get("VIRTUALHID_BUNDLES") or DEFAULT_BUNDLES
 
 
+def env_flag(name):
+    return os.environ.get(name) == "1"
+
+
+def daemon_hud_launch_args():
+    args = []
+    if env_flag("VIRTUALHID_HUD_CONTROL"):
+        args.append("--hud-control")
+    if env_flag("VIRTUALHID_VISUALIZE_HID"):
+        args.append("--visualize-hid")
+    if env_flag("VIRTUALHID_NO_HUD"):
+        args.append("--no-hud")
+    clear_delay = os.environ.get("VIRTUALHID_HUD_CLEAR_DELAY_SECONDS")
+    if clear_delay:
+        args.extend(["--hud-clear-delay", clear_delay])
+    hud_show = os.environ.get("VIRTUALHID_HUD_SHOW")
+    if hud_show:
+        args.extend(["--hud-show", hud_show])
+    hud_hide = os.environ.get("VIRTUALHID_HUD_HIDE")
+    if hud_hide:
+        args.extend(["--hud-hide", hud_hide])
+    return args
+
+
+def daemon_launch_metadata(args=None):
+    return {
+        "daemonArgs": args if args is not None else daemon_hud_launch_args(),
+        "hud": {
+            "controlRequested": env_flag("VIRTUALHID_HUD_CONTROL"),
+            "visualizeRequested": env_flag("VIRTUALHID_VISUALIZE_HID"),
+            "lockedOff": env_flag("VIRTUALHID_NO_HUD"),
+            "hudShow": os.environ.get("VIRTUALHID_HUD_SHOW"),
+            "hudHide": os.environ.get("VIRTUALHID_HUD_HIDE"),
+            "clearDelaySeconds": os.environ.get("VIRTUALHID_HUD_CLEAR_DELAY_SECONDS"),
+        },
+    }
+
+
 def read_daemon_pid():
     if not DAEMON_PID_PATH.exists():
         return None
@@ -116,7 +154,7 @@ def ensure_daemon_started(force_restart=False):
 
         pid = read_daemon_pid()
         if pid and daemon_process_alive(pid) and not force_restart:
-            return {"started": False, "pid": pid, "socketPath": hid_socket_path()}
+            return {"started": False, "pid": pid, "socketPath": hid_socket_path(), **daemon_launch_metadata()}
 
         socket_path = hid_socket_path()
         daemon_binary = locate_daemon_binary()
@@ -130,6 +168,7 @@ def ensure_daemon_started(force_restart=False):
             "--bundle",
             daemon_bundles(),
         ]
+        args.extend(daemon_hud_launch_args())
         process = subprocess.Popen(
             args,
             cwd=str(ROOT),
@@ -144,7 +183,7 @@ def ensure_daemon_started(force_restart=False):
         except Exception:
             clear_daemon_pid()
             raise
-        return {"started": True, "pid": process.pid, "socketPath": socket_path}
+        return {"started": True, "pid": process.pid, "socketPath": socket_path, **daemon_launch_metadata(args)}
 
 
 def should_autostart_daemon(error):
@@ -425,16 +464,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_hid_daemon_meta(self):
         pid = read_daemon_pid()
+        binary_exists = any(candidate.exists() for candidate in [
+            ROOT / ".build" / "x86_64-apple-macosx" / "debug" / "vhid-daemon",
+            ROOT / ".build" / "debug" / "vhid-daemon",
+        ])
         self.send_json(
             {
                 "socketPath": hid_socket_path(),
                 "managedPid": pid,
                 "managedAlive": bool(pid and daemon_process_alive(pid)),
                 "autostart": os.environ.get("VIRTUALHID_AUTOSTART", "1") != "0",
-                "daemonBinary": str(locate_daemon_binary()) if any(candidate.exists() for candidate in [
-                    ROOT / ".build" / "x86_64-apple-macosx" / "debug" / "vhid-daemon",
-                    ROOT / ".build" / "debug" / "vhid-daemon",
-                ]) else None,
+                "daemonBinary": str(locate_daemon_binary()) if binary_exists else None,
+                **daemon_launch_metadata(),
             }
         )
 

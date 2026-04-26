@@ -315,6 +315,35 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(error?["code"] as? String, "E_PRIMITIVE_INVALID")
     }
 
+    func testHUDStateReportsUnavailableWithoutVisualizationControl() {
+        let service = try! makeService()
+        let response = service.handleLine(#"{"id":"hud-state","method":"hud.state","params":{}}"#)
+        let payload = try! decode(response)
+        let result = payload["result"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["available"] as? Bool, false)
+        XCTAssertEqual(result?["enabled"] as? Bool, false)
+    }
+
+    func testHUDConfigureUsesVisualizationControl() {
+        let sink = ConfigurableHIDSink()
+        let service = try! makeService(hidEventSink: sink)
+        let response = service.handleLine(
+            #"{"id":"hud-config","method":"hud.configure","params":{"enabled":true,"clearDelaySeconds":4.2,"settings":{"trail":false,"actualPoint":true}}}"#
+        )
+        let payload = try! decode(response)
+        let result = payload["result"] as? [String: Any]
+        let settings = result?["settings"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["available"] as? Bool, true)
+        XCTAssertEqual(result?["enabled"] as? Bool, true)
+        XCTAssertEqual(settings?["trail"] as? Bool, false)
+        XCTAssertEqual(settings?["actualPoint"] as? Bool, true)
+        XCTAssertEqual(settings?["clearDelaySeconds"] as? Double, 4.2)
+    }
+
     private func makeService(
         allowSelfTarget: Bool = true,
         bundleIdentifiers: [String] = ["com.example.Browser"],
@@ -381,5 +410,38 @@ private final class BoxedHIDSink: HIDEventSink {
 
     func hidActionDidFinish(_ summary: HIDActionVisualSummary) {
         box.finished = summary
+    }
+}
+
+private final class ConfigurableHIDSink: HIDEventSink, HIDVisualizationControl {
+    private var enabled = false
+    private var settings: [String: Any] = [
+        "clearDelaySeconds": 2.4,
+        "trail": true,
+        "actualPoint": true
+    ]
+
+    func hidVisualizationState() -> [String: Any] {
+        [
+            "available": true,
+            "enabled": enabled,
+            "lockedOff": false,
+            "settings": settings
+        ]
+    }
+
+    func hidVisualizationConfigure(_ params: [String: Any]) -> [String: Any] {
+        if let enabled = params["enabled"] as? Bool {
+            self.enabled = enabled
+        }
+        if let clearDelaySeconds = params["clearDelaySeconds"] as? Double {
+            settings["clearDelaySeconds"] = clearDelaySeconds
+        }
+        if let incoming = params["settings"] as? [String: Any] {
+            for (key, value) in incoming {
+                settings[key] = value
+            }
+        }
+        return hidVisualizationState()
     }
 }

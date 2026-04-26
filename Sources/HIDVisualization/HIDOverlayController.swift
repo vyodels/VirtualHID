@@ -2,17 +2,128 @@ import AppKit
 import Foundation
 import InjectorCore
 
-public final class HIDOverlayController: HIDEventSink {
+public struct HIDOverlaySettings: Equatable {
+    public var clearDelaySeconds: TimeInterval
+    public var showWindowFrame: Bool
+    public var showDiagnostic: Bool
+    public var showTrail: Bool
+    public var showTrailPoints: Bool
+    public var showExpectedPoint: Bool
+    public var showActualPoint: Bool
+    public var showClickEffects: Bool
+    public var showDragEffects: Bool
+    public var showScrollEffects: Bool
+    public var showKeyboardEffects: Bool
+    public var showStatus: Bool
+
+    public init(
+        clearDelaySeconds: TimeInterval = 2.4,
+        showWindowFrame: Bool = true,
+        showDiagnostic: Bool = true,
+        showTrail: Bool = true,
+        showTrailPoints: Bool = true,
+        showExpectedPoint: Bool = true,
+        showActualPoint: Bool = true,
+        showClickEffects: Bool = true,
+        showDragEffects: Bool = true,
+        showScrollEffects: Bool = true,
+        showKeyboardEffects: Bool = true,
+        showStatus: Bool = true
+    ) {
+        self.clearDelaySeconds = max(0.1, clearDelaySeconds)
+        self.showWindowFrame = showWindowFrame
+        self.showDiagnostic = showDiagnostic
+        self.showTrail = showTrail
+        self.showTrailPoints = showTrailPoints
+        self.showExpectedPoint = showExpectedPoint
+        self.showActualPoint = showActualPoint
+        self.showClickEffects = showClickEffects
+        self.showDragEffects = showDragEffects
+        self.showScrollEffects = showScrollEffects
+        self.showKeyboardEffects = showKeyboardEffects
+        self.showStatus = showStatus
+    }
+}
+
+public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     private let queue = DispatchQueue(label: "com.vyodels.virtualhid.hud.state")
-    private let clearDelaySeconds: TimeInterval
+    private var settings: HIDOverlaySettings
+    private var enabled: Bool
+    private let lockedOff: Bool
     private var eventsByAction = [String: [InjectedEvent]]()
     private var overlayWindow: NSPanel?
     private var overlayView: HIDOverlayView?
     private var overlayFrame: NSRect?
     private var clearToken = 0
 
-    public init(clearDelaySeconds: TimeInterval = 2.4) {
-        self.clearDelaySeconds = max(0.1, clearDelaySeconds)
+    public init(settings: HIDOverlaySettings = HIDOverlaySettings(), enabled: Bool = true, lockedOff: Bool = false) {
+        self.settings = settings
+        self.enabled = enabled && !lockedOff
+        self.lockedOff = lockedOff
+    }
+
+    public convenience init(clearDelaySeconds: TimeInterval) {
+        self.init(settings: HIDOverlaySettings(clearDelaySeconds: clearDelaySeconds))
+    }
+
+    public var currentSettings: HIDOverlaySettings {
+        queue.sync { settings }
+    }
+
+    public var isEnabled: Bool {
+        queue.sync { enabled }
+    }
+
+    public func setEnabled(_ enabled: Bool) {
+        queue.sync {
+            self.enabled = enabled && !lockedOff
+        }
+        DispatchQueue.main.async { [weak self] in
+            if !enabled {
+                self?.overlayView?.clear()
+            }
+        }
+    }
+
+    public func updateSettings(_ settings: HIDOverlaySettings) {
+        queue.sync {
+            self.settings = settings
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.overlayView?.updateSettings(settings)
+        }
+    }
+
+    public func hidVisualizationState() -> [String: Any] {
+        let snapshot = queue.sync { (enabled, settings) }
+        return [
+            "available": true,
+            "enabled": snapshot.0,
+            "lockedOff": lockedOff,
+            "settings": settingsObject(snapshot.1)
+        ]
+    }
+
+    public func hidVisualizationConfigure(_ params: [String: Any]) -> [String: Any] {
+        if let requestedEnabled = boolValue(params["enabled"]) {
+            setEnabled(requestedEnabled)
+        }
+
+        var next = currentSettings
+        if let clearDelay = doubleValue(params["clearDelaySeconds"]), clearDelay.isFinite, clearDelay > 0 {
+            next.clearDelaySeconds = clearDelay
+        }
+        if let show = componentList(params["show"]) {
+            applyComponents(show, visible: true, settings: &next)
+        }
+        if let hide = componentList(params["hide"]) {
+            applyComponents(hide, visible: false, settings: &next)
+        }
+        if let settingsObject = params["settings"] as? [String: Any] {
+            applySettingsObject(settingsObject, settings: &next)
+        }
+        updateSettings(next)
+        return hidVisualizationState()
     }
 
     public func hidActionDidStart(_ context: HIDActionVisualContext) {
@@ -96,14 +207,14 @@ public final class HIDOverlayController: HIDEventSink {
             backing: .buffered,
             defer: false
         )
-        let view = HIDOverlayView(frame: NSRect(origin: .zero, size: frame.size), screenFrame: frame)
+        let view = HIDOverlayView(frame: NSRect(origin: .zero, size: frame.size), screenFrame: frame, settings: currentSettings)
         panel.contentView = view
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
         panel.level = .screenSaver
-        panel.collectionBehavior = [.fullScreenAuxiliary, .stationary, .transient]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .transient, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.orderFrontRegardless()
         overlayWindow = panel
@@ -114,6 +225,7 @@ public final class HIDOverlayController: HIDEventSink {
     private func scheduleClear() {
         clearToken += 1
         let token = clearToken
+        let clearDelaySeconds = currentSettings.clearDelaySeconds
         DispatchQueue.main.asyncAfter(deadline: .now() + clearDelaySeconds) { [weak self] in
             guard self?.clearToken == token else {
                 return
@@ -123,7 +235,7 @@ public final class HIDOverlayController: HIDEventSink {
     }
 
     private func accepts(_ context: HIDActionVisualContext) -> Bool {
-        context.source == "hid"
+        context.source == "hid" && isEnabled
     }
 
     private func overlayPanelFrame(for context: HIDActionVisualContext) -> NSRect {
@@ -157,6 +269,130 @@ public final class HIDOverlayController: HIDEventSink {
     }
 }
 
+private func settingsObject(_ settings: HIDOverlaySettings) -> [String: Any] {
+    [
+        "clearDelaySeconds": settings.clearDelaySeconds,
+        "windowFrame": settings.showWindowFrame,
+        "diagnostic": settings.showDiagnostic,
+        "trail": settings.showTrail,
+        "trailPoints": settings.showTrailPoints,
+        "expectedPoint": settings.showExpectedPoint,
+        "actualPoint": settings.showActualPoint,
+        "clickEffects": settings.showClickEffects,
+        "dragEffects": settings.showDragEffects,
+        "scrollEffects": settings.showScrollEffects,
+        "keyboardEffects": settings.showKeyboardEffects,
+        "status": settings.showStatus
+    ]
+}
+
+private func applySettingsObject(_ object: [String: Any], settings: inout HIDOverlaySettings) {
+    for (key, rawValue) in object {
+        guard let value = boolValue(rawValue) else {
+            continue
+        }
+        applyComponents([key], visible: value, settings: &settings)
+    }
+}
+
+private func componentList(_ value: Any?) -> [String]? {
+    if let string = value as? String {
+        return string.split(separator: ",").map(String.init)
+    }
+    if let strings = value as? [String] {
+        return strings
+    }
+    return nil
+}
+
+private func boolValue(_ value: Any?) -> Bool? {
+    if let bool = value as? Bool {
+        return bool
+    }
+    if let int = value as? Int {
+        return int != 0
+    }
+    if let string = value as? String {
+        switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+    return nil
+}
+
+private func doubleValue(_ value: Any?) -> Double? {
+    if let double = value as? Double {
+        return double
+    }
+    if let int = value as? Int {
+        return Double(int)
+    }
+    if let string = value as? String {
+        return Double(string)
+    }
+    return nil
+}
+
+private func applyComponents(_ components: [String], visible: Bool, settings: inout HIDOverlaySettings) {
+    for rawComponent in components {
+        let component = rawComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+        guard !component.isEmpty else {
+            continue
+        }
+        switch component {
+        case "all":
+            settings.showWindowFrame = visible
+            settings.showDiagnostic = visible
+            settings.showTrail = visible
+            settings.showTrailPoints = visible
+            settings.showExpectedPoint = visible
+            settings.showActualPoint = visible
+            settings.showClickEffects = visible
+            settings.showDragEffects = visible
+            settings.showScrollEffects = visible
+            settings.showKeyboardEffects = visible
+            settings.showStatus = visible
+        case "window", "window-frame", "frame", "target-window", "windowframe":
+            settings.showWindowFrame = visible
+        case "diagnostic", "hud-active":
+            settings.showDiagnostic = visible
+        case "trail", "trajectory", "path":
+            settings.showTrail = visible
+        case "trail-points", "trajectory-points", "points", "path-points", "trailpoints":
+            settings.showTrailPoints = visible
+        case "expected", "expected-point", "target", "target-point", "expectedpoint":
+            settings.showExpectedPoint = visible
+        case "actual", "actual-point", "final", "final-point", "landing", "landing-point", "actualpoint":
+            settings.showActualPoint = visible
+        case "click", "clicks", "click-effects", "mouse-click", "clickeffects":
+            settings.showClickEffects = visible
+        case "drag", "drags", "drag-effects", "drageffects":
+            settings.showDragEffects = visible
+        case "scroll", "scrolls", "scroll-effects", "wheel", "scrolleffects":
+            settings.showScrollEffects = visible
+        case "keyboard", "key", "keys", "type", "typing", "paste", "paste-text", "keyboard-effects", "keyboardeffects":
+            settings.showKeyboardEffects = visible
+        case "status", "status-text":
+            settings.showStatus = visible
+        case "mouse-effects", "events", "event-effects":
+            settings.showClickEffects = visible
+            settings.showDragEffects = visible
+            settings.showScrollEffects = visible
+            settings.showKeyboardEffects = visible
+        default:
+            continue
+        }
+    }
+}
+
 private struct HIDOverlayFrame {
     let context: HIDActionVisualContext
     let events: [InjectedEvent]
@@ -167,10 +403,12 @@ private struct HIDOverlayFrame {
 
 private final class HIDOverlayView: NSView {
     private var screenFrame: NSRect
+    private var settings: HIDOverlaySettings
     private var frameData: HIDOverlayFrame?
 
-    init(frame: NSRect, screenFrame: NSRect) {
+    init(frame: NSRect, screenFrame: NSRect, settings: HIDOverlaySettings) {
         self.screenFrame = screenFrame
+        self.settings = settings
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -190,6 +428,12 @@ private final class HIDOverlayView: NSView {
     func resize(frame: NSRect, screenFrame: NSRect) {
         self.frame = frame
         self.screenFrame = screenFrame
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    func updateSettings(_ settings: HIDOverlaySettings) {
+        self.settings = settings
         needsDisplay = true
         displayIfNeeded()
     }
@@ -221,20 +465,28 @@ private final class HIDOverlayView: NSView {
             return
         }
         NSGraphicsContext.current?.shouldAntialias = true
-        drawDiagnostic(frameData)
-        drawWindowFrame(frameData.context.windowFrame)
-        drawTrail(frameData.events)
+        if settings.showDiagnostic {
+            drawDiagnostic(frameData)
+        }
+        if settings.showWindowFrame {
+            drawWindowFrame(frameData.context.windowFrame)
+        }
+        if settings.showTrail {
+            drawTrail(frameData.events)
+        }
         drawEffects(frameData.events, context: frameData.context)
-        if let expected = frameData.expected {
+        if settings.showExpectedPoint, let expected = frameData.expected {
             drawMarker(point: expected, color: .systemOrange, label: "expected", radius: 14)
         }
-        if let actual = frameData.actual {
+        if settings.showActualPoint, let actual = frameData.actual {
             drawMarker(point: actual, color: .systemRed, label: "actual", radius: 10)
         }
-        if let errorCode = frameData.errorCode {
-            drawStatus(text: "HID \(frameData.context.actionId) failed: \(errorCode)", color: .systemRed)
-        } else {
-            drawStatus(text: statusText(frameData.context), color: .controlAccentColor)
+        if settings.showStatus {
+            if let errorCode = frameData.errorCode {
+                drawStatus(text: "HID \(frameData.context.actionId) failed: \(errorCode)", color: .systemRed)
+            } else {
+                drawStatus(text: statusText(frameData.context), color: .controlAccentColor)
+            }
         }
     }
 
@@ -280,9 +532,11 @@ private final class HIDOverlayView: NSView {
         NSColor(calibratedRed: 0.0, green: 0.88, blue: 1.0, alpha: 0.98).setStroke()
         path.lineWidth = 6
         path.stroke()
-        for point in points {
-            NSColor.white.withAlphaComponent(0.88).setFill()
-            NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
+        if settings.showTrailPoints {
+            for point in points {
+                NSColor.white.withAlphaComponent(0.88).setFill()
+                NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
+            }
         }
     }
 
@@ -293,18 +547,21 @@ private final class HIDOverlayView: NSView {
                 continue
             }
             let point = convert(location)
-            if event.type.contains("MouseDown") {
+            if settings.showClickEffects, event.type.contains("MouseDown") {
                 drawRing(at: point, color: .systemOrange, radius: 14, lineWidth: 3)
-            } else if event.type.contains("MouseUp") {
+            } else if settings.showClickEffects, event.type.contains("MouseUp") {
                 drawRing(at: point, color: .systemCyan, radius: 19, lineWidth: 2)
-            } else if event.type.contains("Dragged") {
+            } else if settings.showDragEffects, event.type.contains("Dragged") {
                 drawRing(at: point, color: .systemPink, radius: 7, lineWidth: 2)
-            } else if event.type == "scrollWheel" {
+            } else if settings.showScrollEffects, event.type == "scrollWheel" {
                 drawScrollGlyph(at: point)
             }
         }
-        drawClickCountBadges(events)
-        if context.actionTypes.contains("type") || context.actionTypes.contains("key") {
+        if settings.showClickEffects {
+            drawClickCountBadges(events)
+        }
+        if settings.showKeyboardEffects,
+           context.actionTypes.contains("type") || context.actionTypes.contains("pasteText") || context.actionTypes.contains("key") {
             if let location = locationEvents.last?.location {
                 drawTypePulse(at: convert(location), eventCount: keyEventCount(events))
             } else {

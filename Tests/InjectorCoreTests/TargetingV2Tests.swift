@@ -44,6 +44,27 @@ final class TargetingV2Tests: XCTestCase {
         XCTAssertTrue(recorder.scripts[1].contains("set active tab index of targetWindow to 2"))
     }
 
+    func testBrowserPageResolverPreservesPortInHostIdentity() throws {
+        let recorder = ScriptRecorder()
+        let output = [
+            ["42", "Jobs", "1136765554", "1", "true", "Jobs", "http://127.0.0.1:53708/jobs"]
+        ]
+        .map { $0.joined(separator: "\u{1F}") }
+        .joined(separator: "\u{1E}")
+        let runner = StubScriptRunner(outputs: [output, ""], recorder: recorder)
+
+        let resolution = try BrowserPageResolver.resolve(
+            descriptor: TargetDescriptor(bundleId: "com.google.Chrome", tabId: 1136765554, host: "127.0.0.1:53708"),
+            bundleIdentifiers: ["com.google.Chrome"],
+            runner: runner,
+            requireRunningApplications: false
+        )
+
+        XCTAssertEqual(resolution.page.host, "127.0.0.1:53708")
+        XCTAssertEqual(resolution.page.tabId, 1136765554)
+        XCTAssertEqual(recorder.scripts.count, 2)
+    }
+
     func testBrowserPageResolverRejectsAmbiguousHostOnlyMatch() throws {
         let recorder = ScriptRecorder()
         let output = [

@@ -25,12 +25,12 @@ Phase-1 的目标不是覆盖真实招聘站点写入，而是把 VirtualHID 收
   输出最少消费：`history.records`、`history.groups`、`overall.recommendedProfile`、`overall.recommendedAdjustments`、`groups[].divergence`。
 
 观测点：`hid_state`、`hid_action(dryRun).events`、`hid_trace_commit`、`analysis/report`。
-HUD / visualization 是可选观察层，不是额外数据源；开启后只能展示 `hid_action` 的 VirtualHID events 与 verification，关闭时不得影响 action 结果。验收细节见 `docs/reference/hid-hud-visualization-acceptance_cn.md`。
+HUD / visualization 是 VirtualHID 正式本地观察能力，不是额外数据源，也不是 per-action 业务字段；开启后适用于该 runtime 处理的每一次 `hid_action`，只能展示 VirtualHID events、execution context 与 verification，关闭时不得影响 action 结果。`vhid-tray` 是正式 macOS 菜单栏控制入口，通过 VirtualHID 内部 IPC 调整显示项与清除延迟，但不得影响 action payload、执行计划、事件生成或 verification。对 `recruit-agent` / Agent 而言，正式入口只有 MCP `hid_*` 工具；内部 IPC/socket 只允许 MCP shim、托盘和 VirtualHID 自测使用，不得作为跨项目 mock 招聘流程入口。验收细节见 `docs/reference/hid-hud-visualization-acceptance_cn.md`。
 失败信号：`E_PRIMITIVES_REQUIRED`、`E_PRIMITIVE_INVALID`、`E_CONTEXT_REQUIRED`、`E_FIXED_POINT_ONLY`、`E_NOT_FRONTMOST`、`E_POST_MODE_UNSUPPORTED`、`E_NO_TARGET`、`E_KILL_SWITCH`、`E_DAEMON_UNREACHABLE`。
 
 ## 3. Responsibility Split With Browser / Recruit-Agent
 
-属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、frontmost / postMode / kill switch / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。
+属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、目标应用激活与 frontmost 校验、postMode / kill switch / 输入状态清理 / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。`global` / `auto` 写入由 VirtualHID 在投递前激活目标应用；`pid` 只允许 `mouseMoved / scrollWheel`，不得用于 click / drag / type / pasteText / key。`hid_unlock` 必须清理 kill switch 与卡住修饰键/鼠标按钮状态，不能只返回逻辑解锁。
 
 必须由 browser / recruit-agent 做：DOM 读取、元素发现、signature 生成、业务任务推理与执行编排、目标锚点/允许区域求解、页面语义成功判断、招聘站点特有规则、下载链接发现、下载记录 / artifact 本地路径定位与业务完成判断。它们不得生成或补造实际 HID 轨迹。
 

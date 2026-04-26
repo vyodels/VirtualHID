@@ -65,6 +65,8 @@ public final class KillSwitch {
             triggerDate = nil
             escBuffer.removeAll()
         }
+        releaseAllModifiers()
+        releaseAllMouseButtons()
     }
 
     private func trigger() {

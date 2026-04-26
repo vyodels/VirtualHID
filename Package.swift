@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "injector", targets: ["InjectorCLI"]),
         .executable(name: "focus-holder", targets: ["FocusHolderApp"]),
         .executable(name: "vhid-daemon", targets: ["InjectorDaemon"]),
+        .executable(name: "vhid-tray", targets: ["VirtualHIDTray"]),
         .library(name: "InjectorCore", targets: ["InjectorCore"]),
         .library(name: "HumanizationKit", targets: ["HumanizationKit"]),
         .library(name: "Supervisor", targets: ["Supervisor"]),
@@ -61,6 +62,10 @@ let package = Package(
             name: "InjectorDaemon",
             dependencies: ["ControlServer", "HIDVisualization", "ProfileStore", "Supervisor"],
             path: "Sources/InjectorDaemon"
+        ),
+        .executableTarget(
+            name: "VirtualHIDTray",
+            path: "Sources/VirtualHIDTray"
         ),
         .executableTarget(
             name: "FocusHolderApp",

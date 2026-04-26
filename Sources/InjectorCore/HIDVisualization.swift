@@ -53,6 +53,11 @@ public protocol HIDEventSink: AnyObject {
     func hidActionDidFail(actionId: String, errorCode: String)
 }
 
+public protocol HIDVisualizationControl: AnyObject {
+    func hidVisualizationState() -> [String: Any]
+    func hidVisualizationConfigure(_ params: [String: Any]) -> [String: Any]
+}
+
 public extension HIDEventSink {
     func hidActionDidStart(_ context: HIDActionVisualContext) {}
     func hidActionDidRecord(_ event: InjectedEvent, context: HIDActionVisualContext) {}

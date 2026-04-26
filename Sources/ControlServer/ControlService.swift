@@ -154,8 +154,19 @@ public final class ControlService {
             cancelCurrentAction()
             return ["stopped": true]
         case "unlock":
-            supervisor.killSwitch.unlock()
-            return ["killSwitch": ["active": false]]
+            supervisor.unlock()
+            let modifiers = supervisor.modifierSnapshot()
+            return [
+                "killSwitch": ["active": false],
+                "modifiers": [
+                    "shift": modifiers.shift,
+                    "cmd": modifiers.cmd,
+                    "opt": modifiers.opt,
+                    "ctrl": modifiers.ctrl,
+                    "fn": modifiers.fn,
+                    "stuck": modifiers.stuck
+                ]
+            ]
         case "observe":
             return try handleObserve(params)
         case "profiles.list":
@@ -172,9 +183,37 @@ public final class ControlService {
             return handleTraceTail(params)
         case "trace.commit":
             return try handleTraceCommit(params)
+        case "hud.state":
+            return handleHUDState()
+        case "hud.configure":
+            return handleHUDConfigure(params)
         default:
             throw ControlServerError.coded("E_UNKNOWN", "unknown method \(method)")
         }
+    }
+
+    private func handleHUDState() -> [String: Any] {
+        guard let control = hidEventSink as? HIDVisualizationControl else {
+            return [
+                "available": false,
+                "enabled": false,
+                "lockedOff": false,
+                "settings": NSNull()
+            ]
+        }
+        return control.hidVisualizationState()
+    }
+
+    private func handleHUDConfigure(_ params: [String: Any]) -> [String: Any] {
+        guard let control = hidEventSink as? HIDVisualizationControl else {
+            return [
+                "available": false,
+                "enabled": false,
+                "lockedOff": false,
+                "settings": NSNull()
+            ]
+        }
+        return control.hidVisualizationConfigure(params)
     }
 
     private func handleAction(_ params: [String: Any], requestId: String) throws -> [String: Any] {

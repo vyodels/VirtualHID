@@ -16,6 +16,9 @@ struct DaemonConfiguration {
     var allowSelfTarget = false
     var allowSelfTargetDaemon = false
     var visualizeHID = false
+    var hudControl = false
+    var hudLockedOff = false
+    var hudSettings = HIDOverlaySettings()
     var smoke: String?
 }
 
@@ -24,6 +27,7 @@ enum DaemonArguments {
         var configuration = DaemonConfiguration()
         var requestedHUD = false
         var disabledHUD = false
+        var requestedHUDControl = false
         var iterator = arguments.dropFirst().makeIterator()
         while let argument = iterator.next() {
             switch argument {
@@ -53,6 +57,20 @@ enum DaemonArguments {
                 requestedHUD = true
             case "--no-hud":
                 disabledHUD = true
+            case "--hud-control":
+                requestedHUDControl = true
+            case "--hud-clear-delay":
+                if let value = iterator.next(), let seconds = Double(value), seconds.isFinite, seconds > 0 {
+                    configuration.hudSettings.clearDelaySeconds = seconds
+                }
+            case "--hud-show":
+                if let value = iterator.next() {
+                    applyHUDComponents(value, visible: true, settings: &configuration.hudSettings)
+                }
+            case "--hud-hide":
+                if let value = iterator.next() {
+                    applyHUDComponents(value, visible: false, settings: &configuration.hudSettings)
+                }
             case "--smoke-kill-switch":
                 configuration.smoke = "kill-switch"
             case "--smoke-observer":
@@ -73,7 +91,21 @@ enum DaemonArguments {
         if ProcessInfo.processInfo.environment["VIRTUALHID_NO_HUD"] == "1" {
             disabledHUD = true
         }
+        if ProcessInfo.processInfo.environment["VIRTUALHID_HUD_CONTROL"] == "1" {
+            requestedHUDControl = true
+        }
+        if let seconds = environmentDouble("VIRTUALHID_HUD_CLEAR_DELAY_SECONDS", defaultValue: nil) {
+            configuration.hudSettings.clearDelaySeconds = seconds
+        }
+        if let value = ProcessInfo.processInfo.environment["VIRTUALHID_HUD_SHOW"] {
+            applyHUDComponents(value, visible: true, settings: &configuration.hudSettings)
+        }
+        if let value = ProcessInfo.processInfo.environment["VIRTUALHID_HUD_HIDE"] {
+            applyHUDComponents(value, visible: false, settings: &configuration.hudSettings)
+        }
+        configuration.hudLockedOff = disabledHUD
         configuration.visualizeHID = requestedHUD && !disabledHUD
+        configuration.hudControl = (requestedHUD || requestedHUDControl) && !disabledHUD
         if ProcessInfo.processInfo.environment["VIRTUALHID_ALLOW_SELF_TARGET_DAEMON"] == "1" {
             configuration.allowSelfTargetDaemon = true
         }
@@ -130,7 +162,13 @@ private func runDaemon(configuration: DaemonConfiguration) throws {
     }
 
     let store = try ProfileStore(path: try profileStorePath(configuration.dbPath))
-    let hidOverlay = configuration.visualizeHID ? HIDOverlayController() : nil
+    let hidOverlay = configuration.hudControl
+        ? HIDOverlayController(
+            settings: configuration.hudSettings,
+            enabled: configuration.visualizeHID,
+            lockedOff: configuration.hudLockedOff
+        )
+        : nil
     if hidOverlay != nil {
         NSApplication.shared.setActivationPolicy(.accessory)
     }
@@ -147,8 +185,10 @@ private func runDaemon(configuration: DaemonConfiguration) throws {
     let server = SocketServer(socketPath: configuration.socketPath, service: service)
     try server.start()
     print("vhid-daemon listening \(configuration.socketPath)")
-    if configuration.visualizeHID {
-        NSApplication.shared.run()
+    if hidOverlay != nil {
+        withExtendedLifetime(hidOverlay) {
+            NSApplication.shared.run()
+        }
     } else {
         RunLoop.main.run()
     }
@@ -277,6 +317,9 @@ private func runHUDContractSmoke(configuration: DaemonConfiguration) throws {
     ]
     let output: [String: Any] = [
         "hudEnabled": configuration.visualizeHID,
+        "hudControlEnabled": configuration.hudControl,
+        "hudLockedOff": configuration.hudLockedOff,
+        "hudSettings": hudSettingsObject(configuration.hudSettings),
         "actionOk": decoded["ok"] as? Bool ?? false,
         "source": "virtualhid-action-events",
         "response": responseObject,
@@ -288,7 +331,7 @@ private func runHUDContractSmoke(configuration: DaemonConfiguration) throws {
 private func runHUDUISmoke(configuration: DaemonConfiguration) throws {
     NSApplication.shared.setActivationPolicy(.accessory)
     let sink = HIDOverlayController(
-        clearDelaySeconds: environmentDouble("VIRTUALHID_HUD_CLEAR_DELAY_SECONDS", defaultValue: 2.4)
+        settings: configuration.hudSettings
     )
     let smokeTarget = try resolveHUDSmokeTarget(configuration: configuration)
     let service = ControlService(
@@ -491,7 +534,79 @@ private func smokePointObject(_ point: CodablePoint?) -> Any {
     return ["x": point.x, "y": point.y]
 }
 
-private func environmentDouble(_ name: String, defaultValue: Double) -> Double {
+private func hudSettingsObject(_ settings: HIDOverlaySettings) -> [String: Any] {
+    [
+        "clearDelaySeconds": settings.clearDelaySeconds,
+        "windowFrame": settings.showWindowFrame,
+        "diagnostic": settings.showDiagnostic,
+        "trail": settings.showTrail,
+        "trailPoints": settings.showTrailPoints,
+        "expectedPoint": settings.showExpectedPoint,
+        "actualPoint": settings.showActualPoint,
+        "clickEffects": settings.showClickEffects,
+        "dragEffects": settings.showDragEffects,
+        "scrollEffects": settings.showScrollEffects,
+        "keyboardEffects": settings.showKeyboardEffects,
+        "status": settings.showStatus
+    ]
+}
+
+private func applyHUDComponents(_ rawValue: String, visible: Bool, settings: inout HIDOverlaySettings) {
+    for rawComponent in rawValue.split(separator: ",") {
+        let component = rawComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+        guard !component.isEmpty else {
+            continue
+        }
+        switch component {
+        case "all":
+            settings.showWindowFrame = visible
+            settings.showDiagnostic = visible
+            settings.showTrail = visible
+            settings.showTrailPoints = visible
+            settings.showExpectedPoint = visible
+            settings.showActualPoint = visible
+            settings.showClickEffects = visible
+            settings.showDragEffects = visible
+            settings.showScrollEffects = visible
+            settings.showKeyboardEffects = visible
+            settings.showStatus = visible
+        case "window", "window-frame", "frame", "target-window":
+            settings.showWindowFrame = visible
+        case "diagnostic", "hud-active":
+            settings.showDiagnostic = visible
+        case "trail", "trajectory", "path":
+            settings.showTrail = visible
+        case "trail-points", "trajectory-points", "points", "path-points":
+            settings.showTrailPoints = visible
+        case "expected", "expected-point", "target", "target-point":
+            settings.showExpectedPoint = visible
+        case "actual", "actual-point", "final", "final-point", "landing", "landing-point":
+            settings.showActualPoint = visible
+        case "click", "clicks", "click-effects", "mouse-click":
+            settings.showClickEffects = visible
+        case "drag", "drags", "drag-effects":
+            settings.showDragEffects = visible
+        case "scroll", "scrolls", "scroll-effects", "wheel":
+            settings.showScrollEffects = visible
+        case "keyboard", "key", "keys", "type", "typing", "paste", "paste-text", "keyboard-effects":
+            settings.showKeyboardEffects = visible
+        case "status", "status-text":
+            settings.showStatus = visible
+        case "mouse-effects", "events", "event-effects":
+            settings.showClickEffects = visible
+            settings.showDragEffects = visible
+            settings.showScrollEffects = visible
+            settings.showKeyboardEffects = visible
+        default:
+            continue
+        }
+    }
+}
+
+private func environmentDouble(_ name: String, defaultValue: Double?) -> Double? {
     guard let value = ProcessInfo.processInfo.environment[name],
           let parsed = Double(value),
           parsed.isFinite,
@@ -500,6 +615,10 @@ private func environmentDouble(_ name: String, defaultValue: Double) -> Double {
         return defaultValue
     }
     return parsed
+}
+
+private func environmentDouble(_ name: String, defaultValue: Double) -> Double {
+    environmentDouble(name, defaultValue: Optional(defaultValue)) ?? defaultValue
 }
 
 private func profileStorePath(_ override: String?) throws -> String {

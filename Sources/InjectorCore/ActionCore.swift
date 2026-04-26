@@ -331,6 +331,7 @@ public final class ActionExecutor {
         }
 
         if requestedMode == .global, !dryRun {
+            try ensureFrontmostForPost(type: .leftMouseDown, poster: poster, dryRun: dryRun)
             try poster.preflight(frontmost: FocusController.isFrontmost(app: target.app))
         } else if requestedMode == .pid {
             try ensurePidSafePrimitives(request.primitives)
@@ -481,6 +482,7 @@ public final class ActionExecutor {
                 throw ActionExecutionError.eventCreationFailed("scroll")
             }
             event.location = at
+            try ensureFrontmostForPost(type: .scrollWheel, poster: poster, dryRun: dryRun)
             _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
             return [record(type: "scrollWheel", location: at)]
 
@@ -570,6 +572,7 @@ public final class ActionExecutor {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: button) else {
             throw ActionExecutionError.eventCreationFailed(eventTypeDescription(type))
         }
+        try ensureFrontmostForPost(type: type, poster: poster, dryRun: dryRun)
         _ = try poster.post(event, type: type, frontmost: FocusController.isFrontmost(app: target.app))
         return record(type: eventName(for: type), location: location)
     }
@@ -581,8 +584,31 @@ public final class ActionExecutor {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else {
             throw ActionExecutionError.eventCreationFailed("keyCode=\(keyCode)")
         }
+        try ensureFrontmostForPost(type: keyDown ? .keyDown : .keyUp, poster: poster, dryRun: dryRun)
         _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
         return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
+    }
+
+    private func ensureFrontmostForPost(type: CGEventType, poster: EventPoster, dryRun: Bool) throws {
+        guard !dryRun else {
+            return
+        }
+
+        switch poster.mode {
+        case .global:
+            guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+                throw PosterError.notFrontmost
+            }
+        case .auto:
+            guard !EventPoster.isPidSafe(type) else {
+                return
+            }
+            guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+                throw PosterError.notFrontmost
+            }
+        case .pid:
+            return
+        }
     }
 
     private func emitMovePath(

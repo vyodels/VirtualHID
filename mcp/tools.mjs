@@ -68,6 +68,17 @@ const primitiveSchema = {
     },
     {
       type: "object",
+      required: ["type", "text"],
+      properties: {
+        type: { const: "pasteText" },
+        text: { type: "string" },
+        restoreClipboard: { type: "boolean" },
+        profile: objectSchema
+      },
+      additionalProperties: true
+    },
+    {
+      type: "object",
       required: ["type"],
       anyOf: [
         { required: ["keyCode"] },
@@ -101,7 +112,7 @@ export const toolMethodMap = {
 export const tools = [
   {
     name: "hid_action",
-    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click primitive；VirtualHID 会在 click 执行内部生成拟人化鼠标移动轨迹、选择落点并完成点击，Agent 不应显式编排 move。VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。`,
+    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click primitive；VirtualHID 会在 click 执行内部生成拟人化鼠标移动轨迹、选择落点、激活目标应用并完成点击，Agent 不应显式编排 move。VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。postMode 通常应省略并使用默认值；click/drag/type/pasteText/key 这类真实写入必须走 global 或 auto，pid 只适用于 mouseMoved/scrollWheel 等不会改变页面语义的底层事件。`,
     inputSchema: {
       type: "object",
       required: ["id", "primitives", "context"],
@@ -146,7 +157,7 @@ export const tools = [
         options: {
           type: "object",
           properties: {
-            postMode: { type: "string", enum: ["global", "pid", "auto"] },
+            postMode: { type: "string", enum: ["global", "pid", "auto"], description: "通常省略。global/auto 会由 VirtualHID 激活目标应用后执行真实写入；pid 仅限 mouseMoved/scrollWheel，不可用于 click/drag/type/pasteText/key。" },
             timeoutMs: { type: "integer" },
             dryRun: { type: "boolean" },
             contextVersion: { type: "integer" }
@@ -169,7 +180,7 @@ export const tools = [
   },
   {
     name: "hid_unlock",
-    description: `${agentNotice} 解除紧急停止锁。`,
+    description: `${agentNotice} 解除紧急停止锁，并清理 VirtualHID 已观测到的卡住修饰键/鼠标按钮输入状态；不执行业务动作。`,
     inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
   {

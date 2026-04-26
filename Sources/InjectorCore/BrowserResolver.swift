@@ -175,8 +175,8 @@ public enum BrowserResolver {
                             windowId: window.windowId,
                             windowTitle: window.title,
                             browserWindowId: pageTarget?.windowId,
-                            tabId: pageTarget?.tabId,
-                            host: pageTarget?.host,
+                            tabId: pageTarget?.tabId ?? descriptor?.tabId,
+                            host: pageTarget?.host ?? descriptor?.host,
                             url: pageTarget?.url,
                             frame: window.frame,
                             viewportFrame: window.viewportFrame,
@@ -228,10 +228,19 @@ public enum BrowserResolver {
         guard let descriptor, BrowserPageResolver.requiresPageResolution(descriptor) else {
             return nil
         }
-        return try BrowserPageResolver.resolve(
-            descriptor: descriptor,
-            bundleIdentifiers: bundleIdentifiers
-        )
+        do {
+            return try BrowserPageResolver.resolve(
+                descriptor: descriptor,
+                bundleIdentifiers: bundleIdentifiers
+            )
+        } catch TargetResolverV2Error.noCandidate {
+            // Browser MCP already owns tab selection. Some Chrome sessions expose
+            // AX/CG windows but not AppleScript windows, so page activation must
+            // be best-effort instead of blocking HID execution.
+            return nil
+        } catch BrowserPageResolverError.automationFailed {
+            return nil
+        }
     }
 
     private struct ResolvedWindow {
