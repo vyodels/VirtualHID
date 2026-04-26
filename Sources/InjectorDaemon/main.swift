@@ -77,6 +77,8 @@ enum DaemonArguments {
                 configuration.smoke = "observer"
             case "--smoke-profile-learn":
                 configuration.smoke = "profile-learn"
+            case "--smoke-learning":
+                configuration.smoke = "learning"
             case "--smoke-hud-contract":
                 configuration.smoke = "hud-contract"
             case "--smoke-hud-ui":
@@ -134,6 +136,8 @@ do {
         try runObserverSmoke(configuration: configuration)
     case "profile-learn":
         try runProfileLearnSmoke(configuration: configuration)
+    case "learning":
+        try runLearningSmoke(configuration: configuration)
     case "hud-contract":
         try runHUDContractSmoke(configuration: configuration)
     case "hud-ui":
@@ -282,6 +286,77 @@ private func runProfileLearnSmoke(configuration: DaemonConfiguration) throws {
         ],
         "templatesBeforeForget": templatesBeforeForget,
         "templatesAfterForget": try store.totalTemplates()
+    ])
+}
+
+private func runLearningSmoke(configuration: DaemonConfiguration) throws {
+    let supervisor = SupervisorService()
+    let store = try ProfileStore(path: try profileStorePath(configuration.dbPath))
+    let service = ControlService(
+        configuration: ControlServerConfiguration(allowSelfTarget: true),
+        supervisor: supervisor,
+        profileStore: store
+    )
+
+    let initial = service.handleLine(#"{"id":"learning-initial","method":"learning.state","params":{}}"#)
+    _ = service.handleLine(#"{"id":"learning-on","method":"learning.configure","params":{"enabled":true,"mode":"passive"}}"#)
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+    for index in 0..<5 {
+        let base = nowMs + Int64(index * 1_000)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 10, y: 10), ts: base)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 42 + Double(index), y: 24 + Double(index)), ts: base + 80)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 88 + Double(index), y: 58 + Double(index)), ts: base + 170)
+        _ = supervisor.observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 120 + Double(index), y: 82 + Double(index)), ts: base + 240)
+        _ = supervisor.observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 120 + Double(index), y: 82 + Double(index)), ts: base + 305)
+    }
+    let passiveState = service.handleLine(#"{"id":"learning-passive","method":"learning.state","params":{}}"#)
+
+    let start = service.handleLine(#"{"id":"training-start","method":"learning.session.start","params":{"label":"专项鼠标训练","host":"training.local","targetAction":"click"}}"#)
+    for index in 0..<5 {
+        let base = nowMs + Int64(20_000 + index * 900)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 30, y: 30), ts: base)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 62 + Double(index), y: 45 + Double(index % 2)), ts: base + 65)
+        _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 110 + Double(index), y: 78 + Double(index % 3)), ts: base + 160)
+        _ = supervisor.observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 146 + Double(index), y: 108 + Double(index)), ts: base + 230)
+        _ = supervisor.observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 146 + Double(index), y: 108 + Double(index)), ts: base + 302)
+    }
+    let stop = service.handleLine(#"{"id":"training-stop","method":"learning.session.stop","params":{"commit":true}}"#)
+    let finalState = service.handleLine(#"{"id":"learning-final","method":"learning.state","params":{}}"#)
+    let passiveTemplate = try? store.lookupTemplate(
+        host: ProfileStore.globalLearningHost,
+        sig: "",
+        taskId: nil,
+        actionType: "click"
+    )
+    let trainingTemplate = try? store.lookupTemplate(
+        host: "training.local",
+        sig: "",
+        taskId: nil,
+        actionType: "click"
+    )
+
+    try printJSON([
+        "initial": try jsonObject(initial),
+        "passiveState": try jsonObject(passiveState),
+        "trainingStart": try jsonObject(start),
+        "trainingStop": try jsonObject(stop),
+        "finalState": try jsonObject(finalState),
+        "traceCountGlobal": try store.traceCount(host: ProfileStore.globalLearningHost),
+        "traceCountTraining": try store.traceCount(host: "training.local"),
+        "passiveTemplate": passiveTemplate.map { [
+            "host": $0.host,
+            "elementSig": $0.elementSig,
+            "actionType": $0.actionType,
+            "sampleSize": $0.sampleSize,
+            "confidence": $0.confidence
+        ] } ?? NSNull(),
+        "trainingTemplate": trainingTemplate.map { [
+            "host": $0.host,
+            "elementSig": $0.elementSig,
+            "actionType": $0.actionType,
+            "sampleSize": $0.sampleSize,
+            "confidence": $0.confidence
+        ] } ?? NSNull()
     ])
 }
 

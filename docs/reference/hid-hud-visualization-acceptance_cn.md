@@ -11,6 +11,7 @@ HUD 开启时应展示：
 - 点击、拖拽、滚轮、输入等事件效果。
 - `OutcomeVerifier` 基于同一批 `ActionResult.events` 计算出的 `expectedPointer` 与 `finalPointer`。
 - 常驻显示开启时，action 结束并超过清除延迟后仍保留最后一次 VirtualHID 目标窗口、状态、expected/final point；只清除动态轨迹和事件特效。
+- HUD 生命周期必须绑定 VirtualHID 当前 target window：目标窗口打开并开始 action 时自动显示；目标窗口移动或 resize 时，HUD 外框、viewport/window 诊断和 expected/final 标记必须跟随同一窗口重算并移动；目标窗口关闭、失去可解析 target 或 action 被取消/停止后，HUD 必须关闭或隐藏，不能停留在旧屏幕坐标。
 
 ## 2. VirtualHID 正式 HUD / 控制面语义
 
@@ -94,6 +95,8 @@ VIRTUALHID_HUD_RESPONSE=/tmp/virtualhid-hud-ui-smoke.json \
 默认情况下，`--smoke-hud-ui` 会解析当前运行中的 Chrome / Chromium / Edge / Safari 目标窗口，并用 VirtualHID 自己解析出的 `AXWebArea` / browser content viewport 做 viewport 到 screen 的映射。只有显式传 `--self-target` 时才进入自测 fallback；fallback 区域必须是主屏 `visibleFrame`，不得跨桌面或画到不可见区域。
 
 预期：屏幕上短暂出现透明穿透 HUD，包含目标窗口虚线框、`HUD ACTIVE` 诊断标签、VirtualHID 事件轨迹、点击/滚动效果、expected/final 标记和 `HID dry-run click+scroll ...` 状态文本。`click` primitive 内部会生成拟人化鼠标移动轨迹；demo 不应再显式下发独立 `move` primitive，也不应出现来自网页 mock 的额外轨迹或坐标。
+
+目标窗口生命周期验收：在真实 Chrome / Edge / Safari 目标窗口上触发 HUD 后，人工或脚本移动/缩放该目标窗口时，HUD 外框与窗口诊断必须在下一次 target 解析或 action 更新时跟随新 frame；关闭目标窗口后，HUD 必须隐藏或进入明确的无 target 状态，不得继续显示旧窗口框、旧落点或旧轨迹。该验收只能使用 VirtualHID 的 targetApp / execution context / verification 证据，不得由 browser snapshot 或页面脚本补算 screen 坐标。
 
 多屏坐标注意事项：Chrome/AX/CG 返回的窗口和事件点可能使用主屏顶部为基准的全局坐标，例如上方外接屏会出现负 Y。HUD 必须在 VirtualHID 内部把该坐标系转换为 AppKit `NSScreen.frame` 坐标后绘制；browser、recruit-agent 或 mock page 不得提供或修正 screen coordinate authority。
 

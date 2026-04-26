@@ -45,6 +45,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
     private var delayField: NSTextField?
     private var componentCheckboxes = [Component: NSButton]()
     private var lastState = HUDState.offline(message: "未连接到 VirtualHID 执行服务")
+    private var learningStatusLabel: NSTextField?
+    private var learningEnabledCheckbox: NSButton?
+    private var learningModePopup: NSPopUpButton?
+    private var trainingLabelField: NSTextField?
+    private var trainingHostField: NSTextField?
+    private var trainingActionField: NSTextField?
+    private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
     private var autostartAttempted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -93,14 +100,51 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         updateControls()
     }
 
+    @objc private func applyLearningAction(_ sender: Any?) {
+        do {
+            let response = try client.call(method: "learning.configure", params: [
+                "enabled": learningEnabledCheckbox?.state == .on,
+                "mode": selectedLearningMode()
+            ])
+            lastLearningState = LearningState(response: response)
+        } catch {
+            lastLearningState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    @objc private func startTrainingAction(_ sender: Any?) {
+        do {
+            let response = try client.call(method: "learning.session.start", params: [
+                "label": trainingLabelField?.stringValue ?? "",
+                "host": trainingHostField?.stringValue ?? "",
+                "targetAction": trainingActionField?.stringValue ?? ""
+            ])
+            lastLearningState = LearningState(response: response)
+        } catch {
+            lastLearningState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    @objc private func commitTrainingAction(_ sender: Any?) {
+        stopTraining(commit: true)
+    }
+
+    @objc private func discardTrainingAction(_ sender: Any?) {
+        stopTraining(commit: false)
+    }
+
     @objc private func startDaemonAction(_ sender: Any?) {
         do {
             try startManagedDaemon()
             lastState = .offline(message: "正在启动 VirtualHID 执行服务...")
+            lastLearningState = .offline(message: "正在启动 VirtualHID 执行服务...")
             updateControls()
             scheduleRefreshAfterDaemonStart()
         } catch {
             lastState = .offline(message: localizedErrorMessage(error))
+            lastLearningState = .offline(message: localizedErrorMessage(error))
             updateControls()
         }
     }
@@ -126,6 +170,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         do {
             let response = try client.call(method: "hud.state", params: [:])
             lastState = HUDState(response: response)
+            let learningResponse = try client.call(method: "learning.state", params: [:])
+            lastLearningState = LearningState(response: learningResponse)
             autostartAttempted = false
         } catch {
             if autostartIfNeeded, !autostartAttempted {
@@ -133,16 +179,19 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
                 do {
                     try startManagedDaemon()
                     lastState = .offline(message: "正在启动 VirtualHID 执行服务...")
+                    lastLearningState = .offline(message: "正在启动 VirtualHID 执行服务...")
                     updateControls()
                     scheduleRefreshAfterDaemonStart()
                     return
                 } catch {
                     lastState = .offline(message: localizedErrorMessage(error))
+                    lastLearningState = .offline(message: localizedErrorMessage(error))
                     updateControls()
                     return
                 }
             }
             lastState = .offline(message: localizedErrorMessage(error))
+            lastLearningState = .offline(message: localizedErrorMessage(error))
         }
         updateControls()
     }
@@ -155,7 +204,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
 
     private func buildPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 760),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -180,7 +229,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         subtitle.textColor = .secondaryLabelColor
         subtitle.lineBreakMode = .byWordWrapping
         subtitle.maximumNumberOfLines = 3
-        subtitle.preferredMaxLayoutWidth = 338
+        subtitle.preferredMaxLayoutWidth = 398
         root.addArrangedSubview(subtitle)
 
         let status = NSTextField(labelWithString: "")
@@ -195,7 +244,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         let separator = NSBox()
         separator.boxType = .separator
         root.addArrangedSubview(separator)
-        separator.widthAnchor.constraint(equalToConstant: 338).isActive = true
+        separator.widthAnchor.constraint(equalToConstant: 398).isActive = true
 
         for component in Component.allCases {
             let checkbox = NSButton(checkboxWithTitle: component.title, target: self, action: #selector(applyAction(_:)))
@@ -218,14 +267,87 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         delayField = delay
         root.addArrangedSubview(delayStack)
 
-        let buttons = NSStackView()
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-        buttons.addArrangedSubview(NSButton(title: "刷新", target: self, action: #selector(refreshAction(_:))))
-        buttons.addArrangedSubview(NSButton(title: "应用", target: self, action: #selector(applyAction(_:))))
-        buttons.addArrangedSubview(NSButton(title: "启动服务", target: self, action: #selector(startDaemonAction(_:))))
-        buttons.addArrangedSubview(NSButton(title: "退出", target: self, action: #selector(quitAction(_:))))
-        root.addArrangedSubview(buttons)
+        let hudButtons = NSStackView()
+        hudButtons.orientation = .horizontal
+        hudButtons.spacing = 8
+        hudButtons.addArrangedSubview(NSButton(title: "刷新", target: self, action: #selector(refreshAction(_:))))
+        hudButtons.addArrangedSubview(NSButton(title: "应用 HUD", target: self, action: #selector(applyAction(_:))))
+        hudButtons.addArrangedSubview(NSButton(title: "启动服务", target: self, action: #selector(startDaemonAction(_:))))
+        hudButtons.addArrangedSubview(NSButton(title: "退出", target: self, action: #selector(quitAction(_:))))
+        root.addArrangedSubview(hudButtons)
+
+        let learningSeparator = NSBox()
+        learningSeparator.boxType = .separator
+        root.addArrangedSubview(learningSeparator)
+        learningSeparator.widthAnchor.constraint(equalToConstant: 398).isActive = true
+
+        let learningTitle = NSTextField(labelWithString: "鼠标习惯学习")
+        learningTitle.font = NSFont.boldSystemFont(ofSize: 15)
+        root.addArrangedSubview(learningTitle)
+
+        let learningHint = NSTextField(labelWithString: "学习只采集压缩后的鼠标行为指纹：路径骨架、节奏、停顿、点击时间流和速度特征；不保存业务页面内容。")
+        learningHint.font = NSFont.systemFont(ofSize: 11)
+        learningHint.textColor = .secondaryLabelColor
+        learningHint.lineBreakMode = .byWordWrapping
+        learningHint.maximumNumberOfLines = 3
+        learningHint.preferredMaxLayoutWidth = 398
+        root.addArrangedSubview(learningHint)
+
+        let learningStatus = NSTextField(labelWithString: "")
+        learningStatus.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        learningStatus.lineBreakMode = .byWordWrapping
+        learningStatus.maximumNumberOfLines = 3
+        learningStatus.preferredMaxLayoutWidth = 398
+        root.addArrangedSubview(learningStatus)
+        learningStatusLabel = learningStatus
+
+        let learningEnabled = NSButton(checkboxWithTitle: "开启鼠标习惯学习", target: self, action: #selector(applyLearningAction(_:)))
+        root.addArrangedSubview(learningEnabled)
+        learningEnabledCheckbox = learningEnabled
+
+        let modeStack = NSStackView()
+        modeStack.orientation = .horizontal
+        modeStack.alignment = .centerY
+        modeStack.spacing = 8
+        modeStack.addArrangedSubview(NSTextField(labelWithString: "学习模式"))
+        let modePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        modePopup.addItems(withTitles: ["被动学习", "专项训练", "关闭"])
+        modePopup.target = self
+        modePopup.action = #selector(applyLearningAction(_:))
+        modePopup.widthAnchor.constraint(equalToConstant: 128).isActive = true
+        modeStack.addArrangedSubview(modePopup)
+        learningModePopup = modePopup
+        root.addArrangedSubview(modeStack)
+
+        let labelField = NSTextField(string: "手动轨迹训练")
+        let hostField = NSTextField(string: "")
+        hostField.placeholderString = "可选：训练目标 host"
+        let actionField = NSTextField(string: "click")
+        actionField.placeholderString = "click / drag / scroll"
+        for field in [labelField, hostField, actionField] {
+            field.widthAnchor.constraint(equalToConstant: 250).isActive = true
+        }
+        trainingLabelField = labelField
+        trainingHostField = hostField
+        trainingActionField = actionField
+
+        let trainingGrid = NSGridView(views: [
+            [NSTextField(labelWithString: "训练名称"), labelField],
+            [NSTextField(labelWithString: "目标 Host"), hostField],
+            [NSTextField(labelWithString: "动作类型"), actionField]
+        ])
+        trainingGrid.rowSpacing = 6
+        trainingGrid.columnSpacing = 8
+        root.addArrangedSubview(trainingGrid)
+
+        let learningButtons = NSStackView()
+        learningButtons.orientation = .horizontal
+        learningButtons.spacing = 8
+        learningButtons.addArrangedSubview(NSButton(title: "应用学习", target: self, action: #selector(applyLearningAction(_:))))
+        learningButtons.addArrangedSubview(NSButton(title: "开始训练", target: self, action: #selector(startTrainingAction(_:))))
+        learningButtons.addArrangedSubview(NSButton(title: "提交训练", target: self, action: #selector(commitTrainingAction(_:))))
+        learningButtons.addArrangedSubview(NSButton(title: "丢弃训练", target: self, action: #selector(discardTrainingAction(_:))))
+        root.addArrangedSubview(learningButtons)
 
         panel.contentView?.addSubview(root)
         NSLayoutConstraint.activate([
@@ -253,6 +375,16 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
             checkbox?.isEnabled = lastState.available
             checkbox?.state = lastState.settings[component.rawValue, default: true] ? .on : .off
         }
+
+        learningStatusLabel?.stringValue = lastLearningState.statusText
+        learningStatusLabel?.textColor = lastLearningState.available ? .labelColor : .systemRed
+        learningEnabledCheckbox?.isEnabled = lastLearningState.available
+        learningEnabledCheckbox?.state = lastLearningState.enabled ? .on : .off
+        setLearningMode(lastLearningState.mode)
+        learningModePopup?.isEnabled = lastLearningState.available
+        trainingLabelField?.isEnabled = lastLearningState.available
+        trainingHostField?.isEnabled = lastLearningState.available
+        trainingActionField?.isEnabled = lastLearningState.available
     }
 
     private func position(panel: NSPanel) {
@@ -293,6 +425,40 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         environment["VIRTUALHID_SOCKET"] = client.socketPath
         process.environment = environment
         try process.run()
+    }
+
+    private func stopTraining(commit: Bool) {
+        do {
+            let response = try client.call(method: "learning.session.stop", params: ["commit": commit])
+            lastLearningState = LearningState(response: response)
+        } catch {
+            lastLearningState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    private func selectedLearningMode() -> String {
+        switch learningModePopup?.indexOfSelectedItem ?? 0 {
+        case 1:
+            return "training"
+        case 2:
+            return "off"
+        default:
+            return "passive"
+        }
+    }
+
+    private func setLearningMode(_ mode: String) {
+        let index: Int
+        switch mode {
+        case "training":
+            index = 1
+        case "off":
+            index = 2
+        default:
+            index = 0
+        }
+        learningModePopup?.selectItem(at: index)
     }
 }
 
@@ -356,6 +522,95 @@ private struct HUDState {
         self.lockedOff = lockedOff
         self.settings = settings
         self.clearDelaySeconds = clearDelaySeconds
+        self.message = message
+    }
+}
+
+private struct LearningState {
+    let available: Bool
+    let enabled: Bool
+    let mode: String
+    let activeSessionLabel: String?
+    let producedSamples: Int
+    let pendingTrainingSamples: Int
+    let persistedSamples: Int
+    let totalTemplates: Int
+    let lastLearnedAt: String?
+    let message: String?
+
+    var statusText: String {
+        if let message {
+            return "学习离线：\(message)"
+        }
+        let modeText: String
+        switch mode {
+        case "training":
+            modeText = "专项训练"
+        case "off":
+            modeText = "关闭"
+        default:
+            modeText = "被动学习"
+        }
+        let sessionText = activeSessionLabel.map { "，训练：\($0)" } ?? ""
+        return "学习：\(enabled ? "开启" : "关闭") / \(modeText)，已产出 \(producedSamples) 个样本，待提交 \(pendingTrainingSamples) 个，已持久化 \(persistedSamples) 个，模板 \(totalTemplates) 个\(sessionText)"
+    }
+
+    init(response: [String: Any]) {
+        let responseResult = response["result"] as? [String: Any] ?? response
+        let result = responseResult["state"] as? [String: Any] ?? responseResult
+        let settings = result["settings"] as? [String: Any] ?? [:]
+        let activeSession = result["activeSession"] as? [String: Any]
+        available = true
+        enabled = settings["enabled"] as? Bool ?? false
+        mode = settings["mode"] as? String ?? "off"
+        activeSessionLabel = activeSession?["label"] as? String
+        producedSamples = intValue(result["producedSamples"]) ?? 0
+        pendingTrainingSamples = intValue(result["pendingTrainingSamples"]) ?? 0
+        persistedSamples = intValue(responseResult["persistedSamples"]) ?? intValue(result["persistedSamples"]) ?? 0
+        totalTemplates = intValue(responseResult["totalTemplates"])
+            ?? intValue(responseResult["generatedTemplates"])
+            ?? intValue(result["totalTemplates"])
+            ?? 0
+        lastLearnedAt = result["lastLearnedAt"] as? String
+        message = nil
+    }
+
+    static func offline(message: String) -> LearningState {
+        LearningState(
+            available: false,
+            enabled: false,
+            mode: "off",
+            activeSessionLabel: nil,
+            producedSamples: 0,
+            pendingTrainingSamples: 0,
+            persistedSamples: 0,
+            totalTemplates: 0,
+            lastLearnedAt: nil,
+            message: message
+        )
+    }
+
+    private init(
+        available: Bool,
+        enabled: Bool,
+        mode: String,
+        activeSessionLabel: String?,
+        producedSamples: Int,
+        pendingTrainingSamples: Int,
+        persistedSamples: Int,
+        totalTemplates: Int,
+        lastLearnedAt: String?,
+        message: String?
+    ) {
+        self.available = available
+        self.enabled = enabled
+        self.mode = mode
+        self.activeSessionLabel = activeSessionLabel
+        self.producedSamples = producedSamples
+        self.pendingTrainingSamples = pendingTrainingSamples
+        self.persistedSamples = persistedSamples
+        self.totalTemplates = totalTemplates
+        self.lastLearnedAt = lastLearnedAt
         self.message = message
     }
 }
@@ -484,4 +739,17 @@ private func localizedErrorMessage(_ error: Error) -> String {
         }
     }
     return error.localizedDescription
+}
+
+private func intValue(_ value: Any?) -> Int? {
+    if let int = value as? Int {
+        return int
+    }
+    if let double = value as? Double {
+        return Int(double)
+    }
+    if let string = value as? String {
+        return Int(string)
+    }
+    return nil
 }

@@ -129,12 +129,21 @@
 - `ControlService.action` 已能把 HID action events 自动转成 `TraceInput` 和 `ReplayTraceFingerprint`，并返回 `daemonLearning` 证据。
 - 敏感 role 不写入 daemon learning。
 - `scripts/analysis-apply-smoke.sh` 已验证 10 条长期样本生成 proposal、写入 profile store，并被下一轮 action 应用。
+
+补充进展（2026-04-27）：
+
+- `PassiveLearning` 已接入 `PassiveObserver`，在用户显式开启后从真实鼠标事件流自动生成 compact 行为样本。
+- `learning.state / learning.configure / learning.session.start / learning.session.stop` 已进入 daemon JSON-RPC 控制面。
+- 专项训练样本在提交前只留在 session buffer，提交后才写入 `ProfileStore`；丢弃训练不会落库。
+- `ProfileStore.lookupTemplate` 已加入 `__global__` 全局鼠标习惯模板 fallback，避免按站点硬编码鼠标习惯。
 - 仍缺真实人工/HID 长期样本回归；当前 synthetic smoke 只证明闭环通路可用。
 
 任务：
 
 - action 完成后按 `instructionKey` 自动生成 compact trace fingerprint。
 - 将 trace 持久化到 ProfileStore/ReplayTraceStore，而不是只写临时 JSON。
+- 被动学习只保存压缩行为指纹，不保存完整原始轨迹、DOM、页面文本或截图。
+- 专项训练必须由托盘或本地控制 API 明确开始/提交/丢弃。
 - 加入敏感字段过滤、大小限制、retention 和低质量样本淘汰。
 - 为真实样本建立最小回归集：人工样本、HID 样本、replay fingerprint、聚合 profile。
 
@@ -154,6 +163,7 @@
 - `ControlService` 已新增 `profiles.apply`，会校验 `LearnedMotionTemplate` JSON 后写入 ProfileStore。
 - `report_server.py` 已新增 `POST /analysis/apply-profile-patch`，必须 `confirm=true` 才会调用 daemon apply。
 - `scripts/analysis-apply-smoke.sh` 会构造 10 条长期样本，验证 `profilePatchProposal -> profiles.apply -> action profiles.applied`。
+- `ActionCore` dry-run 已使用虚拟时间线推进 click hold、inter-click、settle 等时间片，干跑也能验证完整时间流。
 - 仍缺真实长期样本前后对照验证；当前完成的是 proposal -> apply -> profile store 的受控闭环。
 
 任务：
@@ -202,11 +212,14 @@
 - `./scripts/hud-smoke.sh` 已通过 contract smoke。
 - `./scripts/hud-manual-ui.sh` 已在唤醒显示器后通过真实 GUI 截图验收，证据路径：`/tmp/virtualhid-hud-manual.png`。
 - 脚本已修复 `IODisplayWrangler Current State 0` 的预检，显示器睡眠时会明确标为环境阻塞，不会伪造通过。
+- `vhid-tray` 已作为正式菜单栏控制入口接入 HUD 与学习配置，支持 HUD 常驻、轨迹/落点/事件特效开关、被动学习开关和专项训练控制。
+- `scripts/start-tray.sh`、`scripts/install-tray-launch-agent.sh`、`scripts/uninstall-tray-launch-agent.sh` 已提供开发启动和登录启动入口。
 
 任务：
 
 - 真实 Chrome/Edge/Safari 目标窗口上显示透明、鼠标穿透 HUD。
 - HUD 按 VirtualHID 当前 action context 绑定目标窗口，不根据网页内容判断展示。
+- HUD 生命周期跟随目标窗口：目标窗口打开并开始 action 时自动显示；目标窗口移动或 resize 时 HUD 外框、viewport/window 诊断和 expected/final 标记跟随新 frame；目标窗口关闭、target 解析失败或 action stop/cancel 后 HUD 关闭或隐藏，不保留旧窗口坐标。
 - 显示 expected point、actual final point、最近几秒轨迹、click/double-click/drag/scroll/type 事件效果。
 - 所有可视化数据只能来自 VirtualHID action events / verification / targetApp frame。
 - `scripts/hud-manual-ui.sh` 在显示器睡眠、无截图权限、无 GUI session 时必须明确失败原因。
@@ -217,6 +230,7 @@
 - 页面 JS 无法感知 HUD 存在、轨迹、落点或截图。
 - 禁用 HUD 后 action response、事件投递、verification 不变化。
 - 真实截图中能看到目标窗口框、轨迹、expected/final 标记和事件效果。
+- 移动/缩放目标窗口后的下一次 action 或 target refresh 截图中，HUD 外框和诊断必须贴合新目标窗口；关闭目标窗口后不得继续显示旧窗口 HUD。
 - 若 `IODisplayWrangler Current State 0`，验收标为环境阻塞，不得伪造通过。
 
 ---
@@ -233,14 +247,16 @@
 
 ## 4. 当前收口结果
 
-- `swift test`：51 tests, 0 failures。
+- `swift test`：69 tests, 0 failures。
 - `./scripts/control-server-smoke.sh`：通过。
 - `./scripts/mcp-smoke.sh`：通过。
 - `./scripts/profile-learn-smoke.sh`：通过。
+- `./scripts/learning-smoke.sh`：通过。
 - `./scripts/observer-smoke.sh`：通过。
 - `./scripts/hud-smoke.sh`：通过。
 - `./scripts/hud-manual-ui.sh`：通过，截图 `/tmp/virtualhid-hud-manual.png`。
 - `./scripts/analysis-apply-smoke.sh`：通过。
+- `python3 scripts/humanization_analysis.py --history docs/reference/fixtures/humanization-replay-history.jsonl --pretty`：通过。
 - `./scripts/browser-target-live-smoke.sh`：通过，Chrome live `windowId/tabId/host` 归因和 `E_VIEWPORT_RESAMPLE_REQUIRED` guard 均已验证。
 
 ---
@@ -252,6 +268,6 @@
 - 真实 Chrome 已有目标激活验收；Edge/Safari 需要后续矩阵或记录环境缺口。
 - 滚动后二次坐标不允许复用旧坐标，已由 live guard 验收；跨项目“滚动后重采样再执行”需要 Agent/browser 配合。
 - response 能区分注入、指针、焦点、observer 和语义确认。
-- daemon 能自动生成并持久化 compact trace，synthetic long-history 可驱动 profile patch proposal 并受控 apply。
+- daemon 能自动生成并持久化 compact trace，被动学习和专项训练可写入 compact 行为样本，synthetic long-history 可驱动 profile patch proposal 并受控 apply。
 - 中文 `pasteText` fallback 可用；`imePinyin` 明确继续列为后续项。
 - HUD 真实 GUI 视觉验收已有截图证据。

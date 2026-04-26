@@ -53,6 +53,32 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertTrue(elapsedMs < 220, "dry-run actions should not sleep through holdMs; elapsedMs=\(elapsedMs)")
     }
 
+    func testDryRunEventsUseSyntheticTimelineForHoldAndInterClickDurations() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"timing","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-timing","role":"button"}},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left","holdMs":70,"count":2,"profile":{"origin":{"x":120,"y":88},"motion":{"clickHoldMs":{"min":70,"max":70},"interClickMs":{"min":140,"max":140},"settleMs":{"min":30,"max":30}}}}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let learning = result?["daemonLearning"] as? [String: Any]
+        let fingerprint = learning?["replayFingerprint"] as? [String: Any]
+        let segmentMs = fingerprint?["segmentMs"] as? [Double]
+        let clickHoldMs = fingerprint?["clickHoldMs"] as? [Double]
+        let interClickMs = fingerprint?["interClickMs"] as? [Double]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(clickHoldMs?.count, 2)
+        for hold in clickHoldMs ?? [] {
+            XCTAssertEqual(hold, 70, accuracy: 1)
+        }
+        // Replay inter-click is measured between click-up events; it therefore includes
+        // the configured pause plus the next click hold.
+        XCTAssertEqual(interClickMs?.count, 1)
+        XCTAssertEqual(interClickMs?.first ?? 0, 210, accuracy: 1)
+        XCTAssertTrue(segmentMs?.contains { abs($0 - 70) < 1 } == true)
+        XCTAssertTrue(segmentMs?.contains { abs($0 - 140) < 1 } == true)
+    }
+
     func testActionUsesVirtualHidViewportFrameInsteadOfCallerViewportOrigin() {
         let service = try! makeService()
         let response = service.handleLine(

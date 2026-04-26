@@ -56,4 +56,41 @@ final class KillSwitchTests: XCTestCase {
         XCTAssertEqual(snapshot.stuck, [])
         XCTAssertEqual(supervisor.killSwitch.isActive, false)
     }
+
+    func testPassiveLearningBuildsCompactMouseGestureSamplesAndTrainingCommit() {
+        let observer = PassiveObserver()
+        var published = [PassiveGestureSample]()
+        observer.learningSampleHandler = { sample in
+            published.append(sample)
+        }
+
+        _ = observer.configureLearning(enabled: true, mode: .passive)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 0, y: 0), ts: 1_000)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 28, y: 12), ts: 1_080)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 68, y: 42), ts: 1_170)
+        _ = observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 96, y: 64), ts: 1_240)
+        _ = observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 96, y: 64), ts: 1_305)
+
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(published[0].source, "user-passive")
+        XCTAssertEqual(published[0].host, "__global__")
+        XCTAssertEqual(published[0].actionType, "click")
+        XCTAssertTrue(published[0].pathSkeleton.count >= 3)
+        XCTAssertEqual(published[0].clickHoldMs.first, 65)
+        XCTAssertTrue((published[0].speedPxS ?? 0) > 0)
+        XCTAssertTrue((published[0].straightness ?? 0) < 1)
+
+        _ = observer.startLearningSession(label: "专项训练", host: "training.local", targetAction: "click")
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 10, y: 10), ts: 2_000)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 34, y: 18), ts: 2_070)
+        _ = observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 58, y: 30), ts: 2_130)
+        _ = observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 58, y: 30), ts: 2_200)
+        XCTAssertEqual(published.count, 1, "training samples should stay pending until committed")
+
+        let stop = observer.stopLearningSession(commit: true)
+        XCTAssertEqual(stop.committedSamples.count, 1)
+        XCTAssertEqual(published.count, 2)
+        XCTAssertEqual(published[1].source, "user-training")
+        XCTAssertEqual(published[1].host, "training.local")
+    }
 }

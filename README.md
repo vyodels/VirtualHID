@@ -2,7 +2,7 @@
 
 VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它负责把上层 Agent 给出的目标锚点、允许落点区域和动作序列，转换成真实的鼠标/键盘事件流，并通过观察、聚合和长期分析不断调整自己的执行参数。
 
-## 当前状态（2026-04-26）
+## 当前状态（2026-04-27）
 
 已完成：
 
@@ -18,6 +18,7 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 - `BrowserPageResolver` 已增加 Chrome / Chromium / Edge / Safari 的 page 级枚举与激活适配；真实 live activation smoke 仍需在有目标浏览器窗口的 GUI 会话里跑完。
 - `ViewportMapper` 已支持 `viewport/document -> screen` 几何换算，并能在 action 响应里返回执行 plan。
 - `ReplayTraceStore` 已支持回放级 compact trace 指纹、retention 与摘要。
+- `PassiveLearning` 已接入真实鼠标事件流，会在用户显式开启后自动提取压缩行为指纹，并可通过托盘进入专项训练模式。
 - `OutcomeVerifier` 已返回注入层、指针层、焦点层证据；页面语义成功仍由 Agent/browser 侧确认。
 - `scripts/humanization_analysis.py` 已能消费 `replayFingerprint / compactTrace`，从摘要级分析升级为 replay-aware 分析。
 - `docs/plan/active/2026-04-26-browser-targeting-learning-hud-completion-plan_cn.md` 已把真实浏览器激活、滚动后二次坐标、observer/semantic 证据、长期学习闭环、中文输入和 HUD 最终验收拆成后续收口任务。
@@ -55,11 +56,28 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 
-/tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-daemon
-/tmp/virtualhid-spm-build/x86_64-apple-macosx/debug/vhid-tray
+./scripts/start-tray.sh
 node mcp/server.mjs
 PORT=8123 python3 scripts/report_server.py
 python3 scripts/humanization_analysis.py --pretty
+```
+
+托盘是 VirtualHID 的正式本地入口。开发态可直接启动：
+
+```bash
+./scripts/start-tray.sh
+```
+
+如需让菜单栏托盘随登录自动出现：
+
+```bash
+./scripts/install-tray-launch-agent.sh
+```
+
+卸载登录启动：
+
+```bash
+./scripts/uninstall-tray-launch-agent.sh
 ```
 
 仅在 VirtualHID Web 实验台自测时，才使用实验台自动拉起带 HUD 控制能力的内部执行服务：
@@ -76,6 +94,12 @@ VIRTUALHID_HUD_CONTROL=1 VIRTUALHID_VISUALIZE_HID=1 PORT=8123 python3 scripts/re
 
 ```bash
 ./scripts/profile-learn-smoke.sh
+```
+
+如果只做被动学习 / 专项训练 API 冒烟，可运行：
+
+```bash
+./scripts/learning-smoke.sh
 ```
 
 如果只做 HUD / visualization 验收，可运行：
@@ -105,11 +129,11 @@ VIRTUALHID_HUD_CONTROL=1 VIRTUALHID_VISUALIZE_HID=1 PORT=8123 python3 scripts/re
 
 当前学习闭环已经打通：
 
-1. `PassiveObserver` 采集真实事件
-2. Agent / web demo 补齐 `host + sig + taskId + stage`
-3. `trace.commit` 写入 `ProfileStore`
-4. `profiles.rebuild` 生成学习模板
-5. `action` 时命中模板并应用到 move / click / drag / type / key
+1. `vhid-tray` 或 JSON-RPC `learning.configure` 显式开启学习；默认关闭。
+2. `PassiveObserver + PassiveLearning` 从真实鼠标事件流提取压缩行为指纹，包括路径骨架、分段节奏、停顿、点击按压时间、点击间隔、速度、直线度和转向抖动。
+3. 被动学习样本以 `__global__` 通用 host 聚合；专项训练可通过 `learning.session.start/stop` 指定训练名称、host 和动作类型。
+4. `ProfileStore` 写入 compact trace 并由 `profiles.rebuild` 生成学习模板。
+5. `action` 时按目标 host/sig/task/action 命中模板；没有站点级模板时可回退到全局鼠标习惯模板。模板只影响 VirtualHID 的轨迹、节奏、hold/inter-click 等参数，不改变上游目标选择。
 
 长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。分析器现在会优先使用 `replayFingerprint / compactTrace` 中的路径骨架、节奏片段和质量分，如果历史里没有这些字段，则自动降级为摘要级长期分析。
 
@@ -127,8 +151,8 @@ VIRTUALHID_HUD_CONTROL=1 VIRTUALHID_VISUALIZE_HID=1 PORT=8123 python3 scripts/re
 - `hid_action` 必须携带非空 `primitives`；缺失或空数组返回 `E_PRIMITIVES_REQUIRED`。VirtualHID 只返回 HID 执行计划、事件、实际落点和轨迹证据；下载链接、下载记录、本地 artifact 路径和业务完成判断属于 browser / recruit-agent。
 - Chrome 下载气泡、下载列表、菜单和 popover 等浏览器外壳 UI 不属于网页 DOM，也不能靠页面 JS 或 mock 页面处理。网页目标动作默认启用 `options.browserChromeOverlayPolicy = "auto"`：VirtualHID 会用 macOS AX 检测与目标浏览器窗口重叠的非标准外壳瞬态窗口，必要时先发送 Escape 清理遮挡，并在 `result.preflight.browserChromeOverlay` 返回证据；该预处理不进入业务 `events`、HUD 轨迹或 ReplayTraceStore 学习样本。需要显式处理时可设为 `"force"`，需要关闭时可设为 `"off"`。
 - `target / geometry` 是 action 顶层执行字段，不进入 `ActionContext`，不参与业务语义判断
-- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力，可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 在 daemon 启动时开启，开启后作用于该 daemon 处理的每一次 `hid_action`；常驻显示开启时，action 结束后 HUD 会保留最后一次目标窗口、状态和落点，清除延迟只清掉动态轨迹/特效；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
-- `vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动托盘即代表启动 VirtualHID 本地主程序，托盘会自动拉起带 `--hud-control --visualize-hid` 的 daemon。点击图标打开 HUD 配置面板，可切换 HUD、常驻显示、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本和清除延迟。托盘通过 daemon socket 调用 `hud.state / hud.configure`；这些开关只影响 VirtualHID 本地可视化，不进入 `hid_action` payload，也不改变执行/验证结果。
+- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力，可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 在 daemon 启动时开启，开启后作用于该 daemon 处理的每一次 `hid_action`；HUD 生命周期必须跟随当前 target window：目标窗口打开并开始 action 时自动显示，窗口移动/缩放时 HUD 外框和诊断跟随新 frame，目标窗口关闭或 target 不可解析时关闭/隐藏，不能停留在旧屏幕坐标；常驻显示开启时，action 结束后 HUD 会保留最后一次目标窗口、状态和落点，清除延迟只清掉动态轨迹/特效；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
+- `vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动托盘即代表启动 VirtualHID 本地主程序，托盘会自动拉起带 `--hud-control --visualize-hid` 的 daemon。点击图标打开配置面板，可切换 HUD、常驻显示、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本、清除延迟、鼠标习惯学习开关和专项训练。托盘通过 daemon socket 调用 `hud.state / hud.configure / learning.state / learning.configure / learning.session.*`；这些开关只影响 VirtualHID 本地可视化与通用行为学习，不进入 `hid_action` payload，也不改变上游业务决策。
 - `global` / `auto` 写入会先由 VirtualHID 激活目标应用，再校验 `targetApp.frontmost == true`
 - `pid` 模式只允许 `mouseMoved / scrollWheel`，不可用于 click / drag / type / pasteText / key
 - `hid_unlock` 不只是解除 kill switch，也必须释放/清空 VirtualHID 观测到的卡住修饰键和鼠标按钮状态，避免下一次动作继承脏输入状态

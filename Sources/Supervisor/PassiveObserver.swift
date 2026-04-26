@@ -43,12 +43,14 @@ public enum PassiveObserverError: Error, LocalizedError {
 public final class PassiveObserver {
     private let lock = NSLock()
     private let retentionMs: Int64
+    private let learningRecorder = PassiveLearningRecorder()
     private var counter: Int64 = 0
     private var buffer = [ObservedEvent]()
     private var enabled = false
     private var host: String?
     private var taskId: String?
     private let logger = Logger(subsystem: "com.vyodels.virtualhid", category: "observer")
+    public var learningSampleHandler: ((PassiveGestureSample) -> Void)?
 
     public init(retentionSeconds: TimeInterval = 30) {
         self.retentionMs = Int64(retentionSeconds * 1000)
@@ -64,6 +66,10 @@ public final class PassiveObserver {
 
     public var observingTaskId: String? {
         lock.withLock { taskId }
+    }
+
+    public var learningState: PassiveLearningState {
+        lock.withLock { learningRecorder.state }
     }
 
     public func enable(host: String, taskId: String?) throws {
@@ -86,6 +92,28 @@ public final class PassiveObserver {
         }
     }
 
+    public func configureLearning(enabled: Bool?, mode: PassiveLearningMode?) -> PassiveLearningState {
+        lock.withLock {
+            learningRecorder.configure(enabled: enabled, mode: mode)
+        }
+    }
+
+    public func startLearningSession(label: String?, host: String?, targetAction: String?) -> PassiveLearningState {
+        lock.withLock {
+            learningRecorder.startSession(label: label, host: host, targetAction: targetAction)
+        }
+    }
+
+    public func stopLearningSession(commit: Bool) -> PassiveLearningStopResult {
+        let result = lock.withLock {
+            learningRecorder.stopSession(commit: commit)
+        }
+        if commit {
+            publishLearningSamples(result.committedSamples)
+        }
+        return result
+    }
+
     public func feed(_ event: CGEvent, type: CGEventType, now: Date = Date()) {
         guard event.getIntegerValueField(.eventSourceUserData) != EventPoster.defaultMarkValue else {
             return
@@ -94,18 +122,20 @@ public final class PassiveObserver {
             return
         }
 
-        lock.withLock {
-            guard enabled else {
-                return
+        let samples = lock.withLock {
+            let samples = learningRecorder.record(event: observed, host: host, taskId: taskId)
+            if enabled {
+                buffer.append(observed)
+                trimLocked(nowMs: observed.ts)
             }
-            buffer.append(observed)
-            trimLocked(nowMs: observed.ts)
+            return samples
         }
+        publishLearningSamples(samples)
     }
 
     public func appendSynthetic(type: String, point: ObservedPoint? = nil, keyCode: CGKeyCode? = nil, ts: Int64? = nil) -> ObservedEvent {
         let nowMs = ts ?? currentTimeMs()
-        return lock.withLock {
+        let result = lock.withLock {
             counter += 1
             let event = ObservedEvent(
                 id: "evt-\(nowMs)-\(counter)",
@@ -116,8 +146,11 @@ public final class PassiveObserver {
             )
             buffer.append(event)
             trimLocked(nowMs: nowMs)
-            return event
+            let samples = learningRecorder.record(event: event, host: host, taskId: taskId)
+            return (event: event, samples: samples)
         }
+        publishLearningSamples(result.samples)
+        return result.event
     }
 
     public func tail(sinceEventId: String? = nil, limit: Int = 50) -> [ObservedEvent] {
@@ -214,6 +247,15 @@ public final class PassiveObserver {
 
     private func currentTimeMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func publishLearningSamples(_ samples: [PassiveGestureSample]) {
+        guard !samples.isEmpty else {
+            return
+        }
+        for sample in samples {
+            learningSampleHandler?(sample)
+        }
     }
 }
 

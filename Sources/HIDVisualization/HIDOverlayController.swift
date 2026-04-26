@@ -57,6 +57,12 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     private var overlayWindow: NSPanel?
     private var overlayView: HIDOverlayView?
     private var overlayFrame: NSRect?
+    private var trackedTarget: HIDTrackedTarget?
+    private var trackingTimer: Timer?
+    private var axObserver: AXObserver?
+    private var observedAXWindow: AXUIElement?
+    private var observedAXTargetKey: String?
+    private var workspaceTerminationObserver: NSObjectProtocol?
     private var clearToken = 0
 
     public init(settings: HIDOverlaySettings = HIDOverlaySettings(), enabled: Bool = true, lockedOff: Bool = false) {
@@ -67,6 +73,14 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
 
     public convenience init(clearDelaySeconds: TimeInterval) {
         self.init(settings: HIDOverlaySettings(clearDelaySeconds: clearDelaySeconds))
+    }
+
+    deinit {
+        trackingTimer?.invalidate()
+        uninstallAXObserver()
+        if let workspaceTerminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceTerminationObserver)
+        }
     }
 
     public var currentSettings: HIDOverlaySettings {
@@ -83,8 +97,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         }
         DispatchQueue.main.async { [weak self] in
             if !enabled {
-                self?.overlayView?.clearAll()
-                self?.overlayWindow?.orderOut(nil)
+                self?.closeOverlay()
             }
         }
     }
@@ -197,6 +210,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     }
 
     private func ensureOverlay(for context: HIDActionVisualContext) {
+        updateTrackedTarget(context)
         let frame = overlayPanelFrame(for: context)
         if let overlayWindow {
             if overlayFrame != frame {
@@ -226,6 +240,163 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         overlayWindow = panel
         overlayView = view
         overlayFrame = frame
+    }
+
+    private func updateTrackedTarget(_ context: HIDActionVisualContext) {
+        let target = HIDTrackedTarget(
+            pid: pid_t(context.pid),
+            title: context.windowTitle,
+            frame: cgRect(from: context.windowFrame),
+            context: context
+        )
+        trackedTarget = target
+        installWorkspaceTerminationObserverIfNeeded()
+        installAXObserverIfAvailable(for: target)
+        startTrackingTimerIfNeeded()
+    }
+
+    private func installWorkspaceTerminationObserverIfNeeded() {
+        guard workspaceTerminationObserver == nil else {
+            return
+        }
+        workspaceTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard
+                let self,
+                let trackedTarget,
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                app.processIdentifier == trackedTarget.pid
+            else {
+                return
+            }
+            self.closeOverlay()
+        }
+    }
+
+    private func startTrackingTimerIfNeeded() {
+        guard trackingTimer == nil else {
+            return
+        }
+        let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
+            self?.refreshTrackedTarget()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trackingTimer = timer
+    }
+
+    private func refreshTrackedTarget() {
+        guard let trackedTarget else {
+            stopTrackingTimer()
+            return
+        }
+        guard let app = NSRunningApplication(processIdentifier: trackedTarget.pid), !app.isTerminated else {
+            closeOverlay()
+            return
+        }
+        let windows = currentWindowSnapshots(for: trackedTarget.pid)
+        guard let window = bestTrackedWindowMatch(target: trackedTarget, windows: windows) else {
+            closeOverlay()
+            return
+        }
+        applyTrackedWindowSnapshot(window, previousTarget: trackedTarget)
+    }
+
+    fileprivate func handleAXWindowNotification(_ notification: String, element: AXUIElement) {
+        guard let trackedTarget else {
+            uninstallAXObserver()
+            return
+        }
+        if notification == kAXUIElementDestroyedNotification as String {
+            closeOverlay()
+            return
+        }
+        guard let frame = copyAXFrame(of: element), frame.width > 80, frame.height > 80 else {
+            closeOverlay()
+            return
+        }
+        let title = copyAXStringAttribute(of: element, name: kAXTitleAttribute)
+        applyTrackedWindowSnapshot(
+            HIDWindowSnapshot(pid: trackedTarget.pid, title: title, frame: frame),
+            previousTarget: trackedTarget
+        )
+    }
+
+    private func applyTrackedWindowSnapshot(_ window: HIDWindowSnapshot, previousTarget: HIDTrackedTarget) {
+        guard !approximatelyEqual(window.frame, previousTarget.frame) else {
+            return
+        }
+        let nextContext = replacingWindowFrame(in: previousTarget.context, with: codableRect(from: window.frame))
+        trackedTarget = HIDTrackedTarget(
+            pid: previousTarget.pid,
+            title: window.title ?? previousTarget.title,
+            frame: window.frame,
+            context: nextContext
+        )
+        let nextPanelFrame = overlayPanelFrame(for: nextContext)
+        if let overlayWindow, overlayFrame != nextPanelFrame {
+            overlayWindow.setFrame(nextPanelFrame, display: true)
+            overlayView?.resize(frame: NSRect(origin: .zero, size: nextPanelFrame.size), screenFrame: nextPanelFrame)
+            overlayFrame = nextPanelFrame
+        }
+        overlayView?.updateWindowFrame(nextContext.windowFrame)
+    }
+
+    private func closeOverlay() {
+        clearToken += 1
+        trackedTarget = nil
+        stopTrackingTimer()
+        uninstallAXObserver()
+        overlayView?.clearAll()
+        overlayWindow?.orderOut(nil)
+    }
+
+    private func stopTrackingTimer() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+    }
+
+    private func installAXObserverIfAvailable(for target: HIDTrackedTarget) {
+        let targetKey = observerKey(for: target)
+        if axObserver != nil, observedAXTargetKey == targetKey {
+            return
+        }
+        uninstallAXObserver()
+        guard let window = bestTrackedAXWindowMatch(target: target, windows: currentAXWindowSnapshots(for: target.pid)) else {
+            return
+        }
+
+        var createdObserver: AXObserver?
+        guard AXObserverCreate(target.pid, hidOverlayAXObserverCallback, &createdObserver) == .success, let createdObserver else {
+            return
+        }
+        let observerContext = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        var installedAnyNotification = false
+        for notification in trackedAXWindowNotifications {
+            let status = AXObserverAddNotification(createdObserver, window.element, notification as CFString, observerContext)
+            installedAnyNotification = installedAnyNotification || status == .success
+        }
+        guard installedAnyNotification else {
+            return
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(createdObserver), .commonModes)
+        axObserver = createdObserver
+        observedAXWindow = window.element
+        observedAXTargetKey = targetKey
+    }
+
+    private func uninstallAXObserver() {
+        if let axObserver, let observedAXWindow {
+            for notification in trackedAXWindowNotifications {
+                AXObserverRemoveNotification(axObserver, observedAXWindow, notification as CFString)
+            }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(axObserver), .commonModes)
+        }
+        axObserver = nil
+        observedAXWindow = nil
+        observedAXTargetKey = nil
     }
 
     private func scheduleClear() {
@@ -273,6 +444,259 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             height: rect.height
         )
     }
+
+    private func cgRect(from rect: CodableRect) -> CGRect {
+        CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)
+    }
+}
+
+struct HIDTrackedTarget {
+    let pid: pid_t
+    let title: String?
+    let frame: CGRect
+    let context: HIDActionVisualContext
+}
+
+struct HIDWindowSnapshot: Equatable {
+    let pid: pid_t
+    let title: String?
+    let frame: CGRect
+}
+
+func currentWindowSnapshots(for pid: pid_t) -> [HIDWindowSnapshot] {
+    guard
+        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+    else {
+        return []
+    }
+
+    return windowList.compactMap { window in
+        guard
+            let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t,
+            ownerPid == pid,
+            let layer = window[kCGWindowLayer as String] as? Int,
+            layer == 0,
+            let boundsValue = window[kCGWindowBounds as String] as? [String: Any],
+            let frame = CGRect(dictionaryRepresentation: boundsValue as CFDictionary),
+            frame.width > 80,
+            frame.height > 80
+        else {
+            return nil
+        }
+        return HIDWindowSnapshot(
+            pid: ownerPid,
+            title: window[kCGWindowName as String] as? String,
+            frame: frame
+        )
+    }
+}
+
+func bestTrackedWindowMatch(target: HIDTrackedTarget, windows: [HIDWindowSnapshot]) -> HIDWindowSnapshot? {
+    let candidates = windows.filter { $0.pid == target.pid }
+    guard !candidates.isEmpty else {
+        return nil
+    }
+
+    let normalizedTitle = target.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let normalizedTitle, !normalizedTitle.isEmpty {
+        let titleMatches = candidates.filter { candidate in
+            guard let candidateTitle = candidate.title?.trimmingCharacters(in: .whitespacesAndNewlines), !candidateTitle.isEmpty else {
+                return false
+            }
+            return candidateTitle == normalizedTitle
+                || candidateTitle.contains(normalizedTitle)
+                || normalizedTitle.contains(candidateTitle)
+        }
+        if let best = nearestWindow(to: target.frame, in: titleMatches) {
+            return best
+        }
+    }
+
+    guard let nearest = nearestWindow(to: target.frame, in: candidates) else {
+        return nil
+    }
+    if normalizedTitle?.isEmpty == false {
+        return windowLooksLikeMovedTarget(previous: target.frame, current: nearest.frame) ? nearest : nil
+    }
+    return nearest
+}
+
+private func nearestWindow(to frame: CGRect, in windows: [HIDWindowSnapshot]) -> HIDWindowSnapshot? {
+    windows.min { left, right in
+        windowDistance(from: frame, to: left.frame) < windowDistance(from: frame, to: right.frame)
+    }
+}
+
+private func windowDistance(from left: CGRect, to right: CGRect) -> CGFloat {
+    let centerDistance = hypot(left.midX - right.midX, left.midY - right.midY)
+    let sizeDistance = abs(left.width - right.width) + abs(left.height - right.height)
+    return centerDistance + sizeDistance * 0.5
+}
+
+private func windowLooksLikeMovedTarget(previous: CGRect, current: CGRect) -> Bool {
+    if previous.intersects(current) {
+        let overlap = previous.intersection(current)
+        let smallerArea = min(previous.width * previous.height, current.width * current.height)
+        if smallerArea > 0, (overlap.width * overlap.height) / smallerArea >= 0.45 {
+            return true
+        }
+    }
+    let centerDistance = hypot(previous.midX - current.midX, previous.midY - current.midY)
+    if centerDistance <= 180 {
+        return true
+    }
+    let sizeDelta = abs(previous.width - current.width) + abs(previous.height - current.height)
+    return centerDistance <= 260 && sizeDelta <= 120
+}
+
+private func approximatelyEqual(_ left: CGRect, _ right: CGRect) -> Bool {
+    abs(left.origin.x - right.origin.x) < 1
+        && abs(left.origin.y - right.origin.y) < 1
+        && abs(left.width - right.width) < 1
+        && abs(left.height - right.height) < 1
+}
+
+private func replacingWindowFrame(in context: HIDActionVisualContext, with frame: CodableRect) -> HIDActionVisualContext {
+    HIDActionVisualContext(
+        actionId: context.actionId,
+        source: context.source,
+        bundleIdentifier: context.bundleIdentifier,
+        pid: context.pid,
+        windowTitle: context.windowTitle,
+        windowFrame: frame,
+        dryRun: context.dryRun,
+        postMode: context.postMode,
+        actionTypes: context.actionTypes
+    )
+}
+
+private func codableRect(from frame: CGRect) -> CodableRect {
+    CodableRect(
+        x: frame.origin.x,
+        y: frame.origin.y,
+        width: frame.width,
+        height: frame.height
+    )
+}
+
+private let trackedAXWindowNotifications = [
+    kAXMovedNotification as String,
+    kAXResizedNotification as String,
+    kAXUIElementDestroyedNotification as String,
+    kAXWindowMiniaturizedNotification as String
+]
+
+private let hidOverlayAXObserverCallback: AXObserverCallback = { _, element, notification, refcon in
+    guard let refcon else {
+        return
+    }
+    let controller = Unmanaged<HIDOverlayController>.fromOpaque(refcon).takeUnretainedValue()
+    DispatchQueue.main.async {
+        controller.handleAXWindowNotification(notification as String, element: element)
+    }
+}
+
+private struct HIDAXWindowSnapshot {
+    let element: AXUIElement
+    let snapshot: HIDWindowSnapshot
+}
+
+private func observerKey(for target: HIDTrackedTarget) -> String {
+    [
+        String(target.pid),
+        target.title ?? "",
+        String(Int(target.frame.width.rounded())),
+        String(Int(target.frame.height.rounded()))
+    ].joined(separator: "|")
+}
+
+private func currentAXWindowSnapshots(for pid: pid_t) -> [HIDAXWindowSnapshot] {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.2)
+    guard let windows = copyAXAttribute(of: app, name: kAXWindowsAttribute) as? [AXUIElement] else {
+        return []
+    }
+    return windows.compactMap { window in
+        AXUIElementSetMessagingTimeout(window, 0.2)
+        guard
+            let frame = copyAXFrame(of: window),
+            frame.width > 80,
+            frame.height > 80,
+            copyAXBoolAttribute(of: window, name: kAXMinimizedAttribute) != true
+        else {
+            return nil
+        }
+        return HIDAXWindowSnapshot(
+            element: window,
+            snapshot: HIDWindowSnapshot(
+                pid: pid,
+                title: copyAXStringAttribute(of: window, name: kAXTitleAttribute),
+                frame: frame
+            )
+        )
+    }
+}
+
+private func bestTrackedAXWindowMatch(target: HIDTrackedTarget, windows: [HIDAXWindowSnapshot]) -> HIDAXWindowSnapshot? {
+    guard let best = bestTrackedWindowMatch(target: target, windows: windows.map(\.snapshot)) else {
+        return nil
+    }
+    return windows.first { window in
+        window.snapshot.pid == best.pid
+            && window.snapshot.title == best.title
+            && approximatelyEqual(window.snapshot.frame, best.frame)
+    }
+}
+
+private func copyAXAttribute(of element: AXUIElement, name: String) -> Any? {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    guard status == .success else {
+        return nil
+    }
+    return value
+}
+
+private func copyAXStringAttribute(of element: AXUIElement, name: String) -> String? {
+    copyAXAttribute(of: element, name: name) as? String
+}
+
+private func copyAXBoolAttribute(of element: AXUIElement, name: String) -> Bool? {
+    if let value = copyAXAttribute(of: element, name: name) as? Bool {
+        return value
+    }
+    if let value = copyAXAttribute(of: element, name: name) as? NSNumber {
+        return value.boolValue
+    }
+    return nil
+}
+
+private func copyAXValueAttribute(of element: AXUIElement, name: String) -> AXValue? {
+    guard let value = copyAXAttribute(of: element, name: name) as CFTypeRef? else {
+        return nil
+    }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else {
+        return nil
+    }
+    return (value as! AXValue)
+}
+
+private func copyAXFrame(of element: AXUIElement) -> CGRect? {
+    guard
+        let positionValue = copyAXValueAttribute(of: element, name: kAXPositionAttribute),
+        let sizeValue = copyAXValueAttribute(of: element, name: kAXSizeAttribute)
+    else {
+        return nil
+    }
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    guard
+        AXValueGetValue(positionValue, .cgPoint, &position),
+        AXValueGetValue(sizeValue, .cgSize, &size)
+    else {
+        return nil
+    }
+    return CGRect(origin: position, size: size)
 }
 
 private func settingsObject(_ settings: HIDOverlaySettings) -> [String: Any] {
@@ -448,6 +872,29 @@ private final class HIDOverlayView: NSView {
         self.settings = settings
         if !settings.persistent, let frameData, frameData.events.isEmpty {
             self.frameData = nil
+        }
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    func updateWindowFrame(_ windowFrame: CodableRect) {
+        if let frameData {
+            self.frameData = HIDOverlayFrame(
+                context: replacingWindowFrame(in: frameData.context, with: windowFrame),
+                events: frameData.events,
+                expected: frameData.expected,
+                actual: frameData.actual,
+                errorCode: frameData.errorCode
+            )
+        }
+        if let lastPersistentFrame {
+            self.lastPersistentFrame = HIDOverlayFrame(
+                context: replacingWindowFrame(in: lastPersistentFrame.context, with: windowFrame),
+                events: lastPersistentFrame.events,
+                expected: lastPersistentFrame.expected,
+                actual: lastPersistentFrame.actual,
+                errorCode: lastPersistentFrame.errorCode
+            )
         }
         needsDisplay = true
         displayIfNeeded()

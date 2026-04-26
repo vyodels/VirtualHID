@@ -57,6 +57,7 @@ public final class ControlService {
     private var currentExecutor: ActionExecutor?
     private var lastAction: [String: Any]?
     private var lastPostUsed: String?
+    private var persistedLearningSamples = 0
 
     public init(
         configuration: ControlServerConfiguration,
@@ -75,6 +76,9 @@ public final class ControlService {
         self.isoFormatter = formatter
         self.supervisor.killSwitch.onTrigger = { [weak self] in
             self?.cancelCurrentAction()
+        }
+        self.supervisor.observer.learningSampleHandler = { [weak self] sample in
+            self?.persistPassiveLearningSample(sample)
         }
     }
 
@@ -141,6 +145,13 @@ public final class ControlService {
             "profiles": [
                 "totalTemplates": totalTemplates,
                 "lastLearnedAt": lastLearnedAt as Any? ?? NSNull()
+            ],
+            "learning": [
+                "settings": (try? encodableObject(supervisor.observer.learningState.settings)) ?? NSNull(),
+                "activeSession": (try? encodableObject(supervisor.observer.learningState.activeSession)) ?? NSNull(),
+                "producedSamples": supervisor.observer.learningState.producedSamples,
+                "pendingTrainingSamples": supervisor.observer.learningState.pendingTrainingSamples,
+                "persistedSamples": lock.withLock { persistedLearningSamples }
             ]
         ]
     }
@@ -184,6 +195,14 @@ public final class ControlService {
             return handleTraceTail(params)
         case "trace.commit":
             return try handleTraceCommit(params)
+        case "learning.state":
+            return try handleLearningState()
+        case "learning.configure":
+            return try handleLearningConfigure(params)
+        case "learning.session.start":
+            return try handleLearningSessionStart(params)
+        case "learning.session.stop":
+            return try handleLearningSessionStop(params)
         case "hud.state":
             return handleHUDState()
         case "hud.configure":
@@ -493,10 +512,95 @@ public final class ControlService {
         ]
     }
 
+    private func handleLearningState() throws -> [String: Any] {
+        var state = try encodableObject(supervisor.observer.learningState) as? [String: Any] ?? [:]
+        state["persistedSamples"] = lock.withLock { persistedLearningSamples }
+        state["totalTemplates"] = (try? profileStore.totalTemplates()) ?? 0
+        state["lastLearnedAt"] = (try? profileStore.lastLearnedAtMs()).flatMap { $0.map(isoString(ms:)) } ?? NSNull()
+        return state
+    }
+
+    private func handleLearningConfigure(_ params: [String: Any]) throws -> [String: Any] {
+        let mode = parsePassiveLearningMode(params["mode"])
+        let state = supervisor.observer.configureLearning(
+            enabled: params["enabled"] as? Bool,
+            mode: mode
+        )
+        var object = try encodableObject(state) as? [String: Any] ?? [:]
+        object["persistedSamples"] = lock.withLock { persistedLearningSamples }
+        return object
+    }
+
+    private func handleLearningSessionStart(_ params: [String: Any]) throws -> [String: Any] {
+        let state = supervisor.observer.startLearningSession(
+            label: nonEmptyString(params["label"]),
+            host: nonEmptyString(params["host"]),
+            targetAction: nonEmptyString(params["targetAction"] ?? params["target_action"])
+        )
+        return try encodableObject(state) as? [String: Any] ?? [:]
+    }
+
+    private func handleLearningSessionStop(_ params: [String: Any]) throws -> [String: Any] {
+        let commit = params["commit"] as? Bool ?? true
+        let result = supervisor.observer.stopLearningSession(commit: commit)
+        if commit, !result.committedSamples.isEmpty {
+            _ = try? profileStore.rebuild(host: result.committedSamples.last?.host)
+        }
+        var object = try encodableObject(result) as? [String: Any] ?? [:]
+        object["persistedSamples"] = lock.withLock { persistedLearningSamples }
+        object["generatedTemplates"] = (try? profileStore.totalTemplates()) ?? 0
+        return object
+    }
+
     private func cancelCurrentAction() {
         lock.withLock {
             currentExecutor?.cancel()
         }
+    }
+
+    private func persistPassiveLearningSample(_ sample: PassiveGestureSample) {
+        do {
+            _ = try profileStore.insertTrace(Self.traceInput(from: sample))
+            let shouldRebuild = lock.withLock { () -> Bool in
+                persistedLearningSamples += 1
+                return persistedLearningSamples.isMultiple(of: 5)
+            }
+            if shouldRebuild {
+                _ = try? profileStore.rebuild(host: sample.host)
+            }
+        } catch {
+            // Learning is opportunistic and must never break HID execution.
+        }
+    }
+
+    private static func traceInput(from sample: PassiveGestureSample) -> TraceInput {
+        TraceInput(
+            ts: sample.ts,
+            source: sample.source,
+            host: sample.host,
+            elementSig: nil,
+            taskId: sample.taskId,
+            stage: sample.stage,
+            actionType: sample.actionType,
+            payload: TracePayload(
+                eventId: sample.id,
+                type: sample.eventType,
+                point: sample.point.map { TracePoint(x: $0.x, y: $0.y) },
+                keyCode: nil,
+                points: sample.pathSkeleton.map { TracePoint(x: $0.x, y: $0.y) },
+                origin: sample.pathSkeleton.first.map { TracePoint(x: $0.x, y: $0.y) },
+                targetPoint: sample.pathSkeleton.last.map { TracePoint(x: $0.x, y: $0.y) },
+                durationMs: sample.durationMs,
+                segmentMs: sample.segmentMs,
+                hesitationMs: sample.hesitationMs,
+                clickHoldMs: sample.clickHoldMs,
+                interClickMs: sample.interClickMs,
+                straightness: sample.straightness,
+                turnJitter: sample.turnJitter,
+                pathLengthPx: sample.pathLengthPx,
+                speedPxS: sample.speedPxS
+            )
+        )
     }
 
     private func resolveTarget(descriptor: TargetDescriptor?) throws -> BrowserTarget {
@@ -1428,6 +1532,14 @@ private func nonEmptyString(_ value: Any?) -> String? {
     }
     let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+}
+
+private func parsePassiveLearningMode(_ value: Any?) -> PassiveLearningMode? {
+    guard let raw = nonEmptyString(value) else {
+        return nil
+    }
+    return PassiveLearningMode(rawValue: raw.lowercased().replacingOccurrences(of: "_", with: "-"))
+        ?? PassiveLearningMode(rawValue: raw.lowercased())
 }
 
 private func copyAXElementArrayAttribute(of element: AXUIElement, name: String) -> [AXUIElement]? {

@@ -314,6 +314,8 @@ public actor Aggregator {
 }
 
 public final class ProfileStore {
+    public static let globalLearningHost = "__global__"
+
     private let lock = NSLock()
     private var db: OpaquePointer?
     private let encoder = JSONEncoder()
@@ -622,12 +624,13 @@ public final class ProfileStore {
     public func lookupTemplate(host: String, sig: String, taskId: String?, actionType: String) throws -> ProfileTemplate {
         try lock.withLock {
             let candidates = [
-                (sig, taskId ?? ""),
-                (sig, ""),
-                ("", "")
+                (host, sig, taskId ?? ""),
+                (host, sig, ""),
+                (host, "", ""),
+                (Self.globalLearningHost, "", "")
             ]
 
-            for (candidateSig, candidateTaskId) in candidates {
+            for (candidateHost, candidateSig, candidateTaskId) in candidates {
                 let sql = """
                 SELECT host, element_sig, task_id, action_type, sample_size, confidence, params, updated_at
                 FROM templates
@@ -637,7 +640,7 @@ public final class ProfileStore {
                 """
                 let statement = try prepare(sql)
                 defer { sqlite3_finalize(statement) }
-                bindText(host, to: statement, at: 1)
+                bindText(candidateHost, to: statement, at: 1)
                 bindText(candidateSig, to: statement, at: 2)
                 bindText(candidateTaskId, to: statement, at: 3)
                 bindText(actionType, to: statement, at: 4)

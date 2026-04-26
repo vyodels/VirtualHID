@@ -290,6 +290,7 @@ public final class ActionExecutor {
     private var busy = false
     private var cancelled = false
     private var activeVisualContext: HIDActionVisualContext?
+    private var activeDryRunTimestamp: Date?
 
     public init(
         target: BrowserTarget,
@@ -338,9 +339,11 @@ public final class ActionExecutor {
         var rng = SystemRandomNumberGenerator()
         var events = [InjectedEvent]()
         activeVisualContext = visualContext
+        activeDryRunTimestamp = dryRun ? startedAt : nil
         eventSink?.hidActionDidStart(visualContext)
         defer {
             activeVisualContext = nil
+            activeDryRunTimestamp = nil
         }
 
         if requestedMode == .global, !dryRun {
@@ -438,8 +441,9 @@ public final class ActionExecutor {
             let clickCount = max(count, 1)
             for index in 0..<clickCount {
                 try deadline.assertNotExpired()
+                let perClickHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
                 emitted.append(try postMouse(type: button.downEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
-                try sleep(milliseconds: resolvedHoldMs, dryRun: dryRun, deadline: deadline)
+                try sleep(milliseconds: perClickHoldMs, dryRun: dryRun, deadline: deadline)
                 emitted.append(try postMouse(type: button.upEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
                 if index < clickCount - 1 {
                     try sleep(milliseconds: interClickMs, dryRun: dryRun, deadline: deadline)
@@ -514,19 +518,12 @@ public final class ActionExecutor {
                     try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
                 }
 
-                if keyEvent.modifiers.contains(.shift) {
-                    emitted.append(try postKey(keyCode: 56, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-                }
-
                 let keyCode = CGKeyCode(keyEvent.keyCode)
                 let recordedKey = String(keyEvent.char)
-                emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
+                let flags: CGEventFlags = keyEvent.modifiers.contains(.shift) ? [.maskShift] : []
+                emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun, flags: flags))
                 try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline)
-                emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
-
-                if keyEvent.modifiers.contains(.shift) {
-                    emitted.append(try postKey(keyCode: 56, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
-                }
+                emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun, flags: flags))
             }
             return emitted
 
@@ -561,10 +558,10 @@ public final class ActionExecutor {
             pasteboard.setString(text, forType: .string)
         }
 
-        emitted.append(try postKey(keyCode: 55, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-        emitted.append(try postKey(keyCode: 9, keyDown: true, recordedKey: "v", poster: poster, dryRun: dryRun))
+        emitted.append(try postKey(keyCode: 55, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun, flags: [.maskCommand]))
+        emitted.append(try postKey(keyCode: 9, keyDown: true, recordedKey: "v", poster: poster, dryRun: dryRun, flags: [.maskCommand]))
         try sleep(milliseconds: 36, dryRun: dryRun, deadline: deadline)
-        emitted.append(try postKey(keyCode: 9, keyDown: false, recordedKey: "v", poster: poster, dryRun: dryRun))
+        emitted.append(try postKey(keyCode: 9, keyDown: false, recordedKey: "v", poster: poster, dryRun: dryRun, flags: [.maskCommand]))
         emitted.append(try postKey(keyCode: 55, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
 
         if !dryRun, restoreClipboard {
@@ -590,13 +587,21 @@ public final class ActionExecutor {
         return record(type: eventName(for: type), location: location)
     }
 
-    private func postKey(keyCode: CGKeyCode, keyDown: Bool, recordedKey: String?, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
+    private func postKey(
+        keyCode: CGKeyCode,
+        keyDown: Bool,
+        recordedKey: String?,
+        poster: EventPoster,
+        dryRun: Bool,
+        flags: CGEventFlags = []
+    ) throws -> InjectedEvent {
         if dryRun {
             return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
         }
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else {
             throw ActionExecutionError.eventCreationFailed("keyCode=\(keyCode)")
         }
+        event.flags = flags
         try ensureFrontmostForPost(type: keyDown ? .keyDown : .keyUp, poster: poster, dryRun: dryRun)
         _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
         return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
@@ -677,6 +682,7 @@ public final class ActionExecutor {
         }
         if dryRun {
             try deadline.assertNotExpired()
+            activeDryRunTimestamp = (activeDryRunTimestamp ?? Date()).addingTimeInterval(TimeInterval(milliseconds) / 1000.0)
             return
         }
         try deadline.assertCanSpend(milliseconds: milliseconds)
@@ -696,7 +702,7 @@ public final class ActionExecutor {
             location: location.map { CodablePoint(x: $0.x, y: $0.y) },
             key: key,
             virtualKey: virtualKey,
-            timestamp: isoFormatter.string(from: Date())
+            timestamp: isoFormatter.string(from: activeDryRunTimestamp ?? Date())
         )
         if let context = activeVisualContext {
             eventSink?.hidActionDidRecord(event, context: context)

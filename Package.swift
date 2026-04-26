@@ -88,6 +88,11 @@ let package = Package(
             path: "Tests/ProfileStoreTests"
         ),
         .testTarget(
+            name: "HIDVisualizationTests",
+            dependencies: ["HIDVisualization", "InjectorCore"],
+            path: "Tests/HIDVisualizationTests"
+        ),
+        .testTarget(
             name: "ControlServerTests",
             dependencies: ["ControlServer", "ProfileStore", "Supervisor"],
             path: "Tests/ControlServerTests"

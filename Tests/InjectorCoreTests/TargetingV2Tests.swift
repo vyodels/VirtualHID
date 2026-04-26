@@ -65,6 +65,104 @@ final class TargetingV2Tests: XCTestCase {
         XCTAssertEqual(recorder.scripts.count, 2)
     }
 
+    func testBrowserResolverUsesResolvedPageTitleForMacOSWindowLookup() {
+        let page = BrowserPageTarget(
+            bundleId: "com.google.Chrome",
+            windowId: 42,
+            windowTitle: "候选人详情 · 李青 · Recruiting Workspace",
+            tabId: 1136765606,
+            tabIndex: 3,
+            tabTitle: "候选人详情 · 李青 · Recruiting Workspace",
+            url: "http://127.0.0.1:56654/candidate-detail.html?id=cand-li-001",
+            host: "127.0.0.1:56654",
+            active: true
+        )
+
+        let descriptor = BrowserResolver.macOSWindowDescriptor(
+            for: TargetDescriptor(bundleId: "com.google.Chrome", tabId: 1136765606, host: "127.0.0.1:56654"),
+            pageTarget: page
+        )
+
+        XCTAssertEqual(descriptor?.bundleId, "com.google.Chrome")
+        XCTAssertEqual(descriptor?.windowTitle, "候选人详情 · 李青 · Recruiting Workspace")
+        XCTAssertEqual(descriptor?.tabId, 1136765606)
+        XCTAssertEqual(descriptor?.host, "127.0.0.1:56654")
+    }
+
+    func testBrowserResolverKeepsExplicitWindowTitleOverResolvedPageTitle() {
+        let page = BrowserPageTarget(
+            bundleId: "com.google.Chrome",
+            windowId: 42,
+            windowTitle: "Jobs",
+            tabId: 7,
+            tabIndex: 1,
+            tabTitle: "Jobs",
+            url: "https://example.com/jobs",
+            host: "example.com",
+            active: true
+        )
+
+        let descriptor = BrowserResolver.macOSWindowDescriptor(
+            for: TargetDescriptor(bundleId: "com.google.Chrome", windowTitle: "Pinned Browser", tabId: 7, host: "example.com"),
+            pageTarget: page
+        )
+
+        XCTAssertEqual(descriptor?.windowTitle, "Pinned Browser")
+    }
+
+    func testBrowserResolverRejectsUnresolvedPageTargetAcrossDuplicateBrowserProcesses() {
+        let descriptor = TargetDescriptor(bundleId: "com.google.Chrome", tabId: 1136765612, host: "127.0.0.1:58944")
+
+        XCTAssertTrue(
+            BrowserResolver.shouldRejectUnresolvedPageTarget(
+                descriptor: descriptor,
+                pageTarget: nil,
+                appCount: 2
+            )
+        )
+    }
+
+    func testBrowserResolverRejectsHostOnlyUnresolvedPageTargetAcrossDuplicateBrowserProcesses() {
+        let descriptor = TargetDescriptor(bundleId: "com.google.Chrome", host: "127.0.0.1:58944")
+
+        XCTAssertTrue(
+            BrowserResolver.shouldRejectUnresolvedPageTarget(
+                descriptor: descriptor,
+                pageTarget: nil,
+                appCount: 2
+            )
+        )
+    }
+
+    func testBrowserResolverAllowsUnresolvedPageTargetWhenTitleCanBindNativeWindow() {
+        let descriptor = TargetDescriptor(
+            bundleId: "com.google.Chrome",
+            windowTitle: "候选人详情 · 李青 · Recruiting Workspace",
+            tabId: 1136765612,
+            host: "127.0.0.1:58944"
+        )
+
+        XCTAssertFalse(
+            BrowserResolver.shouldRejectUnresolvedPageTarget(
+                descriptor: descriptor,
+                pageTarget: nil,
+                appCount: 2
+            )
+        )
+    }
+
+    func testBrowserResolverAllowsSingleBrowserProcessFallback() {
+        let descriptor = TargetDescriptor(bundleId: "com.google.Chrome", tabId: 1136765612, host: "127.0.0.1:58944")
+
+        XCTAssertFalse(
+            BrowserResolver.shouldRejectUnresolvedPageTarget(
+                descriptor: descriptor,
+                pageTarget: nil,
+                appCount: 1
+            )
+        )
+    }
+
     func testBrowserPageResolverRejectsAmbiguousHostOnlyMatch() throws {
         let recorder = ScriptRecorder()
         let output = [

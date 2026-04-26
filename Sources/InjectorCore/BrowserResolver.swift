@@ -84,6 +84,7 @@ public enum BrowserResolverError: Error, LocalizedError {
     case appNotFound(String)
     case permissionDenied
     case windowNotFound(String)
+    case unresolvedBrowserPageTarget(String)
 
     public var errorDescription: String? {
         switch self {
@@ -93,6 +94,8 @@ public enum BrowserResolverError: Error, LocalizedError {
             return "缺少 Accessibility 权限，无法读取目标窗口信息"
         case .windowNotFound(let bundleId):
             return "未找到可见窗口：\(bundleId)"
+        case .unresolvedBrowserPageTarget(let reason):
+            return reason
         }
     }
 }
@@ -125,6 +128,7 @@ public enum BrowserResolver {
         )
         let pageTarget = pageResolution?.page
         let targetBundleIdentifiers = pageTarget.map { [$0.bundleId] } ?? requestedBundleIdentifiers
+        let windowDescriptor = macOSWindowDescriptor(for: descriptor, pageTarget: pageTarget)
         let useFocusedBrowserWindow = requiresFocusedBrowserWindow(descriptor)
         for bundleIdentifier in targetBundleIdentifiers {
             let apps = runningApplications(bundleIdentifier: bundleIdentifier, waitForRegistration: pageTarget != nil)
@@ -141,6 +145,12 @@ public enum BrowserResolver {
                 continue
             }
             sawRunningApp = true
+            if shouldRejectUnresolvedPageTarget(descriptor: descriptor, pageTarget: pageTarget, appCount: apps.count) {
+                throw BrowserResolverError.unresolvedBrowserPageTarget(
+                    "无法把 browser target 解析到具体 Chrome 页面，拒绝回退到 frontmost 窗口以避免错窗输入。"
+                    + " 当前存在多个同 bundle 浏览器进程；请复用 browser MCP 所在 Chrome，或在 target 中传入 browser_snapshot target.title/windowTitle。"
+                )
+            }
 
             for app in apps {
                 do {
@@ -152,7 +162,7 @@ public enum BrowserResolver {
                         window = try resolveMainWindow(
                             for: app,
                             bundleIdentifier: bundleIdentifier,
-                            descriptor: descriptor,
+                            descriptor: windowDescriptor,
                             focusedOnly: useFocusedBrowserWindow
                         )
                     } catch BrowserResolverError.windowNotFound where useFocusedBrowserWindow {
@@ -163,7 +173,7 @@ public enum BrowserResolver {
                         window = try resolveMainWindow(
                             for: app,
                             bundleIdentifier: bundleIdentifier,
-                            descriptor: descriptor,
+                            descriptor: windowDescriptor,
                             focusedOnly: false
                         )
                     }
@@ -200,6 +210,37 @@ public enum BrowserResolver {
             throw lastWindowError
         }
         throw BrowserResolverError.appNotFound(bundleIdentifiers.joined(separator: ", "))
+    }
+
+    static func shouldRejectUnresolvedPageTarget(
+        descriptor: TargetDescriptor?,
+        pageTarget: BrowserPageTarget?,
+        appCount: Int
+    ) -> Bool {
+        guard pageTarget == nil, appCount > 1, let descriptor else {
+            return false
+        }
+        guard descriptor.host != nil || descriptor.tabId != nil else {
+            return false
+        }
+        // Browser extension window/tab ids are not macOS window ids. If the
+        // AppleScript page resolver cannot bind the browser page and multiple
+        // Chrome processes exist, only an explicit title gives AX/CG lookup a
+        // process-independent way to choose the correct native window.
+        return descriptor.windowTitle == nil
+    }
+
+    static func macOSWindowDescriptor(for descriptor: TargetDescriptor?, pageTarget: BrowserPageTarget?) -> TargetDescriptor? {
+        guard let pageTarget else {
+            return descriptor
+        }
+        let title = descriptor?.windowTitle ?? pageTarget.windowTitle ?? pageTarget.tabTitle
+        return TargetDescriptor(
+            bundleId: pageTarget.bundleId,
+            windowTitle: title,
+            tabId: pageTarget.tabId ?? descriptor?.tabId,
+            host: pageTarget.host ?? descriptor?.host
+        )
     }
 
     private static func runningApplications(bundleIdentifier: String, waitForRegistration: Bool) -> [NSRunningApplication] {
