@@ -210,6 +210,10 @@ final class PassiveLearningRecorder {
         }
         if let mode {
             settings.mode = mode
+            if mode != .training {
+                activeSession = nil
+                pendingTrainingSamples.removeAll()
+            }
         }
         if !settings.enabled {
             settings.mode = .off

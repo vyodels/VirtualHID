@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import VirtualHIDRuntime
 
-final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private enum ManagementSection: Int, CaseIterable {
         case overview
         case hud
@@ -73,6 +73,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var runtimeError: String?
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var singleClickTimer: Timer?
+    private var panelRefreshTimer: Timer?
     private var lastStatusClickAt: Date?
     private var quickMenu: NSMenu?
     private var panel: NSPanel?
@@ -85,6 +86,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var componentCheckboxes = [Component: NSButton]()
     private var lastState = HUDState.offline(message: "未连接到 VirtualHID 执行服务")
     private var learningStatusLabel: NSTextField?
+    private var learningCountersLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
     private var learningModePopup: NSPopUpButton?
     private var trainingLabelField: NSTextField?
@@ -107,6 +109,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopPanelRefreshTimer()
         runtime?.stop()
     }
 
@@ -129,6 +132,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func togglePanel(_ sender: Any?) {
         if let panel, panel.isVisible {
             panel.orderOut(nil)
+            stopPanelRefreshTimer()
             return
         }
         showPanel()
@@ -311,6 +315,11 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         position(panel: panel)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        startPanelRefreshTimer()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        stopPanelRefreshTimer()
     }
 
     private func refreshState(autostartIfNeeded: Bool = false) {
@@ -324,6 +333,22 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
         updateControls()
+    }
+
+    private func startPanelRefreshTimer() {
+        panelRefreshTimer?.invalidate()
+        panelRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self, self.panel?.isVisible == true else {
+                self?.stopPanelRefreshTimer()
+                return
+            }
+            self.refreshState()
+        }
+    }
+
+    private func stopPanelRefreshTimer() {
+        panelRefreshTimer?.invalidate()
+        panelRefreshTimer = nil
     }
 
     private func startRuntime(restart: Bool = false) {
@@ -359,6 +384,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.title = "VirtualHID 管理中心"
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
+        panel.delegate = self
 
         let effect = NSVisualEffectView()
         effect.material = .hudWindow
@@ -459,6 +485,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         delayField = nil
         componentCheckboxes.removeAll()
         learningStatusLabel = nil
+        learningCountersLabel = nil
         learningEnabledCheckbox = nil
         learningModePopup = nil
         trainingLabelField = nil
@@ -709,6 +736,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         learningStatusLabel = learningStatus
         stack.addArrangedSubview(learningStatus)
 
+        let counters = label("", size: 12, weight: .semibold, color: .labelColor)
+        counters.maximumNumberOfLines = 2
+        counters.preferredMaxLayoutWidth = 292
+        learningCountersLabel = counters
+        stack.addArrangedSubview(counters)
+
         let learningEnabled = NSButton(checkboxWithTitle: "开启鼠标习惯学习", target: self, action: #selector(applyLearningAction(_:)))
         learningEnabled.controlSize = .large
         learningEnabledCheckbox = learningEnabled
@@ -842,6 +875,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         learningStatusLabel?.stringValue = lastLearningState.statusText
         learningStatusLabel?.textColor = lastLearningState.available ? .labelColor : .systemRed
+        learningCountersLabel?.stringValue = lastLearningState.counterText
+        learningCountersLabel?.textColor = lastLearningState.available ? .controlAccentColor : .systemRed
         learningEnabledCheckbox?.isEnabled = lastLearningState.available
         learningEnabledCheckbox?.state = lastLearningState.enabled ? .on : .off
         setLearningMode(lastLearningState.mode)
@@ -1005,6 +1040,10 @@ private struct LearningState {
         }
         let sessionText = activeSessionLabel.map { "，训练：\($0)" } ?? ""
         return "学习：\(enabled ? "开启" : "关闭") / \(modeText)，已产出 \(producedSamples) 个样本，待提交 \(pendingTrainingSamples) 个，已持久化 \(persistedSamples) 个，模板 \(totalTemplates) 个\(sessionText)"
+    }
+
+    var counterText: String {
+        "样本 \(producedSamples)  |  待提交 \(pendingTrainingSamples)  |  持久化 \(persistedSamples)  |  模板 \(totalTemplates)"
     }
 
     init(response: [String: Any]) {

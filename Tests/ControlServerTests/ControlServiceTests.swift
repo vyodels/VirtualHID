@@ -242,6 +242,31 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(try store.lookupTemplate(host: "example.com", sig: "sig-apply", taskId: "task", actionType: "click").sampleSize, 10)
     }
 
+    func testLearnedProfilePlaybackEmitsActionEventsToHidSink() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let box = HIDSinkBox()
+        let service = try makeService(profileStore: store, hidEventSink: BoxedHIDSink(box: box))
+        _ = service.handleLine(
+            #"{"id":"apply-learned","method":"profiles.apply","params":{"host":"example.com","elementSig":"sig-learned","taskId":"task","actionType":"click","sampleSize":9,"confidence":0.92,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":9,"motion":{"flavor":"gentle","moveSpeedPxS":{"min":180,"max":320},"pointCount":{"min":18,"max":24},"wind":4.2,"jitter":0.22,"controlSpread":36,"detourProbability":0.18,"clickHoldMs":{"min":70,"max":128},"hesitationProbability":0.32,"hesitationMs":{"min":38,"max":118}}}}}"#
+        )
+
+        let response = service.handleLine(
+            #"{"id":"learned-playback","method":"action","params":{"context":{"host":"example.com","taskId":"task","stage":"playback","element":{"sig":"sig-learned","role":"button"}},"options":{"dryRun":true,"postMode":"global"},"primitives":[{"type":"click","at":{"x":220,"y":150},"button":"left","profile":{"origin":{"x":28,"y":42}}}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let profiles = result?["profiles"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]] ?? []
+        let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(profiles?["applied"] as? Bool, true)
+        XCTAssertEqual((profiles?["templateIds"] as? [String])?.isEmpty, false)
+        XCTAssertGreaterThanOrEqual(mouseMoves.count, 10)
+        XCTAssertEqual(box.finished?.context.actionId, "learned-playback")
+        XCTAssertEqual(box.finished?.events.count, events.count)
+    }
+
     func testTypeFallsBackToPasteTextForChinese() throws {
         let service = try makeService()
         let response = service.handleLine(

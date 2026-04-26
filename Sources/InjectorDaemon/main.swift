@@ -84,6 +84,8 @@ enum DaemonArguments {
                 configuration.smoke = "hud-contract"
             case "--smoke-hud-ui":
                 configuration.smoke = "hud-ui"
+            case "--smoke-learning-playback":
+                configuration.smoke = "learning-playback"
             default:
                 continue
             }
@@ -127,6 +129,11 @@ enum DaemonLaunchError: Error, LocalizedError {
     }
 }
 
+private let learningPlaybackHost = "virtualhid-learning-playback.local"
+private let learningPlaybackBaselineHost = "virtualhid-learning-baseline.local"
+private let learningPlaybackElementSig = "learning-demo-target"
+private let learningPlaybackTaskId = "learning-playback"
+
 let configuration = DaemonArguments.parse(CommandLine.arguments)
 
 do {
@@ -143,6 +150,8 @@ do {
         try runHUDContractSmoke(configuration: configuration)
     case "hud-ui":
         try runHUDUISmoke(configuration: configuration)
+    case "learning-playback":
+        try runLearningPlaybackSmoke(configuration: configuration)
     default:
         try runDaemon(configuration: configuration)
     }
@@ -423,6 +432,99 @@ private func runHUDUISmoke(configuration: DaemonConfiguration) throws {
     }
 }
 
+private struct LearningPlaybackSpec {
+    let id: String
+    let origin: CGPoint
+    let target: CGPoint
+}
+
+private struct LearningPlaybackTrainingReport {
+    let insertedTraces: Int
+    let scannedTraces: Int
+    let generatedTemplates: Int
+    let totalTemplates: Int
+}
+
+private final class LearningPlaybackRunState {
+    var responses = [String]()
+}
+
+private func runLearningPlaybackSmoke(configuration: DaemonConfiguration) throws {
+    NSApplication.shared.setActivationPolicy(.accessory)
+
+    var hudSettings = configuration.hudSettings
+    hudSettings.showTrail = true
+    hudSettings.showTrailPoints = true
+    hudSettings.showExpectedPoint = true
+    hudSettings.showActualPoint = true
+    hudSettings.showClickEffects = true
+    hudSettings.showWindowFrame = true
+    hudSettings.showStatus = true
+    hudSettings.persistent = true
+
+    let sink = HIDOverlayController(settings: hudSettings)
+    let smokeTarget = try resolveHUDSmokeTarget(configuration: configuration)
+    let profileStore = try ProfileStore(path: ":memory:")
+    let service = ControlService(
+        configuration: ControlServerConfiguration(
+            bundleIdentifiers: configuration.bundleIdentifiers,
+            defaultPostMode: configuration.defaultPostMode,
+            allowSelfTarget: smokeTarget.usesSelfTarget
+        ),
+        supervisor: SupervisorService(),
+        profileStore: profileStore,
+        hidEventSink: sink
+    )
+
+    var generator = SeededGenerator(
+        seed: UInt64(environmentInteger("VIRTUALHID_LEARNING_PLAYBACK_SEED", defaultValue: 2_026_042_701))
+    )
+    let actionCount = max(3, environmentInteger("VIRTUALHID_LEARNING_PLAYBACK_ACTIONS", defaultValue: 5))
+    let specs = learningPlaybackSpecs(target: smokeTarget, count: actionCount, generator: &generator)
+    let trainingReport = try seedLearningPlaybackTraces(store: profileStore, specs: specs, generator: &generator)
+
+    var actionLines = [try learningPlaybackActionLine(target: smokeTarget, spec: specs[0], baseline: true)]
+    for spec in specs {
+        actionLines.append(try learningPlaybackActionLine(target: smokeTarget, spec: spec, baseline: false))
+    }
+
+    let state = LearningPlaybackRunState()
+    let actionDelay = environmentDouble("VIRTUALHID_LEARNING_PLAYBACK_ACTION_DELAY_SECONDS", defaultValue: 0.4)
+    let stepDelay = environmentDouble("VIRTUALHID_LEARNING_PLAYBACK_STEP_DELAY_SECONDS", defaultValue: 1.35)
+    let exitDelay = environmentDouble("VIRTUALHID_LEARNING_PLAYBACK_EXIT_DELAY_SECONDS", defaultValue: 3.6)
+
+    func runAction(at index: Int) {
+        let response = service.handleLine(actionLines[index])
+        state.responses.append(response)
+        print(response)
+        fflush(stdout)
+
+        if index + 1 < actionLines.count {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stepDelay) {
+                runAction(at: index + 1)
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + exitDelay) {
+                printJSONObject(
+                    learningPlaybackSummary(
+                        target: smokeTarget,
+                        trainingReport: trainingReport,
+                        responses: state.responses
+                    )
+                )
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + actionDelay) {
+        runAction(at: 0)
+    }
+    withExtendedLifetime(sink) {
+        NSApplication.shared.run()
+    }
+}
+
 private struct HUDSmokeTarget {
     let target: [String: Any]?
     let contextHost: String
@@ -551,6 +653,340 @@ private func hudUISmokeActionLine(target: HUDSmokeTarget) throws -> String {
     ]
     let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
     return String(data: data, encoding: .utf8) ?? "{}"
+}
+
+private func learningPlaybackSpecs(
+    target: HUDSmokeTarget,
+    count: Int,
+    generator: inout SeededGenerator
+) -> [LearningPlaybackSpec] {
+    let width = Double(max(target.viewportSize.width, 420))
+    let height = Double(max(target.viewportSize.height, 320))
+    let minX = max(48, width * 0.08)
+    let maxX = min(width - 48, width * 0.92)
+    let minY = max(48, height * 0.12)
+    let maxY = min(height - 48, height * 0.84)
+    let minimumDistance = min(width, height) * 0.22
+
+    return (0..<count).map { index in
+        var origin = CGPoint(
+            x: randomDouble(minX...maxX, generator: &generator),
+            y: randomDouble(minY...maxY, generator: &generator)
+        )
+        var destination = CGPoint(
+            x: randomDouble(minX...maxX, generator: &generator),
+            y: randomDouble(minY...maxY, generator: &generator)
+        )
+        var attempts = 0
+        while distance(origin, destination) < minimumDistance, attempts < 12 {
+            destination = CGPoint(
+                x: randomDouble(minX...maxX, generator: &generator),
+                y: randomDouble(minY...maxY, generator: &generator)
+            )
+            attempts += 1
+        }
+        if distance(origin, destination) < minimumDistance {
+            origin = CGPoint(x: minX, y: minY + Double(index % 3) * 42)
+            destination = CGPoint(x: maxX, y: maxY - Double(index % 3) * 37)
+        }
+        return LearningPlaybackSpec(id: "action-\(index + 1)", origin: origin, target: destination)
+    }
+}
+
+private func seedLearningPlaybackTraces(
+    store: ProfileStore,
+    specs: [LearningPlaybackSpec],
+    generator: inout SeededGenerator
+) throws -> LearningPlaybackTrainingReport {
+    let sampleCount = max(30, specs.count * 6)
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+    let traceHost = String(learningPlaybackHost)
+    guard !traceHost.isEmpty else {
+        throw NSError(
+            domain: "VirtualHIDLearningPlayback",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "learning playback trace host is empty"]
+        )
+    }
+    for index in 0..<sampleCount {
+        let spec = specs[index % specs.count]
+        let origin = jittered(spec.origin, radius: 22, generator: &generator)
+        let target = jittered(spec.target, radius: 14, generator: &generator)
+        let points = learningPlaybackTrainingPath(
+            from: origin,
+            to: target,
+            sampleIndex: index,
+            generator: &generator
+        )
+        let pathLength = pathLength(points)
+        let straightness = max(0.1, min(1, distance(origin, target) / max(pathLength, 1)))
+        let turnJitter = averageTurnJitter(points)
+        let durationMs = max(260, min(1_300, (pathLength / randomDouble(360...740, generator: &generator)) * 1_000))
+        let input = TraceInput(
+            ts: nowMs + Int64(index),
+            source: "virtualhid-learning-playback-training",
+            host: traceHost,
+            elementSig: learningPlaybackElementSig,
+            taskId: learningPlaybackTaskId,
+            stage: "training",
+            actionType: "click",
+            payload: TracePayload(
+                eventId: "learning-playback-training-\(index)",
+                type: "leftMouseUp",
+                point: tracePoint(target),
+                points: points.map(tracePoint),
+                origin: tracePoint(origin),
+                targetPoint: tracePoint(target),
+                targetRadiusPx: randomDouble(4...9, generator: &generator),
+                landingErrorPx: randomDouble(0.6...5.8, generator: &generator),
+                durationMs: durationMs,
+                segmentMs: segmentDurations(points: points, totalMs: durationMs, generator: &generator),
+                hesitationMs: index.isMultiple(of: 3) ? [randomDouble(36...150, generator: &generator)] : [],
+                clickHoldMs: [randomDouble(54...132, generator: &generator)],
+                interClickMs: [randomDouble(126...240, generator: &generator)],
+                straightness: straightness,
+                turnJitter: turnJitter,
+                pathLengthPx: pathLength,
+                speedPxS: pathLength / max(durationMs / 1_000, 0.1)
+            )
+        )
+        do {
+            _ = try store.insertTrace(input)
+        } catch {
+            throw NSError(
+                domain: "VirtualHIDLearningPlayback",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "failed to insert learning playback trace host=\(traceHost) actionType=click: \(String(describing: error))"
+                ]
+            )
+        }
+    }
+
+    let report = try store.rebuild(host: learningPlaybackHost)
+    return LearningPlaybackTrainingReport(
+        insertedTraces: sampleCount,
+        scannedTraces: report.scannedTraces,
+        generatedTemplates: report.generatedTemplates,
+        totalTemplates: try store.listTemplates(host: learningPlaybackHost).count
+    )
+}
+
+private func learningPlaybackTrainingPath(
+    from origin: CGPoint,
+    to target: CGPoint,
+    sampleIndex: Int,
+    generator: inout SeededGenerator
+) -> [CGPoint] {
+    let totalPoints = environmentInteger("VIRTUALHID_LEARNING_PLAYBACK_TRAINING_POINTS", defaultValue: 9)
+    let count = max(6, min(totalPoints, 18))
+    let dx = target.x - origin.x
+    let dy = target.y - origin.y
+    let length = max(1, distance(origin, target))
+    let normal = CGPoint(x: -dy / length, y: dx / length)
+    let sign: Double = sampleIndex.isMultiple(of: 2) ? 1 : -1
+    let bend = randomDouble(18...72, generator: &generator) * sign
+    let secondaryBend = randomDouble(-18...18, generator: &generator)
+
+    return (0..<count).map { index in
+        if index == 0 {
+            return origin
+        }
+        if index == count - 1 {
+            return target
+        }
+        let progress = Double(index) / Double(count - 1)
+        let eased = progress * progress * (3 - 2 * progress)
+        let arc = sin(.pi * progress) * bend + sin(.pi * 2 * progress) * secondaryBend
+        let tremor = randomDouble(-5.5...5.5, generator: &generator) * (1 - abs(progress - 0.5))
+        return CGPoint(
+            x: origin.x + dx * eased + normal.x * arc + tremor,
+            y: origin.y + dy * eased + normal.y * arc + randomDouble(-4...4, generator: &generator)
+        )
+    }
+}
+
+private func segmentDurations(
+    points: [CGPoint],
+    totalMs: Double,
+    generator: inout SeededGenerator
+) -> [Double] {
+    guard points.count >= 2 else {
+        return []
+    }
+    let lengths = zip(points.dropLast(), points.dropFirst()).map { distance($0.0, $0.1) }
+    let totalLength = max(1, lengths.reduce(0, +))
+    return lengths.map { length in
+        let weight = length / totalLength
+        return max(18, totalMs * weight * randomDouble(0.78...1.26, generator: &generator))
+    }
+}
+
+private func learningPlaybackActionLine(
+    target: HUDSmokeTarget,
+    spec: LearningPlaybackSpec,
+    baseline: Bool
+) throws -> String {
+    let width = Double(max(target.viewportSize.width, 420))
+    let height = Double(max(target.viewportSize.height, 320))
+    var params: [String: Any] = [
+        "geometry": [
+            "coordSpace": "viewport",
+            "pageScale": 1,
+            "scrollOffset": ["x": 0, "y": 0],
+            "viewportSize": ["x": 0, "y": 0, "width": width, "height": height]
+        ],
+        "context": [
+            "host": baseline ? learningPlaybackBaselineHost : learningPlaybackHost,
+            "element": [
+                "sig": baseline ? "learning-baseline-target" : learningPlaybackElementSig,
+                "role": "button"
+            ],
+            "taskId": learningPlaybackTaskId,
+            "stage": baseline ? "baseline" : "playback"
+        ],
+        "options": [
+            "dryRun": true,
+            "postMode": "global",
+            "browserChromeOverlayPolicy": "off",
+            "timeoutMs": 8_000
+        ],
+        "primitives": [
+            [
+                "type": "click",
+                "at": pointObject(spec.target),
+                "button": "left",
+                "holdMs": 82,
+                "profile": ["origin": pointObject(spec.origin)]
+            ]
+        ]
+    ]
+    if let targetObject = target.target {
+        params["target"] = targetObject
+    }
+    let request: [String: Any] = [
+        "id": baseline ? "learning-playback-baseline" : "learning-playback-\(spec.id)",
+        "method": "action",
+        "params": params
+    ]
+    let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+    return String(data: data, encoding: .utf8) ?? "{}"
+}
+
+private func learningPlaybackSummary(
+    target: HUDSmokeTarget,
+    trainingReport: LearningPlaybackTrainingReport,
+    responses: [String]
+) -> [String: Any] {
+    let actionSummaries = responses.map(learningPlaybackActionSummary)
+    let learnedActions = actionSummaries.dropFirst()
+    let learnedApplied = learnedActions.allSatisfy { $0["profileApplied"] as? Bool == true }
+    let learnedHaveMotion = learnedActions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) >= 6 }
+    let baselineApplied = actionSummaries.first?["profileApplied"] as? Bool ?? false
+    return [
+        "type": "learning-playback-summary",
+        "source": "virtualhid-action-events",
+        "target": [
+            "contextHost": target.contextHost,
+            "selfTarget": target.usesSelfTarget,
+            "viewportSize": ["width": target.viewportSize.width, "height": target.viewportSize.height]
+        ],
+        "training": [
+            "host": learningPlaybackHost,
+            "elementSig": learningPlaybackElementSig,
+            "taskId": learningPlaybackTaskId,
+            "insertedTraces": trainingReport.insertedTraces,
+            "scannedTraces": trainingReport.scannedTraces,
+            "generatedTemplates": trainingReport.generatedTemplates,
+            "totalTemplates": trainingReport.totalTemplates
+        ],
+        "actions": actionSummaries,
+        "assertions": [
+            "baselineProfileNotApplied": !baselineApplied,
+            "learnedProfilesApplied": learnedApplied,
+            "learnedActionsHaveMouseMovement": learnedHaveMotion
+        ],
+        "ok": !baselineApplied && learnedApplied && learnedHaveMotion && trainingReport.generatedTemplates > 0
+    ]
+}
+
+private func learningPlaybackActionSummary(_ response: String) -> [String: Any] {
+    guard let payload = try? jsonObject(response) as? [String: Any],
+          let result = payload["result"] as? [String: Any] else {
+        return ["ok": false, "parseError": true]
+    }
+    let events = result["events"] as? [[String: Any]] ?? []
+    let profiles = result["profiles"] as? [String: Any] ?? [:]
+    let verification = result["verification"] as? [String: Any] ?? [:]
+    let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
+    return [
+        "id": result["id"] ?? NSNull(),
+        "ok": payload["ok"] as? Bool ?? false,
+        "profileApplied": profiles["applied"] as? Bool ?? false,
+        "templateIds": profiles["templateIds"] ?? [],
+        "eventCount": events.count,
+        "mouseMoveCount": mouseMoves.count,
+        "firstLocation": pointFromEvent(events.first) ?? NSNull(),
+        "finalLocation": pointFromEvent(events.last) ?? NSNull(),
+        "expectedPointer": verification["expectedPointer"] ?? NSNull(),
+        "finalPointer": verification["finalPointer"] ?? NSNull()
+    ]
+}
+
+private func pointFromEvent(_ event: [String: Any]?) -> Any? {
+    guard let event,
+          let location = event["location"] as? [String: Any],
+          let x = location["x"] as? Double,
+          let y = location["y"] as? Double else {
+        return nil
+    }
+    return ["x": x, "y": y]
+}
+
+private func pointObject(_ point: CGPoint) -> [String: Double] {
+    ["x": point.x, "y": point.y]
+}
+
+private func tracePoint(_ point: CGPoint) -> TracePoint {
+    TracePoint(x: point.x, y: point.y)
+}
+
+private func jittered(_ point: CGPoint, radius: Double, generator: inout SeededGenerator) -> CGPoint {
+    CGPoint(
+        x: point.x + randomDouble((-radius)...radius, generator: &generator),
+        y: point.y + randomDouble((-radius)...radius, generator: &generator)
+    )
+}
+
+private func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> Double {
+    hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+}
+
+private func pathLength(_ points: [CGPoint]) -> Double {
+    zip(points.dropLast(), points.dropFirst()).map { distance($0.0, $0.1) }.reduce(0, +)
+}
+
+private func averageTurnJitter(_ points: [CGPoint]) -> Double {
+    guard points.count >= 3 else {
+        return 0
+    }
+    let turns = (1..<(points.count - 1)).compactMap { index -> Double? in
+        let previousX = Double(points[index].x - points[index - 1].x)
+        let previousY = Double(points[index].y - points[index - 1].y)
+        let nextX = Double(points[index + 1].x - points[index].x)
+        let nextY = Double(points[index + 1].y - points[index].y)
+        let previousLength = hypot(previousX, previousY)
+        let nextLength = hypot(nextX, nextY)
+        guard previousLength > 0.1, nextLength > 0.1 else {
+            return nil
+        }
+        let dot = (previousX * nextX + previousY * nextY) / (previousLength * nextLength)
+        return acos(max(-1.0, min(1.0, dot))) / Double.pi
+    }
+    guard !turns.isEmpty else {
+        return 0
+    }
+    return turns.reduce(0, +) / Double(turns.count)
 }
 
 private func selfTargetVisibleFrame() -> CGRect {
@@ -689,6 +1125,15 @@ private func environmentDouble(_ name: String, defaultValue: Double) -> Double {
     environmentDouble(name, defaultValue: Optional(defaultValue)) ?? defaultValue
 }
 
+private func environmentInteger(_ name: String, defaultValue: Int) -> Int {
+    guard let value = ProcessInfo.processInfo.environment[name],
+          let parsed = Int(value),
+          parsed > 0 else {
+        return defaultValue
+    }
+    return parsed
+}
+
 private func profileStorePath(_ override: String?) throws -> String {
     if let override {
         return override
@@ -706,6 +1151,43 @@ private func printJSON(_ object: [String: Any]) throws {
     print(String(data: data, encoding: .utf8) ?? "{}")
 }
 
+private func printJSONObject(_ object: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+          let line = String(data: data, encoding: .utf8) else {
+        print("{}")
+        return
+    }
+    print(line)
+    fflush(stdout)
+}
+
 private func jsonObject(_ line: String) throws -> Any {
     try JSONSerialization.jsonObject(with: Data(line.utf8))
+}
+
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
+    }
+
+    mutating func next() -> UInt64 {
+        state = state &* 2_862_933_555_777_941_757 &+ 3_037_000_493
+        var value = state
+        value ^= value >> 33
+        value &*= 0xff51_afd7_ed55_8ccd
+        value ^= value >> 33
+        value &*= 0xc4ce_b9fe_1a85_ec53
+        value ^= value >> 33
+        return value
+    }
+
+    mutating func unit() -> Double {
+        Double(next() >> 11) / Double(1 << 53)
+    }
+}
+
+private func randomDouble(_ range: ClosedRange<Double>, generator: inout SeededGenerator) -> Double {
+    range.lowerBound + (range.upperBound - range.lowerBound) * generator.unit()
 }

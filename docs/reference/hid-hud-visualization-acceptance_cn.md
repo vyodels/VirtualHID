@@ -80,6 +80,22 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 ```
 
+学习效果回放验收：
+
+```bash
+./scripts/learning-playback-demo.sh
+```
+
+该脚本用于验证学习能力对后续 HID action 的真实影响：VirtualHID 先在本地生成一批可聚合的训练轨迹样本，写入 `ProfileStore`，重建 learned template，然后提交 baseline + 多个随机起止点的普通 `action` 请求。baseline 不应命中 profile；后续 learned action 必须通过 `ControlService.applyProfiles` 命中模板，并由 `ActionExecutor` 产生 `mouseMoved`、`leftMouseDown`、`leftMouseUp` 等完整事件。HUD 只显示这些 action events 与 verification，不允许脚本、mock page、browser 或 recruit-agent 自行生成轨迹、expected point 或 actual point。
+
+脚本输出会保存到 `/tmp/virtualhid-learning-playback-response.jsonl`，最后一行 `learning-playback-summary` 必须满足：
+
+- `training.generatedTemplates >= 1`。
+- `assertions.baselineProfileNotApplied == true`。
+- `assertions.learnedProfilesApplied == true`。
+- `assertions.learnedActionsHaveMouseMovement == true`。
+- learned action 的 `templateIds` 非空，并且 `mouseMoveCount` 证明轨迹来自 VirtualHID action events。
+
 ## 6. 手动 UI 验收命令
 
 真实 HUD 需要 macOS 图形会话，无法稳定在 headless smoke 中断言。可用以下脚本人工确认透明覆盖层、鼠标穿透和绘制内容：
