@@ -51,8 +51,7 @@ python3 scripts/humanization_analysis.py \
 Swift 侧在 HUD / daemon 改动尚未收敛时，可先做 owned module build：
 
 ```bash
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift build --disable-sandbox --scratch-path /tmp/virtualhid-spm-build \
   --target HumanizationKit --target ProfileStore
@@ -61,13 +60,11 @@ env DEVELOPER_DIR=/tmp/OldXcode.app \
 HUD / daemon 编译面干净后，再补跑：
 
 ```bash
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build --filter HumanizationKit
 
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-profile-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-profile-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-profile-swiftpm-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-profile-spm-build --filter ProfileStoreTests
 

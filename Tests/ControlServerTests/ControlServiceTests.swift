@@ -330,7 +330,7 @@ final class ControlServiceTests: XCTestCase {
         let sink = ConfigurableHIDSink()
         let service = try! makeService(hidEventSink: sink)
         let response = service.handleLine(
-            #"{"id":"hud-config","method":"hud.configure","params":{"enabled":true,"clearDelaySeconds":4.2,"settings":{"trail":false,"actualPoint":true}}}"#
+            #"{"id":"hud-config","method":"hud.configure","params":{"enabled":true,"clearDelaySeconds":4.2,"settings":{"trail":false,"actualPoint":true,"persistent":false}}}"#
         )
         let payload = try! decode(response)
         let result = payload["result"] as? [String: Any]
@@ -341,6 +341,7 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(result?["enabled"] as? Bool, true)
         XCTAssertEqual(settings?["trail"] as? Bool, false)
         XCTAssertEqual(settings?["actualPoint"] as? Bool, true)
+        XCTAssertEqual(settings?["persistent"] as? Bool, false)
         XCTAssertEqual(settings?["clearDelaySeconds"] as? Double, 4.2)
     }
 
@@ -418,7 +419,8 @@ private final class ConfigurableHIDSink: HIDEventSink, HIDVisualizationControl {
     private var settings: [String: Any] = [
         "clearDelaySeconds": 2.4,
         "trail": true,
-        "actualPoint": true
+        "actualPoint": true,
+        "persistent": true
     ]
 
     func hidVisualizationState() -> [String: Any] {

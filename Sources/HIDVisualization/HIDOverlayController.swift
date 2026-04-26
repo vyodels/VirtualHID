@@ -15,6 +15,7 @@ public struct HIDOverlaySettings: Equatable {
     public var showScrollEffects: Bool
     public var showKeyboardEffects: Bool
     public var showStatus: Bool
+    public var persistent: Bool
 
     public init(
         clearDelaySeconds: TimeInterval = 2.4,
@@ -28,7 +29,8 @@ public struct HIDOverlaySettings: Equatable {
         showDragEffects: Bool = true,
         showScrollEffects: Bool = true,
         showKeyboardEffects: Bool = true,
-        showStatus: Bool = true
+        showStatus: Bool = true,
+        persistent: Bool = true
     ) {
         self.clearDelaySeconds = max(0.1, clearDelaySeconds)
         self.showWindowFrame = showWindowFrame
@@ -42,6 +44,7 @@ public struct HIDOverlaySettings: Equatable {
         self.showScrollEffects = showScrollEffects
         self.showKeyboardEffects = showKeyboardEffects
         self.showStatus = showStatus
+        self.persistent = persistent
     }
 }
 
@@ -80,7 +83,8 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         }
         DispatchQueue.main.async { [weak self] in
             if !enabled {
-                self?.overlayView?.clear()
+                self?.overlayView?.clearAll()
+                self?.overlayWindow?.orderOut(nil)
             }
         }
     }
@@ -138,6 +142,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             self?.overlayView?.render(
                 HIDOverlayFrame(context: context, events: [], expected: nil, actual: nil, errorCode: nil)
             )
+            self?.clearToken += 1
         }
     }
 
@@ -199,6 +204,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                 overlayView?.resize(frame: NSRect(origin: .zero, size: frame.size), screenFrame: frame)
                 overlayFrame = frame
             }
+            overlayWindow.orderFrontRegardless()
             return
         }
         let panel = NSPanel(
@@ -214,7 +220,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
         panel.level = .screenSaver
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .transient, .ignoresCycle]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.orderFrontRegardless()
         overlayWindow = panel
@@ -230,7 +236,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             guard self?.clearToken == token else {
                 return
             }
-            self?.overlayView?.clear()
+            self?.overlayView?.clearTransientState()
         }
     }
 
@@ -282,7 +288,8 @@ private func settingsObject(_ settings: HIDOverlaySettings) -> [String: Any] {
         "dragEffects": settings.showDragEffects,
         "scrollEffects": settings.showScrollEffects,
         "keyboardEffects": settings.showKeyboardEffects,
-        "status": settings.showStatus
+        "status": settings.showStatus,
+        "persistent": settings.persistent
     ]
 }
 
@@ -360,6 +367,7 @@ private func applyComponents(_ components: [String], visible: Bool, settings: in
             settings.showScrollEffects = visible
             settings.showKeyboardEffects = visible
             settings.showStatus = visible
+            settings.persistent = visible
         case "window", "window-frame", "frame", "target-window", "windowframe":
             settings.showWindowFrame = visible
         case "diagnostic", "hud-active":
@@ -382,6 +390,8 @@ private func applyComponents(_ components: [String], visible: Bool, settings: in
             settings.showKeyboardEffects = visible
         case "status", "status-text":
             settings.showStatus = visible
+        case "persistent", "persistent-hud", "hud-persistent", "always-on", "resident":
+            settings.persistent = visible
         case "mouse-effects", "events", "event-effects":
             settings.showClickEffects = visible
             settings.showDragEffects = visible
@@ -405,6 +415,7 @@ private final class HIDOverlayView: NSView {
     private var screenFrame: NSRect
     private var settings: HIDOverlaySettings
     private var frameData: HIDOverlayFrame?
+    private var lastPersistentFrame: HIDOverlayFrame?
 
     init(frame: NSRect, screenFrame: NSRect, settings: HIDOverlaySettings) {
         self.screenFrame = screenFrame
@@ -421,6 +432,7 @@ private final class HIDOverlayView: NSView {
 
     func render(_ data: HIDOverlayFrame) {
         frameData = data
+        lastPersistentFrame = data
         needsDisplay = true
         displayIfNeeded()
     }
@@ -434,6 +446,9 @@ private final class HIDOverlayView: NSView {
 
     func updateSettings(_ settings: HIDOverlaySettings) {
         self.settings = settings
+        if !settings.persistent, let frameData, frameData.events.isEmpty {
+            self.frameData = nil
+        }
         needsDisplay = true
         displayIfNeeded()
     }
@@ -453,8 +468,25 @@ private final class HIDOverlayView: NSView {
         displayIfNeeded()
     }
 
-    func clear() {
+    func clearTransientState() {
+        if settings.persistent, let lastPersistentFrame {
+            frameData = HIDOverlayFrame(
+                context: lastPersistentFrame.context,
+                events: [],
+                expected: lastPersistentFrame.expected,
+                actual: lastPersistentFrame.actual,
+                errorCode: lastPersistentFrame.errorCode
+            )
+        } else {
+            frameData = nil
+        }
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    func clearAll() {
         frameData = nil
+        lastPersistentFrame = nil
         needsDisplay = true
         displayIfNeeded()
     }

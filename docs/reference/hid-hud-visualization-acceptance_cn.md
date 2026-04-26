@@ -10,6 +10,7 @@ HUD 开启时应展示：
 - `ActionExecutor` 记录的实际 HID 事件轨迹。
 - 点击、拖拽、滚轮、输入等事件效果。
 - `OutcomeVerifier` 基于同一批 `ActionResult.events` 计算出的 `expectedPointer` 与 `finalPointer`。
+- 常驻显示开启时，action 结束并超过清除延迟后仍保留最后一次 VirtualHID 目标窗口、状态、expected/final point；只清除动态轨迹和事件特效。
 
 ## 2. VirtualHID 正式 HUD / 控制面语义
 
@@ -34,6 +35,7 @@ HUD 配置属于 VirtualHID 本地观察设置，不属于 `hid_action` 的业�
 HUD 设置应覆盖这些 VirtualHID 本地观察项：
 
 - 窗口框与 viewport/window 诊断。
+- 常驻显示 HUD。
 - daemon / action 状态文本。
 - 事件轨迹线与轨迹采样点。
 - expected / final 指针点。
@@ -41,7 +43,7 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 - drag 起止与路径环。
 - scroll 方向/幅度 glyph。
 - keyboard / type / paste 输入徽标。
-- HUD 清除延迟。
+- HUD 清除延迟；常驻显示开启时该延迟只清动态轨迹/特效，关闭时到期后隐藏 HUD 内容。
 
 这些内容只能来自 VirtualHID action events、execution context 和 verification；不得由网页 mock、browser snapshot 或 recruit-agent 自行补画。
 
@@ -49,7 +51,7 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 
 - daemon 启动参数：`--hud-control`、`--hud-show <components>`、`--hud-hide <components>`、`--hud-clear-delay <seconds>`。
 - 环境变量：`VIRTUALHID_HUD_SHOW`、`VIRTUALHID_HUD_HIDE`、`VIRTUALHID_HUD_CLEAR_DELAY_SECONDS`。
-- 组件名：`all`、`window-frame`、`diagnostic`、`trail`、`trail-points`、`expected-point`、`actual-point`、`click-effects`、`drag-effects`、`scroll-effects`、`keyboard-effects`、`status`。
+- 组件名：`all`、`persistent`、`window-frame`、`diagnostic`、`trail`、`trail-points`、`expected-point`、`actual-point`、`click-effects`、`drag-effects`、`scroll-effects`、`keyboard-effects`、`status`。
 - 交互入口：`vhid-tray` 在菜单栏显示 VirtualHID 图标，点击后打开同一批配置项的最小面板。
 
 ## 5. 自动化验收
@@ -67,13 +69,12 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 - callback 的 expected/final point 与 action response 完全一致。
 - `--no-hud` / `VIRTUALHID_NO_HUD=1` 对 `VIRTUALHID_VISUALIZE_HID=1` 或 `--visualize-hid` 有禁用优先级。
 - HUD sink 的开启/关闭状态来自 VirtualHID 本地控制设置，而不是单次 `hid_action` payload。
-- `--hud-show` / `--hud-hide` / `VIRTUALHID_HUD_*` 能改变 `hudSettings`，但不会改变 action events 或 verification。
+- `--hud-show` / `--hud-hide` / `VIRTUALHID_HUD_*` 能改变 `hudSettings`，包括 `persistent` 常驻显示开关，但不会改变 action events 或 verification。
 
 建议配套运行：
 
 ```bash
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 ```

@@ -20,7 +20,12 @@ if [[ "$DISPLAY_CURRENT_STATE" == "0" ]]; then
   exit 1
 fi
 
-env DEVELOPER_DIR="${DEVELOPER_DIR:-/tmp/OldXcode.app}" \
+DEVELOPER_ENV=(env)
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  DEVELOPER_ENV+=(DEVELOPER_DIR="$DEVELOPER_DIR")
+fi
+
+"${DEVELOPER_ENV[@]}" \
   CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/virtualhid-hud-clang-cache}" \
   SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/virtualhid-hud-swiftpm-cache}" \
   xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH" >/dev/null

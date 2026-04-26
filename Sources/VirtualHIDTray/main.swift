@@ -17,6 +17,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
         case scrollEffects
         case keyboardEffects
         case status
+        case persistent
 
         var title: String {
             switch self {
@@ -31,6 +32,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
             case .scrollEffects: return "显示滚动特效"
             case .keyboardEffects: return "显示键盘 / 输入 / 粘贴特效"
             case .status: return "显示动作状态文字"
+            case .persistent: return "常驻显示 HUD"
             }
         }
     }
@@ -153,7 +155,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate {
 
     private func buildPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 548),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 580),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false

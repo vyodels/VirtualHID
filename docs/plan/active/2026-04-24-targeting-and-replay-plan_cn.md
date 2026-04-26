@@ -41,7 +41,7 @@ M2-M7 已经把基础执行、学习闭环、长期摘要分析补齐，但还�
 - `ExecutionPlanner` 已能把 `target + geometry + primitives` 生成结构化 plan，并把 viewport/document 坐标映射成 screen 坐标；真实滚动后重新采样/二次换算仍待后续。
 - `OutcomeVerifier` 已返回注入事件数、最终指针、期望指针、焦点确认等结构化证据；PassiveObserver 回声和页面语义成功仍由后续链路补齐。
 - `humanization_analysis.py` 已能消费 replay/compact trace 字段并输出 replay-aware tuning 建议。
-- Swift 工具链收口为 `DEVELOPER_DIR=/tmp/OldXcode.app` + `/tmp` module cache + `--disable-sandbox` + scratch path；当前完整 `swift test` 已通过 27 个测试。
+- Swift 工具链已切回系统当前 `xcode-select` 指向的 Xcode / Command Line Tools；smoke 脚本只在调用方显式设置 `DEVELOPER_DIR` 时透传，不再依赖 `/tmp/OldXcode.app` 临时兼容路径。
 
 真实环境已通过 `control-server-smoke.sh` / `mcp-smoke.sh`，Unix socket daemon 和 MCP shim 端到端可用；这确认剩余阻断不再是 Swift SDK mismatch 或 socket transport。
 

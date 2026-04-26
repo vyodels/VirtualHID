@@ -4,9 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/tmp/OldXcode.app}"
+DEVELOPER_ENV=(env)
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  DEVELOPER_ENV+=(DEVELOPER_DIR="$DEVELOPER_DIR")
+fi
 BUILD_PATH="${SWIFT_BUILD_PATH:-/tmp/virtualhid-hud-spm-build}"
-env DEVELOPER_DIR="$DEVELOPER_DIR" \
+"${DEVELOPER_ENV[@]}" \
   CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/virtualhid-hud-clang-cache}" \
   SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/virtualhid-hud-swiftpm-cache}" \
   xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH" >/tmp/virtualhid-hud-build.log
@@ -16,7 +19,7 @@ DISABLED_JSON="$("$DAEMON" --smoke-hud-contract --no-hud)"
 ENABLED_JSON="$("$DAEMON" --smoke-hud-contract --visualize-hid)"
 CLI_NO_HUD_JSON="$(VIRTUALHID_VISUALIZE_HID=1 "$DAEMON" --smoke-hud-contract --no-hud)"
 ENV_NO_HUD_JSON="$(VIRTUALHID_NO_HUD=1 "$DAEMON" --smoke-hud-contract --visualize-hid)"
-SETTINGS_JSON="$(VIRTUALHID_HUD_CLEAR_DELAY_SECONDS=7.5 VIRTUALHID_HUD_HIDE=trail,expected,keyboard "$DAEMON" --smoke-hud-contract --visualize-hid --hud-control --hud-hide status --hud-show actual)"
+SETTINGS_JSON="$(VIRTUALHID_HUD_CLEAR_DELAY_SECONDS=7.5 VIRTUALHID_HUD_HIDE=trail,expected,keyboard,persistent "$DAEMON" --smoke-hud-contract --visualize-hid --hud-control --hud-hide status --hud-show actual)"
 
 DISABLED_JSON="$DISABLED_JSON" \
 ENABLED_JSON="$ENABLED_JSON" \
@@ -57,6 +60,7 @@ assert enabled["callback"]["recordedEvents"] == enabled["response"]["eventCount"
 assert enabled["callback"]["finishedEvents"] == enabled["response"]["eventCount"], enabled
 assert enabled["callback"]["expectedPointer"] == enabled["response"]["expectedPointer"], enabled
 assert enabled["callback"]["finalPointer"] == enabled["response"]["finalPointer"], enabled
+assert enabled["hudSettings"]["persistent"] is True, enabled
 
 assert cli_no_hud["hudEnabled"] is False, cli_no_hud
 assert env_no_hud["hudEnabled"] is False, env_no_hud
@@ -72,6 +76,7 @@ assert hud_settings["expectedPoint"] is False, settings_payload
 assert hud_settings["keyboardEffects"] is False, settings_payload
 assert hud_settings["status"] is False, settings_payload
 assert hud_settings["actualPoint"] is True, settings_payload
+assert hud_settings["persistent"] is False, settings_payload
 assert settings_payload["callback"]["recordedEvents"] == settings_payload["response"]["eventCount"], settings_payload
 
 print("hud-smoke OK")

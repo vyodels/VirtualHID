@@ -47,13 +47,11 @@ VirtualHID 是一个面向 macOS 的拟人化输入执行与学习仓库。它�
 ## 常用命令
 
 ```bash
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift build --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 
-env DEVELOPER_DIR=/tmp/OldXcode.app \
-  CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/tmp/virtualhid-swiftpm-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 
@@ -128,8 +126,8 @@ VIRTUALHID_HUD_CONTROL=1 VIRTUALHID_VISUALIZE_HID=1 PORT=8123 python3 scripts/re
 - 网页目标的 `host` 必须来自 browser active tab、tab list、snapshot URL 或上游已规范化的 `browser_target.host`；`target.host` 与 `context.host` 同时存在时必须一致，不能由 Agent 或 VirtualHID 按站点名编造
 - `hid_action` 必须携带非空 `primitives`；缺失或空数组返回 `E_PRIMITIVES_REQUIRED`。VirtualHID 只返回 HID 执行计划、事件、实际落点和轨迹证据；下载链接、下载记录、本地 artifact 路径和业务完成判断属于 browser / recruit-agent。
 - `target / geometry` 是 action 顶层执行字段，不进入 `ActionContext`，不参与业务语义判断
-- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力，可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 在 daemon 启动时开启，开启后作用于该 daemon 处理的每一次 `hid_action`；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
-- `vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动托盘即代表启动 VirtualHID 本地主程序，托盘会自动拉起带 `--hud-control --visualize-hid` 的 daemon。点击图标打开 HUD 配置面板，可切换 HUD、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本和清除延迟。托盘通过 daemon socket 调用 `hud.state / hud.configure`；这些开关只影响 VirtualHID 本地可视化，不进入 `hid_action` payload，也不改变执行/验证结果。
+- HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力，可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 在 daemon 启动时开启，开启后作用于该 daemon 处理的每一次 `hid_action`；常驻显示开启时，action 结束后 HUD 会保留最后一次目标窗口、状态和落点，清除延迟只清掉动态轨迹/特效；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
+- `vhid-tray` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动托盘即代表启动 VirtualHID 本地主程序，托盘会自动拉起带 `--hud-control --visualize-hid` 的 daemon。点击图标打开 HUD 配置面板，可切换 HUD、常驻显示、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本和清除延迟。托盘通过 daemon socket 调用 `hud.state / hud.configure`；这些开关只影响 VirtualHID 本地可视化，不进入 `hid_action` payload，也不改变执行/验证结果。
 - `global` / `auto` 写入会先由 VirtualHID 激活目标应用，再校验 `targetApp.frontmost == true`
 - `pid` 模式只允许 `mouseMoved / scrollWheel`，不可用于 click / drag / type / pasteText / key
 - `hid_unlock` 不只是解除 kill switch，也必须释放/清空 VirtualHID 观测到的卡住修饰键和鼠标按钮状态，避免下一次动作继承脏输入状态

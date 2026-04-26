@@ -4,7 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/tmp/OldXcode.app}"
+DEVELOPER_ENV=(env)
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  DEVELOPER_ENV+=(DEVELOPER_DIR="$DEVELOPER_DIR")
+fi
 BUILD_PATH="${SWIFT_BUILD_PATH:-/tmp/virtualhid-analysis-apply-spm-build}"
 HISTORY="$(mktemp "${TMPDIR:-/tmp}/virtualhid-analysis-history.XXXXXX.jsonl")"
 REPORT="$(mktemp "${TMPDIR:-/tmp}/virtualhid-analysis-report.XXXXXX.json")"
@@ -70,7 +73,7 @@ python3 scripts/humanization_analysis.py \
   --history "$HISTORY" \
   --instruction-key "task:stage:sig-apply:click" >"$REPORT"
 
-env DEVELOPER_DIR="$DEVELOPER_DIR" \
+"${DEVELOPER_ENV[@]}" \
   CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/virtualhid-analysis-clang-cache}" \
   SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/virtualhid-analysis-swiftpm-cache}" \
   xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH" >/tmp/virtualhid-analysis-build.log

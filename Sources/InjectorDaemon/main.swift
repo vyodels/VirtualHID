@@ -547,7 +547,8 @@ private func hudSettingsObject(_ settings: HIDOverlaySettings) -> [String: Any] 
         "dragEffects": settings.showDragEffects,
         "scrollEffects": settings.showScrollEffects,
         "keyboardEffects": settings.showKeyboardEffects,
-        "status": settings.showStatus
+        "status": settings.showStatus,
+        "persistent": settings.persistent
     ]
 }
 
@@ -573,6 +574,7 @@ private func applyHUDComponents(_ rawValue: String, visible: Bool, settings: ino
             settings.showScrollEffects = visible
             settings.showKeyboardEffects = visible
             settings.showStatus = visible
+            settings.persistent = visible
         case "window", "window-frame", "frame", "target-window":
             settings.showWindowFrame = visible
         case "diagnostic", "hud-active":
@@ -595,6 +597,8 @@ private func applyHUDComponents(_ rawValue: String, visible: Bool, settings: ino
             settings.showKeyboardEffects = visible
         case "status", "status-text":
             settings.showStatus = visible
+        case "persistent", "persistent-hud", "hud-persistent", "always-on", "resident":
+            settings.persistent = visible
         case "mouse-effects", "events", "event-effects":
             settings.showClickEffects = visible
             settings.showDragEffects = visible

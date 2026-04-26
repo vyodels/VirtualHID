@@ -4,9 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/tmp/OldXcode.app}"
+DEVELOPER_ENV=(env)
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  DEVELOPER_ENV+=(DEVELOPER_DIR="$DEVELOPER_DIR")
+fi
 BUILD_PATH="${SWIFT_BUILD_PATH:-/tmp/virtualhid-profile-spm-build}"
-env DEVELOPER_DIR="$DEVELOPER_DIR" \
+"${DEVELOPER_ENV[@]}" \
   CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/virtualhid-profile-clang-cache}" \
   SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/virtualhid-profile-swiftpm-cache}" \
   xcrun swift build --disable-sandbox --scratch-path "$BUILD_PATH" >/tmp/virtualhid-profile-build.log
