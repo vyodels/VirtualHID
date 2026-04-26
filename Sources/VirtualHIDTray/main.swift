@@ -4,6 +4,39 @@ import Foundation
 import VirtualHIDRuntime
 
 final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum ManagementSection: Int, CaseIterable {
+        case overview
+        case hud
+        case learning
+        case runtime
+        case security
+
+        var title: String {
+            switch self {
+            case .overview: return "总览"
+            case .hud: return "HUD 可视化"
+            case .learning: return "学习预训练"
+            case .runtime: return "运行时"
+            case .security: return "安全"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .overview:
+                return "查看 VirtualHID.app 的运行状态、HUD、学习样本和 MCP 接入概览。"
+            case .hud:
+                return "配置透明穿透浮层、轨迹、落点、事件特效和常驻显示。"
+            case .learning:
+                return "开启被动学习或专项训练，沉淀鼠标轨迹、节奏和点击行为模板。"
+            case .runtime:
+                return "管理本地 runtime 状态、刷新、重启和退出。"
+            case .security:
+                return "查看权限、kill switch 和执行边界；这些设置不改变 Agent 决策。"
+            }
+        }
+    }
+
     private enum Component: String, CaseIterable {
         case windowFrame
         case diagnostic
@@ -43,6 +76,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastStatusClickAt: Date?
     private var quickMenu: NSMenu?
     private var panel: NSPanel?
+    private var selectedSection: ManagementSection = .overview
+    private var sidebarButtons = [ManagementSection: NSButton]()
+    private var contentStack: NSStackView?
     private var statusLabel: NSTextField?
     private var enabledCheckbox: NSButton?
     private var delayField: NSTextField?
@@ -130,6 +166,35 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshAction(_ sender: Any?) {
         refreshState()
+    }
+
+    @objc private func unlockAction(_ sender: Any?) {
+        do {
+            _ = try call(method: "unlock", params: [:])
+            refreshState()
+        } catch {
+            lastState = .offline(message: localizedErrorMessage(error))
+            updateControls()
+        }
+    }
+
+    @objc private func stopAction(_ sender: Any?) {
+        do {
+            _ = try call(method: "stop", params: [:])
+            refreshState()
+        } catch {
+            lastState = .offline(message: localizedErrorMessage(error))
+            updateControls()
+        }
+    }
+
+    @objc private func selectSectionAction(_ sender: NSButton) {
+        guard let section = ManagementSection(rawValue: sender.tag) else {
+            return
+        }
+        selectedSection = section
+        rebuildContent()
+        updateControls()
     }
 
     @objc private func openManagementAction(_ sender: Any?) {
@@ -318,47 +383,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         content.spacing = 14
         content.translatesAutoresizingMaskIntoConstraints = false
         content.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        contentStack = content
         root.addArrangedSubview(content)
 
-        let title = label("VirtualHID 管理中心", size: 24, weight: .bold)
-        let subtitle = label("常驻 macOS runtime，统一管理 HID 可视化、学习训练和 MCP 接入状态。", size: 12, color: .secondaryLabelColor)
-        content.addArrangedSubview(title)
-        content.addArrangedSubview(subtitle)
-
-        let overview = NSStackView()
-        overview.orientation = .horizontal
-        overview.spacing = 10
-        overview.addArrangedSubview(metricCard(title: "运行时", value: runtime == nil ? "离线" : "在线", caption: "VirtualHID.app"))
-        overview.addArrangedSubview(metricCard(title: "HUD", value: lastState.enabled ? "开启" : "关闭", caption: "透明轨迹层"))
-        overview.addArrangedSubview(metricCard(title: "学习", value: lastLearningState.enabled ? "开启" : "关闭", caption: lastLearningState.modeText))
-        overview.addArrangedSubview(metricCard(title: "样本", value: "\(lastLearningState.persistedSamples)", caption: "已持久化"))
-        content.addArrangedSubview(overview)
-
-        let middle = NSStackView()
-        middle.orientation = .horizontal
-        middle.alignment = .top
-        middle.spacing = 14
-        middle.addArrangedSubview(makeHUDCard())
-        middle.addArrangedSubview(makeLearningCard())
-        content.addArrangedSubview(middle)
-
-        let runtimeCard = CardView()
-        runtimeCard.widthAnchor.constraint(equalToConstant: 680).isActive = true
-        let runtimeStack = cardStack()
-        runtimeStack.addArrangedSubview(label("运行时与安全", size: 15, weight: .semibold))
-        let runtimeStatus = label("", size: 12, weight: .medium)
-        runtimeStatus.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
-        runtimeStack.addArrangedSubview(runtimeStatus)
-        statusLabel = runtimeStatus
-        let runtimeButtons = NSStackView()
-        runtimeButtons.orientation = .horizontal
-        runtimeButtons.spacing = 8
-        runtimeButtons.addArrangedSubview(actionButton("刷新状态", action: #selector(refreshAction(_:))))
-        runtimeButtons.addArrangedSubview(actionButton("重启 Runtime", action: #selector(startDaemonAction(_:))))
-        runtimeButtons.addArrangedSubview(actionButton("退出", action: #selector(quitAction(_:))))
-        runtimeStack.addArrangedSubview(runtimeButtons)
-        runtimeCard.addContent(runtimeStack)
-        content.addArrangedSubview(runtimeCard)
+        rebuildContent()
 
         panel.contentView = effect
         effect.addSubview(root)
@@ -376,9 +404,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let stack = cardStack(spacing: 12)
         stack.addArrangedSubview(label("VHID", size: 22, weight: .heavy))
         stack.addArrangedSubview(label("可视化与学习", size: 11, color: .secondaryLabelColor))
-        for item in ["总览", "HUD 可视化", "学习与训练", "运行时", "安全"] {
-            let row = label(item, size: 13, weight: item == "总览" ? .semibold : .regular)
-            row.textColor = item == "总览" ? .controlAccentColor : .labelColor
+        for section in ManagementSection.allCases {
+            let row = navigationButton(section)
+            sidebarButtons[section] = row
             stack.addArrangedSubview(row)
         }
         let spacer = NSView()
@@ -386,7 +414,238 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stack.addArrangedSubview(spacer)
         stack.addArrangedSubview(label("单击托盘：快捷菜单\n双击托盘：管理中心", size: 11, color: .secondaryLabelColor))
         sidebar.addContent(stack)
+        updateSidebarSelection()
         return sidebar
+    }
+
+    private func navigationButton(_ section: ManagementSection) -> NSButton {
+        let button = NSButton(title: section.title, target: self, action: #selector(selectSectionAction(_:)))
+        button.tag = section.rawValue
+        button.isBordered = false
+        button.alignment = .left
+        button.controlSize = .large
+        button.font = NSFont.systemFont(ofSize: 13, weight: section == selectedSection ? .semibold : .regular)
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 9
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        button.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        return button
+    }
+
+    private func rebuildContent() {
+        guard let contentStack else {
+            return
+        }
+        for view in contentStack.arrangedSubviews {
+            contentStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        clearContentBindings()
+
+        let title = label(selectedSection.title, size: 24, weight: .bold)
+        let subtitle = label(selectedSection.subtitle, size: 12, color: .secondaryLabelColor)
+        subtitle.maximumNumberOfLines = 2
+        subtitle.preferredMaxLayoutWidth = 660
+        contentStack.addArrangedSubview(title)
+        contentStack.addArrangedSubview(subtitle)
+        contentStack.addArrangedSubview(makeSectionContent(selectedSection))
+        updateSidebarSelection()
+    }
+
+    private func clearContentBindings() {
+        statusLabel = nil
+        enabledCheckbox = nil
+        delayField = nil
+        componentCheckboxes.removeAll()
+        learningStatusLabel = nil
+        learningEnabledCheckbox = nil
+        learningModePopup = nil
+        trainingLabelField = nil
+        trainingHostField = nil
+        trainingActionField = nil
+    }
+
+    private func makeSectionContent(_ section: ManagementSection) -> NSView {
+        switch section {
+        case .overview:
+            return makeOverviewSection()
+        case .hud:
+            return makeSplitSection(primary: makeHUDCard(), secondary: makeHUDGuideCard())
+        case .learning:
+            return makeSplitSection(primary: makeLearningCard(), secondary: makeLearningGuideCard())
+        case .runtime:
+            return makeRuntimeSection()
+        case .security:
+            return makeSecuritySection()
+        }
+    }
+
+    private func makeOverviewSection() -> NSView {
+        let stack = cardStack(spacing: 14)
+        stack.widthAnchor.constraint(equalToConstant: 680).isActive = true
+
+        let overview = NSStackView()
+        overview.orientation = .horizontal
+        overview.spacing = 10
+        overview.addArrangedSubview(metricCard(title: "运行时", value: runtime == nil ? "离线" : "在线", caption: "VirtualHID.app"))
+        overview.addArrangedSubview(metricCard(title: "HUD", value: lastState.enabled ? "开启" : "关闭", caption: "透明轨迹层"))
+        overview.addArrangedSubview(metricCard(title: "学习", value: lastLearningState.enabled ? "开启" : "关闭", caption: lastLearningState.modeText))
+        overview.addArrangedSubview(metricCard(title: "样本", value: "\(lastLearningState.persistedSamples)", caption: "已持久化"))
+        stack.addArrangedSubview(overview)
+
+        let shortcuts = NSStackView()
+        shortcuts.orientation = .horizontal
+        shortcuts.alignment = .top
+        shortcuts.spacing = 14
+        shortcuts.addArrangedSubview(makeShortcutCard(title: "HUD 可视化", body: "控制轨迹、落点、点击/滚动/输入特效和常驻显示。", section: .hud))
+        shortcuts.addArrangedSubview(makeShortcutCard(title: "学习预训练", body: "开启被动学习或进入专项训练，沉淀可复用的人类行为模板。", section: .learning))
+        stack.addArrangedSubview(shortcuts)
+
+        stack.addArrangedSubview(makeRuntimeCard(title: "运行时状态"))
+        return stack
+    }
+
+    private func makeSplitSection(primary: NSView, secondary: NSView) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .top
+        stack.spacing = 14
+        stack.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        stack.addArrangedSubview(primary)
+        stack.addArrangedSubview(secondary)
+        return stack
+    }
+
+    private func makeRuntimeSection() -> NSView {
+        let stack = cardStack(spacing: 14)
+        stack.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        stack.addArrangedSubview(makeRuntimeCard(title: "运行时与 MCP"))
+        stack.addArrangedSubview(makeInfoCard(
+            title: "正式入口",
+            body: [
+                "VirtualHID.app 持有 runtime、HUD、学习控制和 MCP socket。",
+                "MCP 只通过 hid_* 工具进入；管理 UI 不生成 HID 动作，也不参与业务决策。",
+                "默认 socket：~/Library/Application Support/VirtualHID/virtualhid.sock"
+            ],
+            width: 680
+        ))
+        return stack
+    }
+
+    private func makeSecuritySection() -> NSView {
+        let stack = cardStack(spacing: 14)
+        stack.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        stack.addArrangedSubview(makeInfoCard(
+            title: "安全边界",
+            body: [
+                "VirtualHID 不访问 DOM、不解析页面、不发网络请求。",
+                "点击、拖拽、滚动和输入全局串行执行，避免鼠标/键盘事件并发交叉。",
+                "Kill switch 与 unlock 只清理 VirtualHID 的输入状态，不改变上游 Agent 的业务目标。"
+            ],
+            width: 680
+        ))
+
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        let cardContent = cardStack()
+        cardContent.addArrangedSubview(label("安全操作", size: 15, weight: .semibold))
+        cardContent.addArrangedSubview(label("用于异常时停止当前动作或释放卡住的修饰键/鼠标按钮。", size: 12, color: .secondaryLabelColor))
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.addArrangedSubview(actionButton("停止当前动作", action: #selector(stopAction(_:))))
+        buttons.addArrangedSubview(actionButton("解除 Kill Switch / 清理输入状态", action: #selector(unlockAction(_:))))
+        buttons.addArrangedSubview(actionButton("刷新状态", action: #selector(refreshAction(_:))))
+        cardContent.addArrangedSubview(buttons)
+        card.addContent(cardContent)
+        stack.addArrangedSubview(card)
+        return stack
+    }
+
+    private func makeRuntimeCard(title: String) -> NSView {
+        let runtimeCard = CardView()
+        runtimeCard.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        let runtimeStack = cardStack()
+        runtimeStack.addArrangedSubview(label(title, size: 15, weight: .semibold))
+        let runtimeStatus = label("", size: 12, weight: .medium)
+        runtimeStatus.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        runtimeStatus.maximumNumberOfLines = 4
+        runtimeStack.addArrangedSubview(runtimeStatus)
+        statusLabel = runtimeStatus
+        let runtimeButtons = NSStackView()
+        runtimeButtons.orientation = .horizontal
+        runtimeButtons.spacing = 8
+        runtimeButtons.addArrangedSubview(actionButton("刷新状态", action: #selector(refreshAction(_:))))
+        runtimeButtons.addArrangedSubview(actionButton("重启 Runtime", action: #selector(startDaemonAction(_:))))
+        runtimeButtons.addArrangedSubview(actionButton("退出", action: #selector(quitAction(_:))))
+        runtimeStack.addArrangedSubview(runtimeButtons)
+        runtimeCard.addContent(runtimeStack)
+        return runtimeCard
+    }
+
+    private func makeShortcutCard(title: String, body: String, section: ManagementSection) -> NSView {
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: 333).isActive = true
+        let stack = cardStack(spacing: 8)
+        stack.addArrangedSubview(label(title, size: 16, weight: .semibold))
+        let text = label(body, size: 12, color: .secondaryLabelColor)
+        text.maximumNumberOfLines = 3
+        text.preferredMaxLayoutWidth = 292
+        stack.addArrangedSubview(text)
+        let button = actionButton("打开 \(title)", action: #selector(selectSectionAction(_:)))
+        button.tag = section.rawValue
+        stack.addArrangedSubview(button)
+        card.addContent(stack)
+        return card
+    }
+
+    private func makeHUDGuideCard() -> NSView {
+        makeInfoCard(
+            title: "显示规则",
+            body: [
+                "HUD 只展示 VirtualHID action events、execution context 和 verification。",
+                "expected/final point 与轨迹不能由网页、browser 或 recruit-agent mock 补造。",
+                "常驻显示只保留最近一次目标窗口、状态和落点；动态轨迹按清除延迟消失。"
+            ]
+        )
+    }
+
+    private func makeLearningGuideCard() -> NSView {
+        makeInfoCard(
+            title: "学习边界",
+            body: [
+                "被动学习只在显式开启后采集真实鼠标事件流。",
+                "专项训练用于沉淀通用行为特征，不把 mock 页面数据当真实站点 skill。",
+                "学习模板只影响轨迹、节奏、hold/inter-click 等执行参数。"
+            ]
+        )
+    }
+
+    private func makeInfoCard(title: String, body: [String], width: CGFloat = 330) -> NSView {
+        let card = CardView()
+        card.widthAnchor.constraint(equalToConstant: width).isActive = true
+        let stack = cardStack(spacing: 10)
+        stack.addArrangedSubview(label(title, size: 16, weight: .semibold))
+        for line in body {
+            let row = label("• \(line)", size: 12, color: .secondaryLabelColor)
+            row.maximumNumberOfLines = 0
+            row.preferredMaxLayoutWidth = width - 38
+            stack.addArrangedSubview(row)
+        }
+        card.addContent(stack)
+        return card
+    }
+
+    private func updateSidebarSelection() {
+        for (section, button) in sidebarButtons {
+            let selected = section == selectedSection
+            button.font = NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
+            button.contentTintColor = selected ? .controlAccentColor : .labelColor
+            button.layer?.backgroundColor = selected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+                : NSColor.clear.cgColor
+        }
     }
 
     private func makeHUDCard() -> NSView {
