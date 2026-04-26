@@ -217,10 +217,13 @@ public final class ControlService {
         }
         let primitives = planned.primitives
         let options = parseOptions(params["options"] as? [String: Any])
+        let semanticEvidence = parseSemanticEvidence(params)
         let requestedMode = options.postMode ?? configuration.defaultPostMode
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
         let profileResult = applyProfiles(to: primitives, context: context)
         let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode, eventSink: hidEventSink)
+        let observerStartId = supervisor.observer.tail(limit: 1).last?.id
+        let observerWasEnabled = supervisor.observer.isEnabled
 
         lock.withLock {
             currentExecutor = executor
@@ -240,11 +243,21 @@ public final class ControlService {
             )
             let result = try executor.execute(request)
             let response = try resultObject(result)
+            let observedEvents = supervisor.observer.tail(sinceEventId: observerStartId, limit: 80)
+            let observerEvidence = observerEvidence(
+                result: result,
+                observedEvents: observedEvents,
+                observerEnabled: observerWasEnabled,
+                dryRun: options.dryRun,
+                sinceEventId: observerStartId
+            )
             let evidence = OutcomeVerifier.evidence(
                 result: result,
                 expectedFinalPoint: expectedFinalPoint(from: profileResult.primitives),
                 focusConfirmed: FocusController.isFrontmost(app: target.app),
-                observerEcho: nil,
+                observerEcho: observerEvidence.status == "echoed",
+                observer: observerEvidence,
+                semantic: semanticEvidence,
                 tolerancePx: expectedFinalTolerancePx(from: profileResult.primitives)
             )
             hidEventSink?.hidActionDidFinish(
@@ -276,6 +289,13 @@ public final class ControlService {
                 "applied": profileResult.applied,
                 "templateIds": profileResult.templateIds
             ]
+            enriched["daemonLearning"] = daemonLearningObject(
+                result: result,
+                context: context,
+                primitives: profileResult.primitives,
+                options: options,
+                evidence: evidence
+            )
             enriched["targetApp"] = targetEvidenceObject(target)
             enriched["plan"] = try encodableObject(planned.plan)
             if let geometryResolution {
@@ -623,6 +643,223 @@ public final class ControlService {
                 throw ControlServerError.coded("E_UNKNOWN", "unsupported primitive type \(type)")
             }
         }
+    }
+
+    private func observerEvidence(
+        result: ActionResult,
+        observedEvents: [ObservedEvent],
+        observerEnabled: Bool,
+        dryRun: Bool,
+        sinceEventId: String?
+    ) -> OutcomeEvidence.Observer {
+        if dryRun {
+            return OutcomeEvidence.Observer(
+                status: "dryRunNotObserved",
+                observedEvents: 0,
+                matchedEvents: 0,
+                sinceEventId: sinceEventId,
+                detail: "dry-run returns planned HID events without posting CGEvents"
+            )
+        }
+        guard observerEnabled else {
+            return OutcomeEvidence.Observer(
+                status: "notEnabled",
+                observedEvents: 0,
+                matchedEvents: 0,
+                sinceEventId: sinceEventId,
+                detail: "PassiveObserver was not enabled for this action"
+            )
+        }
+        let matched = matchedObservedEvents(injected: result.events, observed: observedEvents)
+        if matched > 0 {
+            return OutcomeEvidence.Observer(
+                status: "echoed",
+                observedEvents: observedEvents.count,
+                matchedEvents: matched,
+                sinceEventId: sinceEventId
+            )
+        }
+        return OutcomeEvidence.Observer(
+            status: "notObserved",
+            observedEvents: observedEvents.count,
+            matchedEvents: 0,
+            sinceEventId: sinceEventId,
+            detail: "VirtualHID marks its own CGEvents, and PassiveObserver filters self-marked events; semantic success must be confirmed by Agent/browser"
+        )
+    }
+
+    private func matchedObservedEvents(injected: [InjectedEvent], observed: [ObservedEvent]) -> Int {
+        var remaining = observed
+        var matched = 0
+        for injectedEvent in injected {
+            guard let index = remaining.firstIndex(where: { observedEventMatches(injected: injectedEvent, observed: $0) }) else {
+                continue
+            }
+            matched += 1
+            remaining.remove(at: index)
+        }
+        return matched
+    }
+
+    private func observedEventMatches(injected: InjectedEvent, observed: ObservedEvent) -> Bool {
+        guard injected.type == observed.type else {
+            return false
+        }
+        guard let injectedPoint = injected.location, let observedPoint = observed.point else {
+            return true
+        }
+        return hypot(injectedPoint.x - observedPoint.x, injectedPoint.y - observedPoint.y) <= 3
+    }
+
+    private func parseSemanticEvidence(_ params: [String: Any]) -> OutcomeEvidence.Semantic {
+        let object = params["semantic"] as? [String: Any]
+            ?? params["semanticConfirmation"] as? [String: Any]
+            ?? params["semantic_confirmation"] as? [String: Any]
+        guard let object else {
+            return .notProvided()
+        }
+        let verified = object["verified"] as? Bool
+        let status = object["status"] as? String
+            ?? verified.map { $0 ? "verified" : "rejected" }
+            ?? "provided"
+        return OutcomeEvidence.Semantic(
+            status: status,
+            verified: verified,
+            source: object["source"] as? String,
+            detail: object["detail"] as? String ?? object["reason"] as? String
+        )
+    }
+
+    private func daemonLearningObject(
+        result: ActionResult,
+        context: ActionContext,
+        primitives: [ActionPrimitive],
+        options: ActionOptions,
+        evidence: OutcomeEvidence
+    ) -> [String: Any] {
+        guard !ProfileStore.isSensitiveRole(context.element?.role) else {
+            return ["committed": false, "reason": "sensitive_role"]
+        }
+        guard let input = replayTraceInput(result: result, context: context, primitives: primitives, options: options, evidence: evidence) else {
+            return ["committed": false, "reason": "no_replay_path"]
+        }
+        let instructionKey = replayInstructionKey(context: context, actionType: input.actionType)
+        do {
+            let commit = try profileStore.commitReplayTrace(input: input, instructionKey: instructionKey)
+            return [
+                "committed": true,
+                "traceId": commit.traceId,
+                "replayId": commit.replayId,
+                "instructionKey": instructionKey,
+                "replayFingerprint": try encodableObject(commit.fingerprint)
+            ]
+        } catch {
+            return [
+                "committed": false,
+                "reason": "commit_failed",
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func replayTraceInput(
+        result: ActionResult,
+        context: ActionContext,
+        primitives: [ActionPrimitive],
+        options: ActionOptions,
+        evidence: OutcomeEvidence
+    ) -> TraceInput? {
+        let points = result.events.compactMap {
+            $0.location.map { TracePoint(x: $0.x, y: $0.y) }
+        }
+        guard !points.isEmpty || result.events.contains(where: { $0.virtualKey != nil }) else {
+            return nil
+        }
+        let actionType = primitives.first.map(profileActionType(for:)) ?? "action"
+        let finalPoint = evidence.finalPointer.map { TracePoint(x: $0.x, y: $0.y) }
+        let expectedPoint = evidence.expectedPointer.map { TracePoint(x: $0.x, y: $0.y) }
+        let landingError: Double?
+        if let finalPoint, let expectedPoint {
+            landingError = hypot(finalPoint.x - expectedPoint.x, finalPoint.y - expectedPoint.y)
+        } else {
+            landingError = nil
+        }
+        return TraceInput(
+            ts: Int64(Date().timeIntervalSince1970 * 1000),
+            source: options.dryRun ? "hid-dry-run" : "hid",
+            host: context.host,
+            elementSig: context.element?.sig,
+            taskId: context.taskId,
+            stage: context.stage,
+            actionType: actionType,
+            payload: TracePayload(
+                eventId: result.id,
+                type: result.events.last?.type ?? actionType,
+                point: finalPoint,
+                keyCode: result.events.compactMap(\.virtualKey).last,
+                points: points,
+                origin: points.first,
+                targetPoint: expectedPoint,
+                landingErrorPx: landingError,
+                durationMs: Double(result.elapsedMs),
+                segmentMs: replaySegmentDurations(from: result.events),
+                clickHoldMs: replayHoldDurations(from: result.events),
+                interClickMs: replayInterClickDurations(from: result.events)
+            )
+        )
+    }
+
+    private func replayInstructionKey(context: ActionContext, actionType: String) -> String {
+        [
+            context.taskId,
+            context.stage,
+            context.element?.sig,
+            actionType
+        ]
+        .compactMap { value -> String? in
+            guard let value, !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+        .joined(separator: ":")
+    }
+
+    private func replaySegmentDurations(from events: [InjectedEvent]) -> [Double] {
+        eventDates(events).adjacentPairs().map { max(0, $1.timeIntervalSince($0) * 1000) }
+    }
+
+    private func replayHoldDurations(from events: [InjectedEvent]) -> [Double] {
+        pairedDurations(events: events, startTypes: ["leftMouseDown", "rightMouseDown", "otherMouseDown", "keyDown"], endTypes: ["leftMouseUp", "rightMouseUp", "otherMouseUp", "keyUp"])
+    }
+
+    private func replayInterClickDurations(from events: [InjectedEvent]) -> [Double] {
+        let upDates = events.filter { ["leftMouseUp", "rightMouseUp", "otherMouseUp"].contains($0.type) }.compactMap(eventDate)
+        return upDates.adjacentPairs().map { max(0, $1.timeIntervalSince($0) * 1000) }
+    }
+
+    private func pairedDurations(events: [InjectedEvent], startTypes: Set<String>, endTypes: Set<String>) -> [Double] {
+        var starts = [Date]()
+        var durations = [Double]()
+        for event in events {
+            guard let date = eventDate(event) else {
+                continue
+            }
+            if startTypes.contains(event.type) {
+                starts.append(date)
+            } else if endTypes.contains(event.type), let start = starts.popLast() {
+                durations.append(max(0, date.timeIntervalSince(start) * 1000))
+            }
+        }
+        return durations
+    }
+
+    private func eventDates(_ events: [InjectedEvent]) -> [Date] {
+        events.compactMap(eventDate)
+    }
+
+    private func eventDate(_ event: InjectedEvent) -> Date? {
+        isoFormatter.date(from: event.timestamp)
     }
 
     private func applyProfiles(to primitives: [ActionPrimitive], context: ActionContext) -> (primitives: [ActionPrimitive], applied: Bool, templateIds: [String]) {
@@ -1117,6 +1354,15 @@ private func parseDoubleArray(_ value: Any?) -> [Double] {
         return []
     }
     return values.compactMap(number)
+}
+
+private extension Array {
+    func adjacentPairs() -> [(Element, Element)] {
+        guard count > 1 else {
+            return []
+        }
+        return zip(self, dropFirst()).map { ($0, $1) }
+    }
 }
 
 private func mouseButton(_ rawValue: String?) -> MouseButton {

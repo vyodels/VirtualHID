@@ -409,6 +409,50 @@ public enum ExecutionPlanner {
 }
 
 public struct OutcomeEvidence: Codable, Equatable {
+    public struct Layer: Codable, Equatable {
+        public let status: String
+        public let detail: String?
+
+        public init(status: String, detail: String? = nil) {
+            self.status = status
+            self.detail = detail
+        }
+    }
+
+    public struct Observer: Codable, Equatable {
+        public let status: String
+        public let observedEvents: Int
+        public let matchedEvents: Int
+        public let sinceEventId: String?
+        public let detail: String?
+
+        public init(status: String, observedEvents: Int, matchedEvents: Int, sinceEventId: String? = nil, detail: String? = nil) {
+            self.status = status
+            self.observedEvents = observedEvents
+            self.matchedEvents = matchedEvents
+            self.sinceEventId = sinceEventId
+            self.detail = detail
+        }
+    }
+
+    public struct Semantic: Codable, Equatable {
+        public let status: String
+        public let verified: Bool?
+        public let source: String?
+        public let detail: String?
+
+        public init(status: String, verified: Bool? = nil, source: String? = nil, detail: String? = nil) {
+            self.status = status
+            self.verified = verified
+            self.source = source
+            self.detail = detail
+        }
+
+        public static func notProvided() -> Semantic {
+            Semantic(status: "notProvided", verified: nil, source: nil, detail: "semantic success must be supplied by Agent/browser")
+        }
+    }
+
     public let injectedEvents: Int
     public let finalPointer: CodablePoint?
     public let expectedPointer: CodablePoint?
@@ -416,6 +460,11 @@ public struct OutcomeEvidence: Codable, Equatable {
     public let focusConfirmed: Bool?
     public let observerEcho: Bool?
     public let semanticVerifiedByAgent: Bool?
+    public let injection: Layer
+    public let pointer: Layer
+    public let focus: Layer
+    public let observer: Observer
+    public let semantic: Semantic
 
     public init(
         injectedEvents: Int,
@@ -424,7 +473,9 @@ public struct OutcomeEvidence: Codable, Equatable {
         pointerWithinTolerance: Bool?,
         focusConfirmed: Bool?,
         observerEcho: Bool?,
-        semanticVerifiedByAgent: Bool? = nil
+        semanticVerifiedByAgent: Bool? = nil,
+        observer: Observer = Observer(status: "notProvided", observedEvents: 0, matchedEvents: 0),
+        semantic: Semantic = Semantic.notProvided()
     ) {
         self.injectedEvents = injectedEvents
         self.finalPointer = finalPointer
@@ -433,6 +484,20 @@ public struct OutcomeEvidence: Codable, Equatable {
         self.focusConfirmed = focusConfirmed
         self.observerEcho = observerEcho
         self.semanticVerifiedByAgent = semanticVerifiedByAgent
+        self.injection = Layer(
+            status: injectedEvents > 0 ? "emitted" : "noEvents",
+            detail: injectedEvents > 0 ? nil : "action produced no injectable events"
+        )
+        self.pointer = Layer(
+            status: pointerWithinTolerance.map { $0 ? "withinTolerance" : "outsideTolerance" } ?? "notApplicable",
+            detail: pointerWithinTolerance == nil ? "no pointer-bearing final event" : nil
+        )
+        self.focus = Layer(
+            status: focusConfirmed.map { $0 ? "confirmed" : "notConfirmed" } ?? "unknown",
+            detail: focusConfirmed == nil ? "focus was not checked" : nil
+        )
+        self.observer = observer
+        self.semantic = semantic
     }
 }
 
@@ -442,6 +507,8 @@ public enum OutcomeVerifier {
         expectedFinalPoint: CGPoint?,
         focusConfirmed: Bool?,
         observerEcho: Bool?,
+        observer: OutcomeEvidence.Observer = OutcomeEvidence.Observer(status: "notProvided", observedEvents: 0, matchedEvents: 0),
+        semantic: OutcomeEvidence.Semantic = OutcomeEvidence.Semantic.notProvided(),
         tolerancePx: Double = 2
     ) -> OutcomeEvidence {
         let final = result.events.reversed().compactMap(\.location).first
@@ -458,7 +525,10 @@ public enum OutcomeVerifier {
             expectedPointer: expected,
             pointerWithinTolerance: within,
             focusConfirmed: focusConfirmed,
-            observerEcho: observerEcho
+            observerEcho: observerEcho,
+            semanticVerifiedByAgent: semantic.verified,
+            observer: observer,
+            semantic: semantic
         )
     }
 }

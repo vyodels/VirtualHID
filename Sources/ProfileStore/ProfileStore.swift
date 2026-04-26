@@ -246,6 +246,18 @@ public struct TraceCommitResult: Codable, Equatable {
     }
 }
 
+public struct ReplayCommitResult: Codable, Equatable {
+    public let traceId: Int64
+    public let replayId: Int64
+    public let fingerprint: ReplayTraceFingerprint
+
+    public init(traceId: Int64, replayId: Int64, fingerprint: ReplayTraceFingerprint) {
+        self.traceId = traceId
+        self.replayId = replayId
+        self.fingerprint = fingerprint
+    }
+}
+
 public struct ProfileTemplate: Codable, Equatable {
     public let host: String
     public let elementSig: String
@@ -413,6 +425,92 @@ public final class ProfileStore {
         return TraceCommitResult(committed: true, dropped: false, traceId: traceId, reason: nil)
     }
 
+    public func commitReplayTrace(input: TraceInput, instructionKey: String) throws -> ReplayCommitResult {
+        if Self.isSensitiveRole(input.payload.type) {
+            throw ProfileStoreError.invalidInput("sensitive replay trace is not allowed")
+        }
+        let traceId = try insertTrace(input)
+        let fingerprint = ReplayTraceStore.fingerprint(input: input, instructionKey: instructionKey)
+        let replayId = try insertReplayFingerprint(fingerprint)
+        return ReplayCommitResult(traceId: traceId, replayId: replayId, fingerprint: fingerprint)
+    }
+
+    public func insertReplayFingerprint(_ fingerprint: ReplayTraceFingerprint) throws -> Int64 {
+        let payload = String(data: try encoder.encode(fingerprint), encoding: .utf8) ?? "{}"
+        return try lock.withLock { [self] in
+            let sql = """
+            INSERT INTO replay_fingerprints
+              (ts, source, host, task_id, stage, instruction_key, action_type, quality, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, fingerprint.ts)
+            bindText(fingerprint.source, to: statement, at: 2)
+            bindText(fingerprint.key.host, to: statement, at: 3)
+            bindNullableText(fingerprint.key.taskId, to: statement, at: 4)
+            bindNullableText(fingerprint.key.stage, to: statement, at: 5)
+            bindText(fingerprint.key.instructionKey, to: statement, at: 6)
+            bindText(fingerprint.key.actionType, to: statement, at: 7)
+            sqlite3_bind_double(statement, 8, fingerprint.quality)
+            bindText(payload, to: statement, at: 9)
+
+            try stepDone(statement)
+            let replayId = sqlite3_last_insert_rowid(self.db)
+            try trimReplayFingerprints(nowMs: fingerprint.ts)
+            return replayId
+        }
+    }
+
+    public func listReplayFingerprints(host: String? = nil, instructionKey: String? = nil) throws -> [ReplayTraceFingerprint] {
+        try lock.withLock { [self] in
+            var clauses = [String]()
+            var bindings = [String]()
+            if let host {
+                clauses.append("host = ?")
+                bindings.append(host)
+            }
+            if let instructionKey {
+                clauses.append("instruction_key = ?")
+                bindings.append(instructionKey)
+            }
+            let whereClause = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+            let statement = try prepare("""
+            SELECT payload
+            FROM replay_fingerprints
+            \(whereClause)
+            ORDER BY ts ASC, id ASC
+            """)
+            defer { sqlite3_finalize(statement) }
+            bind(bindings, to: statement)
+
+            var fingerprints = [ReplayTraceFingerprint]()
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let payload = columnString(statement, 0)
+                guard let data = payload.data(using: .utf8),
+                      let fingerprint = try? decoder.decode(ReplayTraceFingerprint.self, from: data) else {
+                    continue
+                }
+                fingerprints.append(fingerprint)
+            }
+            return fingerprints
+        }
+    }
+
+    public func replaySummary(key: ReplayTraceKey) throws -> ReplayTraceSummary? {
+        let fingerprints = try listReplayFingerprints(host: key.host, instructionKey: key.instructionKey)
+            .filter { $0.key == key }
+        guard !fingerprints.isEmpty else {
+            return nil
+        }
+        let store = ReplayTraceStore()
+        for fingerprint in fingerprints {
+            store.commit(fingerprint)
+        }
+        return store.summarize(key: key)
+    }
+
     public func rebuild(host: String? = nil) throws -> AggregateReport {
         try lock.withLock { [self] in
             try self.performRetentionIfNeeded(nowMs: self.currentTimeMs(), force: true)
@@ -573,8 +671,23 @@ public final class ProfileStore {
               PRIMARY KEY (host, element_sig, task_id, action_type)
             )
             """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS replay_fingerprints (
+              id              INTEGER PRIMARY KEY,
+              ts              INTEGER NOT NULL,
+              source          TEXT NOT NULL,
+              host            TEXT NOT NULL,
+              task_id         TEXT,
+              stage           TEXT,
+              instruction_key TEXT NOT NULL,
+              action_type     TEXT NOT NULL,
+              quality         REAL NOT NULL,
+              payload         TEXT NOT NULL
+            )
+            """)
             try execute("CREATE INDEX IF NOT EXISTS idx_traces_host_sig ON traces(host, element_sig)")
             try execute("CREATE INDEX IF NOT EXISTS idx_traces_group_ts ON traces(host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type, ts DESC, id DESC)")
+            try execute("CREATE INDEX IF NOT EXISTS idx_replay_key_ts ON replay_fingerprints(host, COALESCE(task_id, ''), COALESCE(stage, ''), instruction_key, action_type, ts DESC, id DESC)")
         }
     }
 
@@ -763,6 +876,7 @@ public final class ProfileStore {
         }
         if retentionPolicy.maxTracesPerGroup > 0 {
             try trimTraceOverflow(limit: retentionPolicy.maxTracesPerGroup)
+            try trimReplayOverflow(limit: retentionPolicy.maxTracesPerGroup)
         }
         lastCleanupAtMs = nowMs
     }
@@ -772,6 +886,18 @@ public final class ProfileStore {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, cutoffMs)
         try stepDone(statement)
+    }
+
+    private func trimReplayFingerprints(nowMs: Int64) throws {
+        if retentionPolicy.maxAgeMs > 0 {
+            let statement = try prepare("DELETE FROM replay_fingerprints WHERE ts < ?")
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, nowMs - retentionPolicy.maxAgeMs)
+            try stepDone(statement)
+        }
+        if retentionPolicy.maxTracesPerGroup > 0 {
+            try trimReplayOverflow(limit: retentionPolicy.maxTracesPerGroup)
+        }
     }
 
     private func trimTraceOverflow(limit: Int) throws {
@@ -785,6 +911,25 @@ public final class ProfileStore {
           FROM traces
         )
         DELETE FROM traces
+        WHERE id IN (SELECT id FROM ranked WHERE row_num > ?)
+        """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(limit))
+        try stepDone(statement)
+    }
+
+    private func trimReplayOverflow(limit: Int) throws {
+        let sql = """
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY host, COALESCE(task_id, ''), COALESCE(stage, ''), instruction_key, action_type
+                   ORDER BY ts DESC, id DESC
+                 ) AS row_num
+          FROM replay_fingerprints
+        )
+        DELETE FROM replay_fingerprints
         WHERE id IN (SELECT id FROM ranked WHERE row_num > ?)
         """
         let statement = try prepare(sql)
@@ -1320,7 +1465,7 @@ public final class ProfileStore {
         }
     }
 
-    private static func isSensitiveRole(_ role: String?) -> Bool {
+    public static func isSensitiveRole(_ role: String?) -> Bool {
         guard let role = role?.lowercased() else {
             return false
         }

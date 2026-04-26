@@ -164,6 +164,43 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(sink.finished?.verification.finalPointer?.y, (verification?["finalPointer"] as? [String: Any])?["y"] as? Double)
     }
 
+    func testActionVerificationDistinguishesObserverAndSemanticLayers() {
+        let service = try! makeService()
+        let response = service.handleLine(
+            #"{"id":"layers","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"semantic":{"verified":true,"source":"browser_snapshot"},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try! decode(response)
+        let result = payload["result"] as? [String: Any]
+        let verification = result?["verification"] as? [String: Any]
+        let observer = verification?["observer"] as? [String: Any]
+        let semantic = verification?["semantic"] as? [String: Any]
+        let injection = verification?["injection"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(injection?["status"] as? String, "emitted")
+        XCTAssertEqual(observer?["status"] as? String, "dryRunNotObserved")
+        XCTAssertEqual(semantic?["status"] as? String, "verified")
+        XCTAssertEqual(semantic?["verified"] as? Bool, true)
+        XCTAssertEqual(semantic?["source"] as? String, "browser_snapshot")
+    }
+
+    func testActionPersistsDaemonReplayFingerprint() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+        let response = service.handleLine(
+            #"{"id":"learn-action","method":"action","params":{"context":{"host":"example.com","taskId":"task","stage":"stage","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let learning = result?["daemonLearning"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(learning?["committed"] as? Bool, true)
+        XCTAssertEqual(learning?["instructionKey"] as? String, "task:stage:sig-fixed:click")
+        XCTAssertEqual(try store.traceCount(host: "example.com"), 1)
+        XCTAssertEqual(try store.listReplayFingerprints(host: "example.com", instructionKey: "task:stage:sig-fixed:click").count, 1)
+    }
+
     func testControlServiceRetainsHidVisualizationSinkForDaemonLifetime() {
         let box = HIDSinkBox()
         let service = try! makeServiceWithEphemeralHIDSink(box: box)
@@ -238,10 +275,11 @@ final class ControlServiceTests: XCTestCase {
     private func makeService(
         allowSelfTarget: Bool = true,
         bundleIdentifiers: [String] = ["com.example.Browser"],
+        profileStore: ProfileStore? = nil,
         hidEventSink: HIDEventSink? = nil,
         targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil
     ) throws -> ControlService {
-        let store = try ProfileStore(path: ":memory:")
+        let store = try profileStore ?? ProfileStore(path: ":memory:")
         return ControlService(
             configuration: ControlServerConfiguration(
                 bundleIdentifiers: bundleIdentifiers,

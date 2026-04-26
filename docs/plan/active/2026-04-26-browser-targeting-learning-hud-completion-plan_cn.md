@@ -99,6 +99,12 @@
 
 目标：把“事件发出”升级成分层执行证据。
 
+当前进展（2026-04-26）：
+
+- `verification` 已增加 `injection / pointer / focus / observer / semantic` 分层证据。
+- `observer` 会区分 `dryRunNotObserved / notEnabled / echoed / notObserved`，不会把 VirtualHID 自己打标并被过滤的 CGEvent 误判成人工输入。
+- `semantic` 默认 `notProvided`；只有上游 Agent/browser 明确传入 `semantic` 或 `semanticConfirmation` 时才会标记为 verified/rejected。
+
 任务：
 
 - 将 `PassiveObserver` 的最近事件窗口接入 action 执行结果，生成 observer echo。
@@ -115,6 +121,13 @@
 ### W4. ReplayTraceStore daemon 持久化与真实长期样本
 
 目标：让 compact trace 不只存在于测试/分析脚本，而是在 daemon 执行链路里自然生成和积累。
+
+当前进展（2026-04-26）：
+
+- `ProfileStore` 已新增 SQLite `replay_fingerprints` 持久化表、retention/overflow 清理、list 与 summary 查询。
+- `ControlService.action` 已能把 HID action events 自动转成 `TraceInput` 和 `ReplayTraceFingerprint`，并返回 `daemonLearning` 证据。
+- 敏感 role 不写入 daemon learning。
+- 仍缺真实长期样本回归；当前只完成自动生成、持久化与单元验收。
 
 任务：
 

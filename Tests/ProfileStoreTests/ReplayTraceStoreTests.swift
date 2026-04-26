@@ -74,4 +74,37 @@ final class ReplayTraceStoreTests: XCTestCase {
         XCTAssertEqual(summary?.preferredFingerprint?.quality, 1.0)
         XCTAssertTrue((summary?.behaviorBlend.flow ?? 0) > 0)
     }
+
+    func testProfileStorePersistsReplayFingerprints() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let input = TraceInput(
+            ts: 1_800_000_000_000,
+            source: "hid",
+            host: "example.com",
+            elementSig: "sig-submit",
+            taskId: "task",
+            stage: "stage",
+            actionType: "click",
+            payload: TracePayload(
+                eventId: "action-1",
+                type: "leftMouseUp",
+                points: [TracePoint(x: 0, y: 0), TracePoint(x: 20, y: 10), TracePoint(x: 40, y: 20)],
+                targetPoint: TracePoint(x: 40, y: 20),
+                durationMs: 240,
+                segmentMs: [120, 120],
+                clickHoldMs: [52]
+            )
+        )
+
+        let commit = try store.commitReplayTrace(input: input, instructionKey: "task:stage:sig-submit:click")
+        let items = try store.listReplayFingerprints(host: "example.com", instructionKey: "task:stage:sig-submit:click")
+        let summary = try store.replaySummary(key: commit.fingerprint.key)
+
+        XCTAssertEqual(commit.traceId, 1)
+        XCTAssertEqual(commit.replayId, 1)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.pathSkeleton.count, 3)
+        XCTAssertEqual(summary?.sampleSize, 1)
+        XCTAssertEqual(try store.traceCount(host: "example.com"), 1)
+    }
 }
