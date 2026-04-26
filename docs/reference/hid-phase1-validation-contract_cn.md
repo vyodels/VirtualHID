@@ -30,7 +30,7 @@ HUD / visualization 是可选观察层，不是额外数据源；开启后只能
 
 ## 3. Responsibility Split With Browser / Recruit-Agent
 
-属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、`dryRun` 事件流、frontmost / postMode / kill switch / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。
+属于 VirtualHID：动作原语、实际 HID 落点选择、拟人化轨迹/节律、click 内部鼠标移动轨迹生成、`dryRun` 事件流、frontmost / postMode / kill switch / 串行执行约束、MCP shim 到 daemon 的 FIFO 执行动作队列、trace 存储、长期分析输出、执行层错误码。
 
 必须由 browser / recruit-agent 做：DOM 读取、元素发现、signature 生成、业务任务推理与执行编排、目标锚点/允许区域求解、页面语义成功判断、招聘站点特有规则、下载链接发现、下载记录 / artifact 本地路径定位与业务完成判断。它们不得生成或补造实际 HID 轨迹。
 

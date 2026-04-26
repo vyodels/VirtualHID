@@ -112,6 +112,7 @@ python3 scripts/humanization_analysis.py --pretty
 
 - VirtualHID 不访问 DOM、不发网络请求、不解析 HTML
 - VirtualHID 接收**目标锚点**和可选 `landingZone`；业务目标选择由上游 Agent 负责，实际 HID 落点和轨迹由 VirtualHID 负责生成
+- MCP 对外不暴露独立 `move` 操作；网页点击由上游传 `click` 原语，VirtualHID 在内部生成拟人化鼠标移动轨迹、实际落点和点击事件
 - 网页目标的 viewport/document → macOS screen 坐标换算由 VirtualHID 负责；browser/recruit-agent 只传页面坐标、target 身份和可选页面证据（如 scrollOffset/pageScale/viewportSize），不要从 browser `screenX/screenY` 合成或信任 `viewportInScreen`
 - `ActionContext` 只读白名单字段：`host / element.sig / element.role / taskId / stage / hints.urgency`
 - 网页目标的 `host` 必须来自 browser active tab、tab list、snapshot URL 或上游已规范化的 `browser_target.host`；`target.host` 与 `context.host` 同时存在时必须一致，不能由 Agent 或 VirtualHID 按站点名编造

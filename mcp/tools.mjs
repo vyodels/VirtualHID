@@ -19,18 +19,6 @@ const primitiveSchema = {
   oneOf: [
     {
       type: "object",
-      required: ["type", "to"],
-      properties: {
-        type: { const: "move" },
-        to: pointSchema,
-        via: { type: "string" },
-        durationMs: { type: "integer" },
-        profile: objectSchema
-      },
-      additionalProperties: true
-    },
-    {
-      type: "object",
       required: ["type", "at"],
       properties: {
         type: { const: "click" },
@@ -113,7 +101,7 @@ export const toolMethodMap = {
 export const tools = [
   {
     name: "hid_action",
-    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click/move/type 等 primitives；VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。`,
+    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click primitive；VirtualHID 会在 click 执行内部生成拟人化鼠标移动轨迹、选择落点并完成点击，Agent 不应显式编排 move。VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。`,
     inputSchema: {
       type: "object",
       required: ["id", "primitives", "context"],
