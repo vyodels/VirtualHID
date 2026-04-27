@@ -109,6 +109,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningDemoAction: (action: String, title: String)?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
+    private let learningInspectLimit = 200
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -245,7 +246,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 "enabled": !lastLearningState.enabled,
                 "mode": lastLearningState.enabled ? "off" : "passive"
             ])
-            let response = try call(method: "learning.inspect", params: ["limit": 20])
+            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -294,7 +295,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 "enabled": enabled,
                 "mode": enabled ? "passive" : "off"
             ])
-            let response = try call(method: "learning.inspect", params: ["limit": 20])
+            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -307,7 +308,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             _ = try call(method: "learning.session.start", params: [
                 "host": trainingHostField?.stringValue ?? ""
             ])
-            let response = try call(method: "learning.inspect", params: ["limit": 20])
+            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -322,7 +323,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
         do {
             _ = try call(method: "profiles.rebuild", params: [:])
-            let response = try call(method: "learning.inspect", params: ["limit": 20])
+            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
             lastLearningDemoStatus = "学习模板已重建。当前模板 \(lastLearningState.totalTemplates) 个。"
         } catch {
@@ -464,7 +465,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                     "demoId": "management-center-\(action)",
                     "reuseLastPoints": self?.reuseDemoPointsCheckbox?.state == .on
                 ])
-                let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": 20])
+                let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": self?.learningInspectLimit ?? 200])
                 DispatchQueue.main.async {
                     guard let self else {
                         return
@@ -514,7 +515,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         do {
             let response = try call(method: "hud.state", params: [:])
             lastState = HUDState(response: response)
-            let learningResponse = try call(method: "learning.inspect", params: ["limit": 20])
+            let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: learningResponse)
         } catch {
             lastState = .offline(message: localizedErrorMessage(error))
@@ -1048,10 +1049,21 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
         let inventory = label("", size: 11, color: .secondaryLabelColor)
         inventory.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        inventory.maximumNumberOfLines = 22
+        inventory.maximumNumberOfLines = 0
         inventory.preferredMaxLayoutWidth = 642
         templateInventoryLabel = inventory
-        cardContent.addArrangedSubview(inventory)
+        let inventoryScroll = NSScrollView()
+        inventoryScroll.drawsBackground = false
+        inventoryScroll.hasVerticalScroller = true
+        inventoryScroll.autohidesScrollers = false
+        inventoryScroll.borderType = .noBorder
+        inventoryScroll.translatesAutoresizingMaskIntoConstraints = false
+        inventory.translatesAutoresizingMaskIntoConstraints = false
+        inventoryScroll.documentView = inventory
+        inventoryScroll.widthAnchor.constraint(equalToConstant: 642).isActive = true
+        inventoryScroll.heightAnchor.constraint(equalToConstant: 360).isActive = true
+        inventory.widthAnchor.constraint(equalTo: inventoryScroll.contentView.widthAnchor).isActive = true
+        cardContent.addArrangedSubview(inventoryScroll)
 
         let buttons = NSStackView()
         buttons.orientation = .horizontal
@@ -1074,6 +1086,37 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         cardContent.addArrangedSubview(label("拟人化与学习效果", size: 16, weight: .semibold))
         cardContent.addArrangedSubview(label("这里展示模板是否真实参与执行、内置拟人化算法是否产生轨迹/点击/键盘事件，以及学习参数是否来自样本聚合。演示使用安全 dry-run，不会投递真实点击。", size: 12, color: .secondaryLabelColor))
 
+        let controls = CardView()
+        let controlsContent = cardStack(spacing: 8)
+        controlsContent.addArrangedSubview(label("演示控制", size: 13, weight: .semibold))
+
+        let reusePoints = NSButton(checkboxWithTitle: "沿用上次起点 / 终点新增演示", target: nil, action: nil)
+        reusePoints.toolTip = "关闭时每次演示随机选择新的起点和终点；开启时复用该动作上一次起点和终点，但轨迹仍由 VirtualHID 学习策略重新生成。"
+        reuseDemoPointsCheckbox = reusePoints
+        controlsContent.addArrangedSubview(reusePoints)
+
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.addArrangedSubview(actionButton("移动轨迹", action: #selector(runMoveDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("完整点击", action: #selector(runClickDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("双击", action: #selector(runDoubleClickDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("拖拽", action: #selector(runDragDemoAction(_:))))
+        controlsContent.addArrangedSubview(buttons)
+
+        let moreButtons = NSStackView()
+        moreButtons.orientation = .horizontal
+        moreButtons.spacing = 8
+        moreButtons.addArrangedSubview(actionButton("滚轮", action: #selector(runScrollDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("键盘事件", action: #selector(runKeyboardDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("重放上次演示", action: #selector(replayLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("清空历史轨迹", action: #selector(clearLearningDemoHistoryAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("关闭 HUD 演示", action: #selector(stopLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
+        controlsContent.addArrangedSubview(moreButtons)
+        controls.addContent(controlsContent)
+        cardContent.addArrangedSubview(controls)
+
         let analysis = label("", size: 11, color: .secondaryLabelColor)
         analysis.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         analysis.maximumNumberOfLines = 18
@@ -1086,31 +1129,6 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         demoStatus.preferredMaxLayoutWidth = 642
         learningDemoStatusLabel = demoStatus
         cardContent.addArrangedSubview(demoStatus)
-
-        let reusePoints = NSButton(checkboxWithTitle: "沿用上次起点 / 终点新增演示", target: nil, action: nil)
-        reusePoints.toolTip = "关闭时每次演示随机选择新的起点和终点；开启时复用该动作上一次起点和终点，但轨迹仍由 VirtualHID 学习策略重新生成。"
-        reuseDemoPointsCheckbox = reusePoints
-        cardContent.addArrangedSubview(reusePoints)
-
-        let buttons = NSStackView()
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-        buttons.addArrangedSubview(actionButton("移动轨迹", action: #selector(runMoveDemoAction(_:))))
-        buttons.addArrangedSubview(actionButton("完整点击", action: #selector(runClickDemoAction(_:))))
-        buttons.addArrangedSubview(actionButton("双击", action: #selector(runDoubleClickDemoAction(_:))))
-        buttons.addArrangedSubview(actionButton("拖拽", action: #selector(runDragDemoAction(_:))))
-        cardContent.addArrangedSubview(buttons)
-
-        let moreButtons = NSStackView()
-        moreButtons.orientation = .horizontal
-        moreButtons.spacing = 8
-        moreButtons.addArrangedSubview(actionButton("滚轮", action: #selector(runScrollDemoAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("键盘事件", action: #selector(runKeyboardDemoAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("重放上次演示", action: #selector(replayLearningDemoAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("清空历史轨迹", action: #selector(clearLearningDemoHistoryAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("关闭 HUD 演示", action: #selector(stopLearningDemoAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
-        cardContent.addArrangedSubview(moreButtons)
 
         card.addContent(cardContent)
         stack.addArrangedSubview(card)
@@ -1244,7 +1262,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private func stopTraining(commit: Bool) {
         do {
             _ = try call(method: "learning.session.stop", params: ["commit": commit])
-            let response = try call(method: "learning.inspect", params: ["limit": 20])
+            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -1436,7 +1454,7 @@ private struct LearningState {
         guard !templates.isEmpty else {
             return "暂无能力模板。开启键鼠输入学习分析积累真实片段后，点击「重建能力模板」再演示学习效果。"
         }
-        return "能力模板\n" + templates.prefix(5).map(\.displayText).joined(separator: "\n")
+        return "能力模板\n" + templates.map(\.displayText).joined(separator: "\n")
     }
 
     var templateInventoryText: String {
@@ -1455,7 +1473,7 @@ private struct LearningState {
         guard available else {
             return message ?? "学习服务不可用"
         }
-        let topTemplates = templates.prefix(4).map { template in
+        let templateDetails = templates.map { template in
             "• \(template.analysisText)"
         }.joined(separator: "\n")
         let eventTypes = recentEvents.prefix(8).map(\.type).joined(separator: ", ")
@@ -1464,7 +1482,7 @@ private struct LearningState {
             "事件监听：\(eventTapRunning ? "运行中" : "未运行")；辅助功能 \(accessibility ? "已授权" : "未授权")，输入监控 \(inputMonitoring ? "已授权" : "未授权")。",
             "最近事件链：\(eventTypes.isEmpty ? "暂无" : eventTypes)。",
             "最新学习片段：\(traceLine)。",
-            topTemplates.isEmpty ? "模板分析：暂无可分析模板。" : "模板分析：\n\(topTemplates)"
+            templateDetails.isEmpty ? "模板分析：暂无可分析模板。" : "模板分析：\n\(templateDetails)"
         ].joined(separator: "\n")
     }
 

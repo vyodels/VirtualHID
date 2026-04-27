@@ -536,6 +536,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             else {
                 return
             }
+            if self.retainOverlayAfterTrackingLoss(for: trackedTarget.context) {
+                return
+            }
             self.closeOverlay()
         }
     }
@@ -557,11 +560,17 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             return
         }
         guard let app = NSRunningApplication(processIdentifier: trackedTarget.pid), !app.isTerminated else {
+            if retainOverlayAfterTrackingLoss(for: trackedTarget.context) {
+                return
+            }
             closeOverlay()
             return
         }
         let windows = currentWindowSnapshots(for: trackedTarget.pid)
         guard let window = bestTrackedWindowMatch(target: trackedTarget, windows: windows) else {
+            if retainOverlayAfterTrackingLoss(for: trackedTarget.context) {
+                return
+            }
             closeOverlay()
             return
         }
@@ -574,10 +583,16 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             return
         }
         if notification == kAXUIElementDestroyedNotification as String {
+            if retainOverlayAfterTrackingLoss(for: trackedTarget.context) {
+                return
+            }
             closeOverlay()
             return
         }
         guard let frame = copyAXFrame(of: element), frame.width > 80, frame.height > 80 else {
+            if retainOverlayAfterTrackingLoss(for: trackedTarget.context) {
+                return
+            }
             closeOverlay()
             return
         }
@@ -616,6 +631,16 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         uninstallAXObserver()
         overlayView?.clearAll()
         overlayWindow?.orderOut(nil)
+    }
+
+    private func retainOverlayAfterTrackingLoss(for context: HIDActionVisualContext) -> Bool {
+        guard shouldRetainPlayback(for: context) else {
+            return false
+        }
+        trackedTarget = nil
+        stopTrackingTimer()
+        uninstallAXObserver()
+        return true
     }
 
     private func stopTrackingTimer() {
@@ -1092,7 +1117,7 @@ private func applyComponents(_ components: [String], visible: Bool, settings: in
     }
 }
 
-private struct HIDOverlayFrame {
+struct HIDOverlayFrame {
     let context: HIDActionVisualContext
     let events: [InjectedEvent]
     let expected: CodablePoint?
@@ -1102,12 +1127,42 @@ private struct HIDOverlayFrame {
     let stepDetail: String?
 }
 
+struct HIDOverlayViewSnapshot: Equatable {
+    let currentEventCount: Int?
+    let currentTrailPoints: [CodablePoint]
+    let historyEventCounts: [Int]
+    let historyTrailPoints: [[CodablePoint]]
+}
+
+func hidOverlayTrailPoints(events: [InjectedEvent], actual: CodablePoint?) -> [CodablePoint] {
+    var points = events.compactMap(\.location)
+    guard let actual else {
+        return points
+    }
+    if let last = points.last, hidOverlayApproximatelyEqual(last, actual) {
+        return points
+    }
+    points.append(actual)
+    return points
+}
+
+private func hidOverlayIsCompletedHistoryFrame(_ frame: HIDOverlayFrame) -> Bool {
+    frame.context.dryRun
+        && frame.actual != nil
+        && frame.events.count > 1
+        && hidOverlayTrailPoints(events: frame.events, actual: frame.actual).count >= 2
+}
+
+private func hidOverlayApproximatelyEqual(_ lhs: CodablePoint, _ rhs: CodablePoint, tolerance: Double = 0.5) -> Bool {
+    abs(lhs.x - rhs.x) <= tolerance && abs(lhs.y - rhs.y) <= tolerance
+}
+
 private struct HIDPlaybackStep {
     let title: String
     let detail: String
 }
 
-private final class HIDOverlayView: NSView {
+final class HIDOverlayView: NSView {
     private let maxHistoricalFrames = 20
     private var screenFrame: NSRect
     private var settings: HIDOverlaySettings
@@ -1130,15 +1185,23 @@ private final class HIDOverlayView: NSView {
 
     func render(_ data: HIDOverlayFrame) {
         frameData = data
-        lastPersistentFrame = data
-        if settings.persistent, data.context.dryRun, data.actual != nil, data.events.count > 1 {
-            historicalFrames.append(data)
-            if historicalFrames.count > maxHistoricalFrames {
-                historicalFrames.removeFirst(historicalFrames.count - maxHistoricalFrames)
-            }
+        if settings.persistent, hidOverlayIsCompletedHistoryFrame(data) {
+            lastPersistentFrame = data
+            recordHistoricalFrame(data)
+        } else if !settings.persistent || !data.context.dryRun || lastPersistentFrame == nil {
+            lastPersistentFrame = data
         }
         needsDisplay = true
         displayIfNeeded()
+    }
+
+    func snapshotForTesting() -> HIDOverlayViewSnapshot {
+        HIDOverlayViewSnapshot(
+            currentEventCount: frameData?.events.count,
+            currentTrailPoints: frameData.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) } ?? [],
+            historyEventCounts: historicalFrames.map(\.events.count),
+            historyTrailPoints: historicalFrames.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) }
+        )
     }
 
     func resize(frame: NSRect, screenFrame: NSRect) {
@@ -1230,6 +1293,14 @@ private final class HIDOverlayView: NSView {
         displayIfNeeded()
     }
 
+    private func recordHistoricalFrame(_ frame: HIDOverlayFrame) {
+        historicalFrames.removeAll { $0.context.actionId == frame.context.actionId }
+        historicalFrames.append(frame)
+        if historicalFrames.count > maxHistoricalFrames {
+            historicalFrames.removeFirst(historicalFrames.count - maxHistoricalFrames)
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard frameData != nil || !historicalFrames.isEmpty else {
@@ -1247,7 +1318,7 @@ private final class HIDOverlayView: NSView {
             return
         }
         if settings.showTrail {
-            drawTrail(frameData.events, final: frameData.actual != nil)
+            drawTrail(frameData.events, actual: frameData.actual, final: frameData.actual != nil)
         }
         drawEffects(frameData.events, context: frameData.context)
         if settings.showExpectedPoint, let expected = frameData.expected {
@@ -1292,8 +1363,8 @@ private final class HIDOverlayView: NSView {
         )
     }
 
-    private func drawTrail(_ events: [InjectedEvent], final: Bool) {
-        let points = events.compactMap(\.location).map(convert(_:))
+    private func drawTrail(_ events: [InjectedEvent], actual: CodablePoint?, final: Bool) {
+        let points = hidOverlayTrailPoints(events: events, actual: final ? actual : nil).map(convert(_:))
         guard points.count >= 2 else {
             return
         }
@@ -1324,7 +1395,7 @@ private final class HIDOverlayView: NSView {
             return
         }
         for (index, frame) in historicalFrames.enumerated() where currentActionId == nil || frame.context.actionId != currentActionId {
-            drawHistoricalTrail(frame.events, ordinal: index + 1)
+            drawHistoricalTrail(frame.events, actual: frame.actual, ordinal: index + 1)
             if settings.showExpectedPoint, let expected = frame.expected {
                 drawHistoricalPoint(expected, title: "目标\(index + 1)", color: .systemOrange)
             }
@@ -1334,8 +1405,8 @@ private final class HIDOverlayView: NSView {
         }
     }
 
-    private func drawHistoricalTrail(_ events: [InjectedEvent], ordinal: Int) {
-        let points = events.compactMap(\.location).map(convert(_:))
+    private func drawHistoricalTrail(_ events: [InjectedEvent], actual: CodablePoint?, ordinal: Int) {
+        let points = hidOverlayTrailPoints(events: events, actual: actual).map(convert(_:))
         guard points.count >= 2 else {
             return
         }

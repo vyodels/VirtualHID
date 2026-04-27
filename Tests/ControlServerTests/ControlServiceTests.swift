@@ -416,6 +416,45 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(stopPayload["ok"] as? Bool, true)
     }
 
+    func testLearningDemoStepClickFocusIsClickSpecificAndReturnsFullEventChainEvidence() throws {
+        let service = try makeService()
+        try seedLearnedDemoProfiles(service: service, actions: ["click"])
+
+        let payload = try decode(service.handleLine(
+            #"{"id":"demo-step-click-chain","method":"learning.demo.step","params":{"action":"click"}}"#
+        ))
+        let result = payload["result"] as? [String: Any]
+        let action = result?["action"] as? [String: Any]
+        let focus = action?["currentFocus"] as? [String: Any]
+        let steps = action?["steps"] as? [[String: Any]] ?? []
+        let moveStep = steps.first { $0["phase"] as? String == "move" }
+        let evidence = action?["eventChainEvidence"] as? [String: Any]
+        let chain = evidence?["chain"] as? [[String: Any]] ?? []
+        let eventTypes = evidence?["eventTypes"] as? [String] ?? []
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["demoAction"] as? String, "click")
+        XCTAssertEqual(action?["demoAction"] as? String, "click")
+        XCTAssertEqual(focus?["action"] as? String, "click")
+        XCTAssertTrue((focus?["title"] as? String ?? "").contains("点击"))
+        XCTAssertFalse((focus?["title"] as? String ?? "").contains("滑动轨迹"))
+        XCTAssertEqual(moveStep?["role"] as? String, "targetingPrelude")
+        XCTAssertFalse((moveStep?["title"] as? String ?? "").contains("滑动轨迹"))
+        XCTAssertFalse(steps.contains { step in
+            ((step["title"] as? String) ?? "").contains("滑动轨迹")
+                || ((step["detail"] as? String) ?? "").contains("滑动轨迹")
+        })
+        XCTAssertEqual(evidence?["complete"] as? Bool, true)
+        XCTAssertEqual(evidence?["eventCount"] as? Int, action?["eventCount"] as? Int)
+        XCTAssertEqual(chain.count, action?["eventCount"] as? Int)
+        XCTAssertTrue(eventTypes.contains("mouseMoved"))
+        XCTAssertTrue(eventTypes.contains { $0.contains("MouseDown") })
+        XCTAssertTrue(eventTypes.contains { $0.contains("MouseUp") })
+        XCTAssertTrue(steps.contains { $0["phase"] as? String == "mouseDown" })
+        XCTAssertTrue(steps.contains { $0["phase"] as? String == "hold" })
+        XCTAssertTrue(steps.contains { $0["phase"] as? String == "mouseUp" })
+    }
+
     func testLearningDemoStepRandomizesPointsUnlessReuseRequested() throws {
         let service = try makeService()
         try seedLearnedDemoProfiles(service: service, actions: ["click"])
@@ -462,6 +501,29 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertGreaterThan(recentTraces?.count ?? 0, 0)
         XCTAssertGreaterThan(templates?.count ?? 0, 0)
         XCTAssertNotNil(definitions?["scope"])
+    }
+
+    func testLearningInspectReturnsAllTemplateSummariesForThirteenLearnedTemplates() throws {
+        let service = try makeService()
+        try seedTemplateInventory(service: service, count: 13)
+
+        let inspectPayload = try decode(service.handleLine(#"{"id":"learning-inspect-all","method":"learning.inspect","params":{}}"#))
+        let inspectResult = inspectPayload["result"] as? [String: Any]
+        let inspectTemplates = inspectResult?["templates"] as? [[String: Any]] ?? []
+        let inspectSigs = Set(inspectTemplates.compactMap { $0["elementSig"] as? String })
+        let statePayload = try decode(service.handleLine(#"{"id":"learning-state-all","method":"learning.state","params":{}}"#))
+        let stateResult = statePayload["result"] as? [String: Any]
+        let stateTemplates = stateResult?["templates"] as? [[String: Any]] ?? []
+
+        XCTAssertEqual(inspectPayload["ok"] as? Bool, true)
+        XCTAssertEqual(inspectResult?["totalTemplates"] as? Int, 13)
+        XCTAssertEqual(inspectResult?["returnedTemplates"] as? Int, 13)
+        XCTAssertGreaterThanOrEqual(inspectResult?["templateLimit"] as? Int ?? 0, 13)
+        XCTAssertEqual(inspectTemplates.count, 13)
+        XCTAssertEqual(inspectSigs.count, 13)
+        XCTAssertEqual(statePayload["ok"] as? Bool, true)
+        XCTAssertEqual(stateResult?["totalTemplates"] as? Int, 13)
+        XCTAssertEqual(stateTemplates.count, 13)
     }
 
     func testTraceCommitPayloadPreservesRawHIDFieldsForRebuild() throws {
@@ -874,6 +936,40 @@ final class ControlServiceTests: XCTestCase {
         }
 
         let payload = try decode(service.handleLine(#"{"id":"rebuild-demo","method":"profiles.rebuild","params":{"host":"example.com"}}"#))
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+    }
+
+    private func seedTemplateInventory(service: ControlService, count: Int) throws {
+        for templateIndex in 0..<count {
+            for sampleIndex in 0..<5 {
+                let x = 80 + templateIndex * 6 + sampleIndex
+                let y = 120 + templateIndex * 4 + sampleIndex
+                let start = ["x": x, "y": y]
+                let mid = ["x": x + 60, "y": y + 24]
+                let end = ["x": x + 118, "y": y + 42]
+                let line = try traceCommitLine(
+                    id: "inventory-\(templateIndex)-\(sampleIndex)",
+                    host: "example.com",
+                    sig: "sig-inventory-\(templateIndex)",
+                    task: "task-inventory-\(templateIndex)",
+                    traceType: "click",
+                    payload: [
+                        "type": "leftMouseUp",
+                        "point": end,
+                        "points": [start, mid, end],
+                        "origin": start,
+                        "targetPoint": end,
+                        "durationMs": 380 + sampleIndex * 12,
+                        "segmentMs": [96 + sampleIndex, 118 + sampleIndex],
+                        "clickHoldMs": [62 + sampleIndex],
+                        "eventTimeline": ["leftMouseDown", "leftMouseUp"]
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+        }
+
+        let payload = try decode(service.handleLine(#"{"id":"rebuild-inventory","method":"profiles.rebuild","params":{"host":"example.com"}}"#))
         XCTAssertEqual(payload["ok"] as? Bool, true)
     }
 

@@ -112,6 +112,10 @@ public final class ControlService {
     private var lastLearningDemoPointSpecs = [String: LearningDemoPointSpec]()
     private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
     private static let managementLearningDemoDefaultTask = "management-learning-demo"
+    private static let defaultLearningRecentLimit = 8
+    private static let maxLearningRecentLimit = 100
+    private static let defaultLearningTemplateLimit = 100
+    private static let maxLearningTemplateLimit = 500
 
     public init(
         configuration: ControlServerConfiguration,
@@ -585,12 +589,18 @@ public final class ControlService {
         state["totalTemplates"] = (try? profileStore.totalTemplates()) ?? 0
         state["traceCount"] = (try? profileStore.traceCount()) ?? 0
         state["lastLearnedAt"] = (try? profileStore.lastLearnedAtMs()).flatMap { $0.map(isoString(ms:)) } ?? NSNull()
-        state["templates"] = (try? profileStore.listTemplates().prefix(8).map(learningTemplateSummaryObject)) ?? []
+        let templates = (try? profileStore.listTemplates()) ?? []
+        state["templateLimit"] = Self.defaultLearningTemplateLimit
+        state["returnedTemplates"] = min(templates.count, Self.defaultLearningTemplateLimit)
+        state["templates"] = templates.prefix(Self.defaultLearningTemplateLimit).map(learningTemplateSummaryObject)
         return state
     }
 
     private func handleLearningInspect(_ params: [String: Any]) throws -> [String: Any] {
-        let limit = max(1, min(intValue(params["limit"] ?? params["n"]) ?? 8, 30))
+        let requestedRecentLimit = intValue(params["recentLimit"] ?? params["recent_limit"] ?? params["limit"] ?? params["n"])
+        let recentLimit = max(1, min(requestedRecentLimit ?? Self.defaultLearningRecentLimit, Self.maxLearningRecentLimit))
+        let requestedTemplateLimit = intValue(params["templateLimit"] ?? params["template_limit"] ?? params["limit"] ?? params["n"])
+        let templateLimit = max(1, min(requestedTemplateLimit ?? Self.defaultLearningTemplateLimit, Self.maxLearningTemplateLimit))
         var object = try handleLearningState()
         let supervisorSnapshot = supervisor.snapshot()
         object["eventCapture"] = [
@@ -601,9 +611,13 @@ public final class ControlService {
             "observing": supervisorSnapshot.observing,
             "observingHost": supervisorSnapshot.observingHost as Any? ?? NSNull()
         ]
-        object["recentEvents"] = supervisor.observer.tail(limit: limit).map(observedEventObject)
-        object["recentTraces"] = try profileStore.listTraceSummaries(limit: limit).map(traceSummaryObject)
-        object["templates"] = try profileStore.listTemplates().prefix(limit).map(learningTemplateSummaryObject)
+        object["recentLimit"] = recentLimit
+        object["templateLimit"] = templateLimit
+        object["recentEvents"] = supervisor.observer.tail(limit: recentLimit).map(observedEventObject)
+        object["recentTraces"] = try profileStore.listTraceSummaries(limit: recentLimit).map(traceSummaryObject)
+        let templates = try profileStore.listTemplates()
+        object["returnedTemplates"] = min(templates.count, templateLimit)
+        object["templates"] = templates.prefix(templateLimit).map(learningTemplateSummaryObject)
         object["definitions"] = [
             "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局键鼠能力。",
             "actionType": "动作类型来自真实键鼠事件链，例如点击、拖拽、滚动、键盘输入；模板只影响执行轨迹和节奏，不选择业务目标。",
@@ -1192,8 +1206,15 @@ public final class ControlService {
             ],
             "primitive": learningDemoPrimitiveObject(events: events, verification: verification),
             "trajectory": learningDemoTrajectoryObject(events: events, metrics: metrics),
-            "steps": learningDemoSteps(events: events, verification: verification),
+            "currentFocus": learningDemoFocusObject(actionType: actionType, demoAction: demoAction),
+            "steps": learningDemoSteps(
+                events: events,
+                verification: verification,
+                actionType: actionType,
+                demoAction: demoAction
+            ),
             "eventChain": learningDemoEventChain(events),
+            "eventChainEvidence": learningDemoEventChainEvidence(events: events, verification: verification),
             "metrics": metrics,
             "eventCount": events.count,
             "mouseMoveCount": mouseMoves.count,
@@ -1214,11 +1235,7 @@ public final class ControlService {
             "source": "virtualhid-action-events",
             "safePreview": true,
             "actionCount": actionCount,
-            "sequence": [
-                "对照动作：禁用学习模板，生成基础轨迹和点击事件。",
-                "学习动作：命中能力模板，生成带学习参数的移动轨迹。",
-                "逐步展示：移动起点、滑动轨迹、按下、保持、松开、落点校验。"
-            ],
+            "sequence": learningDemoPlanSequence(actionType: template.actionType),
             "templateScope": [
                 "host": template.host,
                 "elementSig": template.elementSig,
@@ -1310,6 +1327,41 @@ public final class ControlService {
         return capabilities
     }
 
+    private func learningDemoPlanSequence(actionType: String) -> [String] {
+        switch actionType {
+        case "click":
+            return [
+                "对照动作：禁用学习模板，生成基础定位和点击事件。",
+                "学习动作：命中点击能力模板，生成点击前置定位、下压、保持、松开和落点校验。",
+                "逐步展示：目标定位、点击下压、保持时长、松开、落点校验。"
+            ]
+        case "drag":
+            return [
+                "对照动作：禁用学习模板，生成基础拖拽事件。",
+                "学习动作：命中拖拽能力模板，生成下压、拖拽路径、保持和松开。",
+                "逐步展示：拖拽起点、按下、拖拽移动、松开、落点校验。"
+            ]
+        case "scroll":
+            return [
+                "对照动作：禁用学习模板，生成基础滚轮事件。",
+                "学习动作：命中滚动能力模板，生成定位、滚轮 delta 和节奏。",
+                "逐步展示：目标定位、滚轮事件链、滚动 delta、落点校验。"
+            ]
+        case "type":
+            return [
+                "对照动作：禁用学习模板，生成基础键盘事件。",
+                "学习动作：命中键盘能力模板，生成按下、松开和输入节奏。",
+                "逐步展示：目标定位、键盘事件链、dwell/inter-key 节奏。"
+            ]
+        default:
+            return [
+                "对照动作：禁用学习模板，生成基础移动事件。",
+                "学习动作：命中移动能力模板，生成带学习参数的移动轨迹。",
+                "逐步展示：移动起点、移动轨迹、速度节奏、落点校验。"
+            ]
+        }
+    }
+
     private func learningDemoPrimitiveObject(events: [[String: Any]], verification: [String: Any]) -> [String: Any] {
         let points = eventPoints(events)
         let down = events.first { ($0["type"] as? String)?.contains("MouseDown") == true }
@@ -1340,6 +1392,73 @@ public final class ControlService {
         ]
     }
 
+    private func learningDemoFocusObject(actionType: String, demoAction: ManagementDemoAction?) -> [String: Any] {
+        switch demoAction {
+        case .dblclick:
+            return [
+                "action": "dblclick",
+                "title": "双击事件链",
+                "primaryPhases": ["mouseDown", "hold", "mouseUp", "mouseDown", "hold", "mouseUp"],
+                "primaryEventChain": ["leftMouseDown", "leftMouseUp", "leftMouseDown", "leftMouseUp"],
+                "movementRole": "targetingPrelude"
+            ]
+        case .click:
+            return [
+                "action": "click",
+                "title": "完整点击事件链",
+                "primaryPhases": ["mouseDown", "hold", "mouseUp", "verifyLanding"],
+                "primaryEventChain": ["leftMouseDown", "leftMouseUp"],
+                "movementRole": "targetingPrelude"
+            ]
+        case .drag:
+            return [
+                "action": "drag",
+                "title": "完整拖拽事件链",
+                "primaryPhases": ["mouseDown", "move", "mouseUp", "verifyLanding"],
+                "primaryEventChain": ["leftMouseDown", "leftMouseDragged", "leftMouseUp"],
+                "movementRole": "dragPath"
+            ]
+        case .scroll:
+            return [
+                "action": "scroll",
+                "title": "滚轮事件链",
+                "primaryPhases": ["move", "scroll", "verifyLanding"],
+                "primaryEventChain": ["mouseMoved", "scrollWheel"],
+                "movementRole": "targetingPrelude"
+            ]
+        case .keyboard:
+            return [
+                "action": "keyboard",
+                "title": "键盘事件链",
+                "primaryPhases": ["move", "keyDown", "keyUp"],
+                "primaryEventChain": ["keyDown", "keyUp"],
+                "movementRole": "targetingPrelude"
+            ]
+        case .move:
+            return [
+                "action": "move",
+                "title": "移动轨迹",
+                "primaryPhases": ["move", "verifyLanding"],
+                "primaryEventChain": ["mouseMoved"],
+                "movementRole": "primary"
+            ]
+        case nil:
+            if actionType == "click" {
+                return learningDemoFocusObject(actionType: actionType, demoAction: .click)
+            }
+            if actionType == "drag" {
+                return learningDemoFocusObject(actionType: actionType, demoAction: .drag)
+            }
+            if actionType == "scroll" {
+                return learningDemoFocusObject(actionType: actionType, demoAction: .scroll)
+            }
+            if actionType == "type" {
+                return learningDemoFocusObject(actionType: actionType, demoAction: .keyboard)
+            }
+            return learningDemoFocusObject(actionType: actionType, demoAction: .move)
+        }
+    }
+
     private func learningDemoEventChain(_ events: [[String: Any]]) -> [[String: Any]] {
         events.enumerated().map { index, event in
             [
@@ -1353,20 +1472,52 @@ public final class ControlService {
         }
     }
 
-    private func learningDemoSteps(events: [[String: Any]], verification: [String: Any]) -> [[String: Any]] {
+    private func learningDemoEventChainEvidence(events: [[String: Any]], verification: [String: Any]) -> [String: Any] {
+        let eventTypes = events.compactMap { $0["type"] as? String }
+        var typeCounts = [String: Int]()
+        for type in eventTypes {
+            typeCounts[type, default: 0] += 1
+        }
+        return [
+            "source": "virtualhid-action-events",
+            "complete": eventTypes.count == events.count,
+            "eventCount": events.count,
+            "eventTypes": eventTypes,
+            "typeCounts": typeCounts,
+            "chain": learningDemoEventChain(events),
+            "hasMouseMove": eventTypes.contains("mouseMoved"),
+            "hasMouseDown": eventTypes.contains { $0.contains("MouseDown") },
+            "hasMouseUp": eventTypes.contains { $0.contains("MouseUp") },
+            "hasScroll": eventTypes.contains("scrollWheel"),
+            "hasKeyboard": eventTypes.contains { $0 == "keyDown" || $0 == "keyUp" || $0 == "pasteText" },
+            "expectedPointer": verification["expectedPointer"] ?? NSNull(),
+            "finalPointer": verification["finalPointer"] ?? NSNull()
+        ]
+    }
+
+    private func learningDemoSteps(
+        events: [[String: Any]],
+        verification: [String: Any],
+        actionType: String,
+        demoAction: ManagementDemoAction?
+    ) -> [[String: Any]] {
         var steps = [[String: Any]]()
         let points = eventPoints(events)
         let moveEvents = events.filter { $0["type"] as? String == "mouseMoved" }
         let movePoints = eventPoints(moveEvents)
         let expected = pointObjectFromAny(verification["expectedPointer"]) ?? points.last.map(pointObject)
         let final = pointObjectFromAny(verification["finalPointer"]) ?? points.last.map(pointObject)
+        let focus = learningDemoFocusObject(actionType: actionType, demoAction: demoAction)
+        let movementRole = focus["movementRole"] as? String ?? "primary"
 
         if let first = points.first {
             steps.append([
                 "index": steps.count,
                 "phase": "prepareMove",
-                "title": "准备移动",
-                "detail": "确认起点和预期终点，等待 VirtualHID 事件流。",
+                "title": movementRole == "targetingPrelude" ? "准备定位目标" : "准备移动",
+                "detail": movementRole == "targetingPrelude"
+                    ? "确认目标动作的起点和预期终点，等待 VirtualHID 事件链。"
+                    : "确认起点和预期终点，等待 VirtualHID 事件流。",
                 "startPoint": pointObject(first),
                 "targetPoint": (expected as Any?) ?? NSNull()
             ])
@@ -1374,11 +1525,26 @@ public final class ControlService {
 
         if let first = movePoints.first, let last = movePoints.last {
             let metrics = eventMetricsObject(moveEvents)
+            let moveTitle: String
+            let moveDetail: String
+            switch movementRole {
+            case "targetingPrelude":
+                moveTitle = "目标定位移动"
+                moveDetail = "作为 \(focus["title"] as? String ?? "目标动作") 的前置定位，本次重点是目标动作事件链。"
+            case "dragPath":
+                moveTitle = "拖拽移动路径"
+                moveDetail = "沿 VirtualHID 生成的拖拽路径移动。"
+            default:
+                moveTitle = "滑动轨迹"
+                moveDetail = "沿 VirtualHID 生成的 mouseMoved 点序列移动。"
+            }
             steps.append([
                 "index": steps.count,
                 "phase": "move",
-                "title": "滑动轨迹",
-                "detail": "沿 VirtualHID 生成的 mouseMoved 点序列移动。",
+                "title": moveTitle,
+                "detail": moveDetail,
+                "role": movementRole,
+                "eventIndexes": eventIndexes(in: events, matching: { $0["type"] as? String == "mouseMoved" }),
                 "startPoint": pointObject(first),
                 "endPoint": pointObject(last),
                 "pointCount": movePoints.count,
@@ -1400,6 +1566,7 @@ public final class ControlService {
                     "title": "开始下压",
                     "detail": "生成 \(type)；演示为 dry-run，不投递真实点击。",
                     "eventIndex": index,
+                    "eventType": type,
                     "point": event["location"] ?? NSNull()
                 ])
                 if let hold {
@@ -1409,6 +1576,7 @@ public final class ControlService {
                         "title": "保持按压",
                         "detail": "保持按压 \(Int(hold.rounded()))ms。",
                         "durationMs": hold,
+                        "eventIndex": index,
                         "point": event["location"] ?? NSNull()
                     ])
                 }
@@ -1419,6 +1587,7 @@ public final class ControlService {
                     "title": "松开",
                     "detail": "生成 \(type)，完成一次点击时序。",
                     "eventIndex": index,
+                    "eventType": type,
                     "point": event["location"] ?? NSNull()
                 ])
             }
@@ -1435,6 +1604,12 @@ public final class ControlService {
             ])
         }
         return steps
+    }
+
+    private func eventIndexes(in events: [[String: Any]], matching predicate: ([String: Any]) -> Bool) -> [Int] {
+        events.enumerated().compactMap { index, event in
+            predicate(event) ? index : nil
+        }
     }
 
     private func eventPoints(_ events: [[String: Any]]) -> [CGPoint] {
