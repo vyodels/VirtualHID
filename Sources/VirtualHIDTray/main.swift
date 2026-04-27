@@ -984,7 +984,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         cardContent.addArrangedSubview(analysis)
 
         let demoStatus = label("", size: 11, color: .secondaryLabelColor)
-        demoStatus.maximumNumberOfLines = 5
+        demoStatus.maximumNumberOfLines = 18
         demoStatus.preferredMaxLayoutWidth = 642
         learningDemoStatusLabel = demoStatus
         cardContent.addArrangedSubview(demoStatus)
@@ -1668,10 +1668,46 @@ private struct LearningDemoResult {
         }
         let template = result["template"] as? [String: Any] ?? [:]
         let actions = result["actions"] as? [[String: Any]] ?? []
-        let counts = actions.compactMap { intValue($0["mouseMoveCount"]) }
+        let baseline = result["baseline"] as? [String: Any]
+        let effect = result["learningEffect"] as? [String: Any] ?? [:]
         let templateId = "\(displayActionType(template["actionType"] as? String ?? "click"))习惯 · \(displayScope(template["host"] as? String ?? "__global__"))"
-        let countsText = counts.map(String.init).joined(separator: ", ")
-        statusText = "安全预览完成：已使用 \(templateId) 生成 \(actions.count) 次干运行点击；轨迹点 \(countsText)。HUD 数据来自 VirtualHID 事件，没有真实点击页面。"
+        let activeFields = (effect["activeFields"] as? [String] ?? []).prefix(8).joined(separator: ", ")
+        var lines = [
+            "安全预览完成：已使用 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
+            "学习生效字段：\(activeFields.isEmpty ? "暂无" : activeFields)。"
+        ]
+        if let baseline {
+            lines.append("对照：\(Self.actionSummaryLine(baseline))")
+        }
+        if let firstAction = actions.first {
+            lines.append("学习动作 #1：\(Self.actionSummaryLine(firstAction))")
+            lines.append(contentsOf: Self.stepLines(firstAction).prefix(8))
+        }
+        lines.append("证据来源：VirtualHID action events / HUD，不由页面或脚本构造轨迹。")
+        statusText = lines.joined(separator: "\n")
+    }
+
+    private static func actionSummaryLine(_ action: [String: Any]) -> String {
+        let profile = action["profileApplied"] as? Bool == true ? "模板已应用" : "模板未应用"
+        let trajectory = action["trajectory"] as? [String: Any] ?? [:]
+        let metrics = action["metrics"] as? [String: Any] ?? [:]
+        let points = intValue(trajectory["pointCount"]) ?? intValue(action["mouseMoveCount"]) ?? 0
+        let duration = doubleValue(metrics["durationMs"]).map(formatMs) ?? "未知时长"
+        let path = doubleValue(metrics["pathLengthPx"]).map { "\(Int($0.rounded()))px" } ?? "未知距离"
+        return "\(profile)，轨迹点 \(points)，距离 \(path)，时长 \(duration)"
+    }
+
+    private static func stepLines(_ action: [String: Any]) -> [String] {
+        let steps = action["steps"] as? [[String: Any]] ?? []
+        return steps.map { step in
+            let index = intValue(step["index"]).map { $0 + 1 } ?? 0
+            let title = step["title"] as? String ?? step["phase"] as? String ?? "步骤"
+            let detail = step["detail"] as? String ?? ""
+            if detail.isEmpty {
+                return "\(index). \(title)"
+            }
+            return "\(index). \(title)：\(detail)"
+        }
     }
 }
 

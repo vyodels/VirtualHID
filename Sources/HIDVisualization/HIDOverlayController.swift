@@ -159,7 +159,15 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         DispatchQueue.main.async { [weak self] in
             self?.ensureOverlay(for: context)
             self?.overlayView?.render(
-                HIDOverlayFrame(context: context, events: [], expected: nil, actual: nil, errorCode: nil)
+                HIDOverlayFrame(
+                    context: context,
+                    events: [],
+                    expected: nil,
+                    actual: nil,
+                    errorCode: nil,
+                    stepTitle: "准备执行",
+                    stepDetail: "等待 VirtualHID 事件流"
+                )
             )
             self?.clearToken += 1
         }
@@ -179,9 +187,21 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             return
         }
         DispatchQueue.main.async { [weak self] in
-            self?.ensureOverlay(for: context)
-            self?.overlayView?.render(
-                HIDOverlayFrame(context: context, events: events, expected: nil, actual: nil, errorCode: nil)
+            guard let self else {
+                return
+            }
+            let step = self.playbackStep(for: events)
+            self.ensureOverlay(for: context)
+            self.overlayView?.render(
+                HIDOverlayFrame(
+                    context: context,
+                    events: events,
+                    expected: nil,
+                    actual: nil,
+                    errorCode: nil,
+                    stepTitle: step.title,
+                    stepDetail: step.detail
+                )
             )
         }
     }
@@ -207,7 +227,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                         events: summary.events,
                         expected: summary.verification.expectedPointer,
                         actual: summary.verification.finalPointer,
-                        errorCode: nil
+                        errorCode: nil,
+                        stepTitle: self.playbackStep(for: summary.events).title,
+                        stepDetail: self.playbackStep(for: summary.events).detail
                     )
                 )
                 self.scheduleClear()
@@ -235,7 +257,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                 events: [],
                 expected: summary.verification.expectedPointer,
                 actual: nil,
-                errorCode: nil
+                errorCode: nil,
+                stepTitle: "准备移动",
+                stepDetail: "显示预期目标落点，等待轨迹事件"
             )
         )
         for index in summary.events.indices {
@@ -251,7 +275,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                         events: visibleEvents,
                         expected: summary.verification.expectedPointer,
                         actual: index == summary.events.count - 1 ? summary.verification.finalPointer : nil,
-                        errorCode: nil
+                        errorCode: nil,
+                        stepTitle: self.playbackStep(for: visibleEvents).title,
+                        stepDetail: self.playbackStep(for: visibleEvents).detail
                     )
                 )
                 if index == summary.events.count - 1 {
@@ -259,6 +285,60 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                 }
             }
         }
+    }
+
+    private func playbackStep(for events: [InjectedEvent]) -> HIDPlaybackStep {
+        guard let last = events.last else {
+            return HIDPlaybackStep(title: "准备移动", detail: "等待 VirtualHID 生成轨迹")
+        }
+        let points = events.compactMap(\.location)
+        if last.type == "mouseMoved" || last.type.contains("Dragged") {
+            let start = points.first.map(shortPoint) ?? "?"
+            let end = points.last.map(shortPoint) ?? "?"
+            return HIDPlaybackStep(
+                title: last.type.contains("Dragged") ? "拖拽移动" : "滑动轨迹",
+                detail: "起点 \(start) -> 当前 \(end)，轨迹点 \(points.count)"
+            )
+        }
+        if last.type.contains("MouseDown") {
+            return HIDPlaybackStep(
+                title: "开始下压",
+                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")"
+            )
+        }
+        if last.type.contains("MouseUp") {
+            let hold = holdDurationMs(in: events, upEvent: last).map { "\(Int($0.rounded()))ms" } ?? "未知"
+            return HIDPlaybackStep(
+                title: "松开",
+                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")，按压 \(hold)"
+            )
+        }
+        if last.type == "scrollWheel" {
+            return HIDPlaybackStep(title: "滚动", detail: "scrollWheel @ \(last.location.map(shortPoint) ?? "?")")
+        }
+        if last.type == "keyDown" {
+            return HIDPlaybackStep(title: "键盘下压", detail: "keyDown \(last.key ?? "")")
+        }
+        if last.type == "keyUp" {
+            return HIDPlaybackStep(title: "键盘松开", detail: "keyUp \(last.key ?? "")")
+        }
+        if last.type == "pasteText" {
+            return HIDPlaybackStep(title: "粘贴文本", detail: "安全预览粘贴事件")
+        }
+        return HIDPlaybackStep(title: "执行事件", detail: last.type)
+    }
+
+    private func holdDurationMs(in events: [InjectedEvent], upEvent: InjectedEvent) -> Double? {
+        guard let upDate = isoFormatter.date(from: upEvent.timestamp),
+              let down = events.reversed().first(where: { $0.type.contains("MouseDown") }),
+              let downDate = isoFormatter.date(from: down.timestamp) else {
+            return nil
+        }
+        return max(0, upDate.timeIntervalSince(downDate) * 1000)
+    }
+
+    private func shortPoint(_ point: CodablePoint) -> String {
+        "(\(Int(point.x.rounded())),\(Int(point.y.rounded())))"
     }
 
     private func playbackDelays(for events: [InjectedEvent]) -> [TimeInterval] {
@@ -904,6 +984,13 @@ private struct HIDOverlayFrame {
     let expected: CodablePoint?
     let actual: CodablePoint?
     let errorCode: String?
+    let stepTitle: String?
+    let stepDetail: String?
+}
+
+private struct HIDPlaybackStep {
+    let title: String
+    let detail: String
 }
 
 private final class HIDOverlayView: NSView {
@@ -955,7 +1042,9 @@ private final class HIDOverlayView: NSView {
                 events: frameData.events,
                 expected: frameData.expected,
                 actual: frameData.actual,
-                errorCode: frameData.errorCode
+                errorCode: frameData.errorCode,
+                stepTitle: frameData.stepTitle,
+                stepDetail: frameData.stepDetail
             )
         }
         if let lastPersistentFrame {
@@ -964,7 +1053,9 @@ private final class HIDOverlayView: NSView {
                 events: lastPersistentFrame.events,
                 expected: lastPersistentFrame.expected,
                 actual: lastPersistentFrame.actual,
-                errorCode: lastPersistentFrame.errorCode
+                errorCode: lastPersistentFrame.errorCode,
+                stepTitle: lastPersistentFrame.stepTitle,
+                stepDetail: lastPersistentFrame.stepDetail
             )
         }
         needsDisplay = true
@@ -980,7 +1071,9 @@ private final class HIDOverlayView: NSView {
             events: frameData.events,
             expected: frameData.expected,
             actual: frameData.actual,
-            errorCode: errorCode
+            errorCode: errorCode,
+            stepTitle: frameData.stepTitle,
+            stepDetail: frameData.stepDetail
         )
         needsDisplay = true
         displayIfNeeded()
@@ -993,7 +1086,9 @@ private final class HIDOverlayView: NSView {
                 events: [],
                 expected: lastPersistentFrame.expected,
                 actual: lastPersistentFrame.actual,
-                errorCode: lastPersistentFrame.errorCode
+                errorCode: lastPersistentFrame.errorCode,
+                stepTitle: lastPersistentFrame.stepTitle,
+                stepDetail: lastPersistentFrame.stepDetail
             )
         } else {
             frameData = nil
@@ -1022,7 +1117,7 @@ private final class HIDOverlayView: NSView {
             drawWindowFrame(frameData.context.windowFrame)
         }
         if settings.showTrail {
-            drawTrail(frameData.events)
+            drawTrail(frameData.events, final: frameData.actual != nil)
         }
         drawEffects(frameData.events, context: frameData.context)
         if settings.showExpectedPoint, let expected = frameData.expected {
@@ -1036,6 +1131,9 @@ private final class HIDOverlayView: NSView {
                 drawStatus(text: "HID \(frameData.context.actionId) failed: \(errorCode)", color: .systemRed)
             } else {
                 drawStatus(text: statusText(frameData.context), color: .controlAccentColor)
+            }
+            if let stepTitle = frameData.stepTitle {
+                drawStepPanel(title: stepTitle, detail: frameData.stepDetail)
             }
         }
     }
@@ -1064,7 +1162,7 @@ private final class HIDOverlayView: NSView {
         )
     }
 
-    private func drawTrail(_ events: [InjectedEvent]) {
+    private func drawTrail(_ events: [InjectedEvent], final: Bool) {
         let points = events.compactMap(\.location).map(convert(_:))
         guard points.count >= 2 else {
             return
@@ -1076,14 +1174,18 @@ private final class HIDOverlayView: NSView {
         }
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
-        NSColor(calibratedRed: 0.0, green: 0.88, blue: 1.0, alpha: 0.54).setStroke()
-        path.lineWidth = 1.25
+        NSColor(calibratedRed: 0.0, green: 0.82, blue: 1.0, alpha: 0.58).setStroke()
+        path.lineWidth = 1.1
         path.stroke()
         if settings.showTrailPoints {
             for point in points {
                 NSColor.white.withAlphaComponent(0.46).setFill()
                 NSBezierPath(ovalIn: NSRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)).fill()
             }
+        }
+        drawTrailEndpointMarker(at: points[0], title: "起点", color: .systemTeal)
+        if let end = points.last {
+            drawTrailEndpointMarker(at: end, title: final ? "终点" : "当前", color: .white)
         }
     }
 
@@ -1096,8 +1198,10 @@ private final class HIDOverlayView: NSView {
             let point = convert(location)
             if settings.showClickEffects, event.type.contains("MouseDown") {
                 drawRing(at: point, color: .systemOrange, radius: 14, lineWidth: 3)
+                drawSmallLabel("下压", at: NSPoint(x: point.x + 12, y: point.y + 8), color: .systemOrange)
             } else if settings.showClickEffects, event.type.contains("MouseUp") {
                 drawRing(at: point, color: .systemCyan, radius: 19, lineWidth: 2)
+                drawSmallLabel("松开", at: NSPoint(x: point.x + 12, y: point.y - 18), color: .systemCyan)
             } else if settings.showDragEffects, event.type.contains("Dragged") {
                 drawRing(at: point, color: .systemPink, radius: 7, lineWidth: 2)
             } else if settings.showScrollEffects, event.type == "scrollWheel" {
@@ -1119,9 +1223,9 @@ private final class HIDOverlayView: NSView {
 
     private func drawExpectedReticle(point: CodablePoint) {
         let converted = convert(point)
-        let radius: CGFloat = 7
-        let tickGap: CGFloat = 3
-        let tickLength: CGFloat = 5
+        let radius: CGFloat = 9
+        let tickGap: CGFloat = 4
+        let tickLength: CGFloat = 6
 
         let ring = NSBezierPath(ovalIn: NSRect(
             x: converted.x - radius,
@@ -1129,8 +1233,8 @@ private final class HIDOverlayView: NSView {
             width: radius * 2,
             height: radius * 2
         ))
-        ring.lineWidth = 1.25
-        NSColor.systemOrange.withAlphaComponent(0.82).setStroke()
+        ring.lineWidth = 1.15
+        NSColor(calibratedRed: 1.0, green: 0.64, blue: 0.05, alpha: 0.88).setStroke()
         ring.stroke()
 
         let ticks = NSBezierPath()
@@ -1144,13 +1248,14 @@ private final class HIDOverlayView: NSView {
         ticks.line(to: NSPoint(x: converted.x, y: converted.y + radius + tickGap + tickLength))
         ticks.lineWidth = 1.0
         ticks.stroke()
+        drawSmallLabel("目标", at: NSPoint(x: converted.x + 12, y: converted.y + 10), color: .systemOrange)
     }
 
     private func drawActualCrosshair(point: CodablePoint) {
         let converted = convert(point)
-        let radius: CGFloat = 8
-        let innerGap: CGFloat = 2
-        let outerRadius: CGFloat = 11
+        let radius: CGFloat = 9
+        let innerGap: CGFloat = 2.5
+        let outerRadius: CGFloat = 12
 
         let scope = NSBezierPath(ovalIn: NSRect(
             x: converted.x - outerRadius,
@@ -1159,7 +1264,7 @@ private final class HIDOverlayView: NSView {
             height: outerRadius * 2
         ))
         scope.lineWidth = 0.75
-        NSColor.systemRed.withAlphaComponent(0.36).setStroke()
+        NSColor(calibratedRed: 1.0, green: 0.22, blue: 0.18, alpha: 0.32).setStroke()
         scope.stroke()
 
         let cross = NSBezierPath()
@@ -1171,9 +1276,18 @@ private final class HIDOverlayView: NSView {
         cross.line(to: NSPoint(x: converted.x - innerGap, y: converted.y + innerGap))
         cross.move(to: NSPoint(x: converted.x + innerGap, y: converted.y - innerGap))
         cross.line(to: NSPoint(x: converted.x + radius, y: converted.y - radius))
-        cross.lineWidth = 1.25
-        NSColor.systemRed.withAlphaComponent(0.82).setStroke()
+        cross.lineWidth = 1.35
+        NSColor(calibratedRed: 1.0, green: 0.22, blue: 0.18, alpha: 0.9).setStroke()
         cross.stroke()
+        drawSmallLabel("实际", at: NSPoint(x: converted.x + 13, y: converted.y - 2), color: .systemRed)
+    }
+
+    private func drawTrailEndpointMarker(at point: NSPoint, title: String, color: NSColor) {
+        color.withAlphaComponent(0.9).setStroke()
+        let marker = NSBezierPath(ovalIn: NSRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))
+        marker.lineWidth = 1.2
+        marker.stroke()
+        drawSmallLabel(title, at: NSPoint(x: point.x + 8, y: point.y + 5), color: color)
     }
 
     private func drawRing(at point: NSPoint, color: NSColor, radius: CGFloat, lineWidth: CGFloat) {
@@ -1213,6 +1327,32 @@ private final class HIDOverlayView: NSView {
         drawLabel(text, at: statusOrigin(), color: color)
     }
 
+    private func drawStepPanel(title: String, detail: String?) {
+        let origin = statusOrigin(offsetY: 28)
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.systemYellow
+        ]
+        let detailAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9)
+        ]
+        let titleSize = (title as NSString).size(withAttributes: titleAttributes)
+        let detailText = detail ?? ""
+        let detailSize = (detailText as NSString).size(withAttributes: detailAttributes)
+        let width = max(titleSize.width, detailSize.width) + 16
+        let height = titleSize.height + (detailText.isEmpty ? 0 : detailSize.height + 4) + 12
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        NSBezierPath(roundedRect: NSRect(x: origin.x - 6, y: origin.y - 6, width: width, height: height), xRadius: 7, yRadius: 7).fill()
+        (title as NSString).draw(at: origin, withAttributes: titleAttributes)
+        if !detailText.isEmpty {
+            (detailText as NSString).draw(
+                at: NSPoint(x: origin.x, y: origin.y + titleSize.height + 2),
+                withAttributes: detailAttributes
+            )
+        }
+    }
+
     private func drawLabel(_ text: String, at point: NSPoint, color: NSColor) {
         let size = (text as NSString).size(withAttributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .heavy)
@@ -1223,6 +1363,17 @@ private final class HIDOverlayView: NSView {
             .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .heavy),
             .foregroundColor: color
         ]
+        (text as NSString).draw(at: point, withAttributes: attributes)
+    }
+
+    private func drawSmallLabel(_ text: String, at point: NSPoint, color: NSColor) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+            .foregroundColor: color
+        ]
+        let size = (text as NSString).size(withAttributes: attributes)
+        NSColor.black.withAlphaComponent(0.62).setFill()
+        NSBezierPath(roundedRect: NSRect(x: point.x - 4, y: point.y - 3, width: size.width + 8, height: size.height + 6), xRadius: 4, yRadius: 4).fill()
         (text as NSString).draw(at: point, withAttributes: attributes)
     }
 

@@ -267,6 +267,36 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(box.finished?.events.count, events.count)
     }
 
+    func testLearnedProfileChangesMovementAndClickTimingAgainstDisabledProfiles() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+        let applyPayload = try decode(service.handleLine(
+            #"{"id":"apply-effect","method":"profiles.apply","params":{"host":"example.com","elementSig":"sig-effect","taskId":"task","actionType":"click","sampleSize":12,"confidence":0.9,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":12,"motion":{"flavor":"gentle","moveSpeedPxS":{"min":220,"max":280},"pointCount":{"min":6,"max":8},"wind":3.8,"jitter":0.18,"controlSpread":0.12,"detourProbability":0,"clickHoldMs":{"min":128,"max":136},"interClickMs":{"min":172,"max":188},"settleMs":{"min":38,"max":46}}}}}"#
+        ))
+        XCTAssertEqual(applyPayload["ok"] as? Bool, true)
+
+        let learned = try decode(service.handleLine(
+            #"{"id":"learned-effect","method":"action","params":{"context":{"host":"example.com","taskId":"task","stage":"effect","element":{"sig":"sig-effect","role":"button"}},"options":{"dryRun":true,"postMode":"global"},"primitives":[{"type":"click","at":{"x":240,"y":160},"button":"left","holdMs":40,"profile":{"origin":{"x":32,"y":48}}}]}}"#
+        ))["result"] as? [String: Any]
+        let baseline = try decode(service.handleLine(
+            #"{"id":"baseline-effect","method":"action","params":{"context":{"host":"example.com","taskId":"task","stage":"effect","element":{"sig":"sig-effect","role":"button"}},"options":{"dryRun":true,"postMode":"global","disableProfiles":true},"primitives":[{"type":"click","at":{"x":240,"y":160},"button":"left","holdMs":40,"profile":{"origin":{"x":32,"y":48}}}]}}"#
+        ))["result"] as? [String: Any]
+
+        let learnedProfiles = learned?["profiles"] as? [String: Any]
+        let baselineProfiles = baseline?["profiles"] as? [String: Any]
+        let learnedEvents = learned?["events"] as? [[String: Any]] ?? []
+        let baselineEvents = baseline?["events"] as? [[String: Any]] ?? []
+        let learnedMoves = learnedEvents.filter { $0["type"] as? String == "mouseMoved" }
+        let baselineMoves = baselineEvents.filter { $0["type"] as? String == "mouseMoved" }
+
+        XCTAssertEqual(learnedProfiles?["applied"] as? Bool, true)
+        XCTAssertEqual(baselineProfiles?["applied"] as? Bool, false)
+        XCTAssertLessThanOrEqual(learnedMoves.count, 8)
+        XCTAssertGreaterThanOrEqual(learnedMoves.count, 6)
+        XCTAssertGreaterThan(baselineMoves.count, learnedMoves.count)
+        XCTAssertGreaterThan((holdDurationMs(from: learnedEvents) ?? 0) - (holdDurationMs(from: baselineEvents) ?? 0), 70)
+    }
+
     func testLearningStateIncludesTemplateSummaries() throws {
         let store = try ProfileStore(path: ":memory:")
         let service = try makeService(profileStore: store)
@@ -299,6 +329,12 @@ final class ControlServiceTests: XCTestCase {
         let safety = result?["safety"] as? [String: Any]
         let firstActionHumanization = actions.first?["humanization"] as? [String: Any]
         let firstActionMetrics = actions.first?["metrics"] as? [String: Any]
+        let firstActionSteps = actions.first?["steps"] as? [[String: Any]] ?? []
+        let firstActionTrajectory = actions.first?["trajectory"] as? [String: Any]
+        let firstActionPrimitive = actions.first?["primitive"] as? [String: Any]
+        let firstActionEventChain = actions.first?["eventChain"] as? [[String: Any]] ?? []
+        let learningEffect = result?["learningEffect"] as? [String: Any]
+        let activeFields = learningEffect?["activeFields"] as? [String]
 
         XCTAssertEqual(payload["ok"] as? Bool, true)
         XCTAssertEqual(result?["ok"] as? Bool, true)
@@ -317,6 +353,19 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(firstActionHumanization?["profileApplied"] as? Bool, true)
         XCTAssertGreaterThan(firstActionMetrics?["pointCount"] as? Int ?? 0, 0)
         XCTAssertGreaterThan(firstActionMetrics?["pathLengthPx"] as? Double ?? 0, 0)
+        XCTAssertEqual(firstActionPrimitive?["type"] as? String, "click")
+        XCTAssertNotNil(firstActionPrimitive?["startPoint"])
+        XCTAssertNotNil(firstActionPrimitive?["targetPoint"])
+        XCTAssertGreaterThan(firstActionTrajectory?["pointCount"] as? Int ?? 0, 0)
+        XCTAssertGreaterThan(firstActionEventChain.count, 0)
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "prepareMove" })
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "move" })
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "mouseDown" })
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "hold" })
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "mouseUp" })
+        XCTAssertTrue(firstActionSteps.contains { $0["phase"] as? String == "verifyLanding" })
+        XCTAssertTrue(activeFields?.contains("pointCount") == true)
+        XCTAssertTrue(activeFields?.contains("clickHoldMs") == true)
     }
 
     func testLearningInspectReturnsObservableLearningData() throws {
@@ -624,4 +673,18 @@ private final class ConfigurableHIDSink: HIDEventSink, HIDVisualizationControl {
         }
         return hidVisualizationState()
     }
+}
+
+private func holdDurationMs(from events: [[String: Any]]) -> Double? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let down = events.first(where: { ($0["type"] as? String)?.contains("MouseDown") == true }),
+          let up = events.first(where: { ($0["type"] as? String)?.contains("MouseUp") == true }),
+          let downTimestamp = down["timestamp"] as? String,
+          let upTimestamp = up["timestamp"] as? String,
+          let downDate = formatter.date(from: downTimestamp),
+          let upDate = formatter.date(from: upTimestamp) else {
+        return nil
+    }
+    return upDate.timeIntervalSince(downDate) * 1000
 }

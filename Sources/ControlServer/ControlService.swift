@@ -660,13 +660,13 @@ public final class ControlService {
                 requestId: actionId,
                 allowInternalSelfTarget: true
             )
-            actions.append(learningDemoActionSummary(result))
+            actions.append(learningDemoActionSummary(result, phase: "learned", ordinal: index + 1, template: template))
             if stepDelayMs > 0, index < points.count - 1 {
                 Thread.sleep(forTimeInterval: Double(stepDelayMs) / 1_000)
             }
         }
 
-        let baselineSummary = learningDemoActionSummary(baseline)
+        let baselineSummary = learningDemoActionSummary(baseline, phase: "baseline", ordinal: 0, template: template)
         let profilesApplied = actions.allSatisfy { $0["profileApplied"] as? Bool == true }
         let hasMotion = actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }
         let hasClickEvents = actions.allSatisfy {
@@ -690,6 +690,8 @@ public final class ControlService {
                 "selfTarget": true
             ],
             "template": learningTemplateSummaryObject(template),
+            "demoPlan": learningDemoPlanObject(template: template, actionCount: actionCount),
+            "learningEffect": learningEffectObject(template: template),
             "seededDemoTemplate": seededDemoTemplate,
             "baseline": baselineSummary,
             "actions": actions,
@@ -855,24 +857,45 @@ public final class ControlService {
         ]
     }
 
-    private func learningDemoActionSummary(_ result: [String: Any]) -> [String: Any] {
+    private func learningDemoActionSummary(
+        _ result: [String: Any],
+        phase: String,
+        ordinal: Int,
+        template: ProfileTemplate
+    ) -> [String: Any] {
         let events = result["events"] as? [[String: Any]] ?? []
         let profiles = result["profiles"] as? [String: Any] ?? [:]
         let verification = result["verification"] as? [String: Any] ?? [:]
         let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
         let mouseDowns = events.filter { ($0["type"] as? String)?.contains("MouseDown") == true }
         let mouseUps = events.filter { ($0["type"] as? String)?.contains("MouseUp") == true }
+        let metrics = eventMetricsObject(events)
         return [
             "id": result["id"] ?? NSNull(),
             "ok": result["ok"] as? Bool ?? false,
+            "phase": phase,
+            "title": phase == "baseline" ? "对照动作：未使用键鼠习惯模板" : "学习动作 \(ordinal)：使用键鼠习惯模板",
+            "description": phase == "baseline"
+                ? "用于对比的安全 dry-run，禁用模板，只展示基础拟人化轨迹。"
+                : "使用历史样本聚合出的 MotionProfile 生成路线、速度、停顿和点击节奏。",
+            "demonstrates": learningDemoDemonstrates(events: events),
             "profileApplied": profiles["applied"] as? Bool ?? false,
             "templateIds": profiles["templateIds"] ?? [],
+            "learningEffect": [
+                "templateApplied": profiles["applied"] as? Bool ?? false,
+                "templateActionType": template.actionType,
+                "appliedFields": phase == "baseline" ? [] : learningEffectFieldNames(template: template)
+            ],
             "humanization": [
                 "profileApplied": profiles["applied"] as? Bool ?? false,
                 "templateIds": profiles["templateIds"] ?? [],
                 "eventChainTypes": events.compactMap { $0["type"] as? String }
             ],
-            "metrics": eventMetricsObject(events),
+            "primitive": learningDemoPrimitiveObject(events: events, verification: verification),
+            "trajectory": learningDemoTrajectoryObject(events: events, metrics: metrics),
+            "steps": learningDemoSteps(events: events, verification: verification),
+            "eventChain": learningDemoEventChain(events),
+            "metrics": metrics,
             "eventCount": events.count,
             "mouseMoveCount": mouseMoves.count,
             "mouseDownCount": mouseDowns.count,
@@ -881,6 +904,269 @@ public final class ControlService {
             "expectedPointer": verification["expectedPointer"] ?? NSNull(),
             "finalPointer": verification["finalPointer"] ?? NSNull()
         ]
+    }
+
+    private func learningDemoPlanObject(template: ProfileTemplate, actionCount: Int) -> [String: Any] {
+        [
+            "source": "virtualhid-action-events",
+            "safePreview": true,
+            "actionCount": actionCount,
+            "sequence": [
+                "对照动作：禁用学习模板，生成基础轨迹和点击事件。",
+                "学习动作：命中能力模板，生成带学习参数的移动轨迹。",
+                "逐步展示：移动起点、滑动轨迹、按下、保持、松开、落点校验。"
+            ],
+            "templateScope": [
+                "host": template.host,
+                "elementSig": template.elementSig,
+                "taskId": (template.taskId as Any?) ?? NSNull(),
+                "actionType": template.actionType
+            ]
+        ]
+    }
+
+    private func learningEffectObject(template: ProfileTemplate) -> [String: Any] {
+        [
+            "learns": [
+                "routeShape": ["pointCount", "straightnessMean", "turnJitterMean", "wind", "gravity", "maxStep", "jitter", "controlSpread", "detourProbability", "targetSpreadPx"],
+                "movementTiming": ["moveSpeedPxS", "dragSpeedPxS", "hesitationProbability", "hesitationMs", "settleMs"],
+                "clickTiming": ["clickHoldMs", "interClickMs"],
+                "keyboardTiming": ["dwellMsMean", "interKeyMsMean"]
+            ],
+            "appliesThrough": [
+                "applyProfiles merges matching ProfileTemplate MotionProfile into ActionPrimitive before ActionExecutor emits events.",
+                "ActionExecutor uses MotionProfile for path generation, point count, timing curve, click hold, inter-click, settle, detour and key rhythm."
+            ],
+            "activeFields": learningEffectFieldNames(template: template)
+        ]
+    }
+
+    private func learningEffectFieldNames(template: ProfileTemplate) -> [String] {
+        guard let motion = decodedMotionProfile(from: template) else {
+            return []
+        }
+        var fields = [String]()
+        if motion.flavor != nil { fields.append("flavor") }
+        if motion.behaviorBlend != nil { fields.append("behaviorBlend") }
+        if motion.moveSpeedPxS != nil { fields.append("moveSpeedPxS") }
+        if motion.dragSpeedPxS != nil { fields.append("dragSpeedPxS") }
+        if motion.pointCount != nil { fields.append("pointCount") }
+        if motion.overshootProbability != nil { fields.append("overshootProbability") }
+        if motion.wind != nil { fields.append("wind") }
+        if motion.gravity != nil { fields.append("gravity") }
+        if motion.maxStep != nil { fields.append("maxStep") }
+        if motion.jitter != nil { fields.append("jitter") }
+        if motion.controlSpread != nil { fields.append("controlSpread") }
+        if motion.targetSpreadPx != nil { fields.append("targetSpreadPx") }
+        if motion.hesitationProbability != nil { fields.append("hesitationProbability") }
+        if motion.hesitationMs != nil { fields.append("hesitationMs") }
+        if motion.settleMs != nil { fields.append("settleMs") }
+        if motion.detourProbability != nil { fields.append("detourProbability") }
+        if motion.clickHoldMs != nil { fields.append("clickHoldMs") }
+        if motion.interClickMs != nil { fields.append("interClickMs") }
+        if motion.dwellMsMean != nil { fields.append("dwellMsMean") }
+        if motion.interKeyMsMean != nil { fields.append("interKeyMsMean") }
+        if motion.straightnessMean != nil { fields.append("straightnessMean") }
+        if motion.turnJitterMean != nil { fields.append("turnJitterMean") }
+        return fields
+    }
+
+    private func learningDemoDemonstrates(events: [[String: Any]]) -> [String] {
+        var capabilities = [String]()
+        if events.contains(where: { $0["type"] as? String == "mouseMoved" }) {
+            capabilities.append("mouseMoveTrajectory")
+        }
+        if events.contains(where: { ($0["type"] as? String)?.contains("MouseDown") == true }) {
+            capabilities.append("mouseDown")
+        }
+        if !replayHoldDurations(from: injectedEvents(from: events)).isEmpty {
+            capabilities.append("pressHoldDuration")
+        }
+        if events.contains(where: { ($0["type"] as? String)?.contains("MouseUp") == true }) {
+            capabilities.append("mouseUp")
+        }
+        if events.contains(where: { $0["type"] as? String == "keyDown" || $0["type"] as? String == "keyUp" }) {
+            capabilities.append("keyboardRhythm")
+        }
+        return capabilities
+    }
+
+    private func learningDemoPrimitiveObject(events: [[String: Any]], verification: [String: Any]) -> [String: Any] {
+        let points = eventPoints(events)
+        let down = events.first { ($0["type"] as? String)?.contains("MouseDown") == true }
+        let up = events.first { ($0["type"] as? String)?.contains("MouseUp") == true }
+        return [
+            "type": primitiveType(events),
+            "startPoint": (points.first.map(pointObject) as Any?) ?? NSNull(),
+            "targetPoint": (pointObjectFromAny(verification["expectedPointer"]) as Any?) ?? (points.last.map(pointObject) as Any?) ?? NSNull(),
+            "finalPoint": (pointObjectFromAny(verification["finalPointer"]) as Any?) ?? (points.last.map(pointObject) as Any?) ?? NSNull(),
+            "mouseDownPoint": (eventPoint(from: down).map(pointObject) as Any?) ?? NSNull(),
+            "mouseUpPoint": (eventPoint(from: up).map(pointObject) as Any?) ?? NSNull()
+        ]
+    }
+
+    private func learningDemoTrajectoryObject(events: [[String: Any]], metrics: [String: Any]) -> [String: Any] {
+        let points = eventPoints(events)
+        return [
+            "source": "virtualhid-action-events",
+            "startPoint": (points.first.map(pointObject) as Any?) ?? NSNull(),
+            "endPoint": (points.last.map(pointObject) as Any?) ?? NSNull(),
+            "points": points.map(pointObject),
+            "pointCount": points.count,
+            "pathLengthPx": metrics["pathLengthPx"] ?? NSNull(),
+            "durationMs": metrics["durationMs"] ?? NSNull(),
+            "speedPxS": metrics["speedPxS"] ?? NSNull(),
+            "straightness": metrics["straightness"] ?? NSNull(),
+            "turnJitter": metrics["turnJitter"] ?? NSNull()
+        ]
+    }
+
+    private func learningDemoEventChain(_ events: [[String: Any]]) -> [[String: Any]] {
+        events.enumerated().map { index, event in
+            [
+                "index": index,
+                "type": event["type"] as? String ?? "event",
+                "location": event["location"] ?? NSNull(),
+                "key": event["key"] ?? NSNull(),
+                "virtualKey": event["virtualKey"] ?? NSNull(),
+                "timestamp": event["timestamp"] ?? NSNull()
+            ]
+        }
+    }
+
+    private func learningDemoSteps(events: [[String: Any]], verification: [String: Any]) -> [[String: Any]] {
+        var steps = [[String: Any]]()
+        let points = eventPoints(events)
+        let moveEvents = events.filter { $0["type"] as? String == "mouseMoved" }
+        let movePoints = eventPoints(moveEvents)
+        let expected = pointObjectFromAny(verification["expectedPointer"]) ?? points.last.map(pointObject)
+        let final = pointObjectFromAny(verification["finalPointer"]) ?? points.last.map(pointObject)
+
+        if let first = points.first {
+            steps.append([
+                "index": steps.count,
+                "phase": "prepareMove",
+                "title": "准备移动",
+                "detail": "确认起点和预期终点，等待 VirtualHID 事件流。",
+                "startPoint": pointObject(first),
+                "targetPoint": (expected as Any?) ?? NSNull()
+            ])
+        }
+
+        if let first = movePoints.first, let last = movePoints.last {
+            let metrics = eventMetricsObject(moveEvents)
+            steps.append([
+                "index": steps.count,
+                "phase": "move",
+                "title": "滑动轨迹",
+                "detail": "沿 VirtualHID 生成的 mouseMoved 点序列移动。",
+                "startPoint": pointObject(first),
+                "endPoint": pointObject(last),
+                "pointCount": movePoints.count,
+                "durationMs": metrics["durationMs"] ?? NSNull(),
+                "pathLengthPx": metrics["pathLengthPx"] ?? NSNull()
+            ])
+        }
+
+        let injected = injectedEvents(from: events)
+        for (index, event) in events.enumerated() {
+            guard let type = event["type"] as? String else {
+                continue
+            }
+            if type.contains("MouseDown") {
+                let hold = holdDurationFrom(events: injected, downIndex: index)
+                steps.append([
+                    "index": steps.count,
+                    "phase": "mouseDown",
+                    "title": "开始下压",
+                    "detail": "生成 \(type)；演示为 dry-run，不投递真实点击。",
+                    "eventIndex": index,
+                    "point": event["location"] ?? NSNull()
+                ])
+                if let hold {
+                    steps.append([
+                        "index": steps.count,
+                        "phase": "hold",
+                        "title": "保持按压",
+                        "detail": "保持按压 \(Int(hold.rounded()))ms。",
+                        "durationMs": hold,
+                        "point": event["location"] ?? NSNull()
+                    ])
+                }
+            } else if type.contains("MouseUp") {
+                steps.append([
+                    "index": steps.count,
+                    "phase": "mouseUp",
+                    "title": "松开",
+                    "detail": "生成 \(type)，完成一次点击时序。",
+                    "eventIndex": index,
+                    "point": event["location"] ?? NSNull()
+                ])
+            }
+        }
+
+        if expected != nil || final != nil {
+            steps.append([
+                "index": steps.count,
+                "phase": "verifyLanding",
+                "title": "落点校验",
+                "detail": "对比预期目标落点和 VirtualHID 最终落点。",
+                "expectedPointer": (expected as Any?) ?? NSNull(),
+                "finalPointer": (final as Any?) ?? NSNull()
+            ])
+        }
+        return steps
+    }
+
+    private func eventPoints(_ events: [[String: Any]]) -> [CGPoint] {
+        events.compactMap(eventPoint)
+    }
+
+    private func eventPoint(from event: [String: Any]?) -> CGPoint? {
+        guard let location = event?["location"] as? [String: Any],
+              let x = number(location["x"]),
+              let y = number(location["y"]) else {
+            return nil
+        }
+        return CGPoint(x: x, y: y)
+    }
+
+    private func pointObjectFromAny(_ value: Any?) -> [String: Double]? {
+        guard let object = value as? [String: Any],
+              let x = number(object["x"]),
+              let y = number(object["y"]) else {
+            return nil
+        }
+        return ["x": x, "y": y]
+    }
+
+    private func primitiveType(_ events: [[String: Any]]) -> String {
+        if events.contains(where: { ($0["type"] as? String)?.contains("MouseDown") == true }) {
+            return "click"
+        }
+        if events.contains(where: { ($0["type"] as? String)?.contains("Dragged") == true }) {
+            return "drag"
+        }
+        if events.contains(where: { $0["type"] as? String == "scrollWheel" }) {
+            return "scroll"
+        }
+        if events.contains(where: { $0["type"] as? String == "keyDown" || $0["type"] as? String == "pasteText" }) {
+            return "type"
+        }
+        return events.contains(where: { $0["type"] as? String == "mouseMoved" }) ? "move" : "action"
+    }
+
+    private func holdDurationFrom(events: [InjectedEvent], downIndex: Int) -> Double? {
+        guard events.indices.contains(downIndex),
+              events[downIndex].type.contains("MouseDown"),
+              let downDate = eventDate(events[downIndex]) else {
+            return nil
+        }
+        guard let up = events.dropFirst(downIndex + 1).first(where: { $0.type.contains("MouseUp") }),
+              let upDate = eventDate(up) else {
+            return nil
+        }
+        return max(0, upDate.timeIntervalSince(downDate) * 1000)
     }
 
     private func eventMetricsObject(_ events: [[String: Any]]) -> [String: Any] {
