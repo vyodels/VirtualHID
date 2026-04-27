@@ -65,6 +65,41 @@ final class HIDOverlayTrackingTests: XCTestCase {
         XCTAssertTrue(snapshot.historyTrailPoints.isEmpty)
     }
 
+    func testPersistentLiveHistoryKeepsCompletedFrameAcrossTransientClearsAndPrefixes() {
+        let context = visualContext(actionId: "live-management-center-click", dryRun: false)
+        let actual = CodablePoint(x: 210, y: 170)
+        let events = [
+            injectedEvent(type: "mouseMoved", x: 30, y: 50, offsetMs: 0),
+            injectedEvent(type: "mouseMoved", x: 120, y: 110, offsetMs: 18),
+            injectedEvent(type: "leftMouseDown", x: 205, y: 165, offsetMs: 34),
+            injectedEvent(type: "leftMouseUp", x: 205, y: 165, offsetMs: 70)
+        ]
+        let view = HIDOverlayView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            screenFrame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            settings: HIDOverlaySettings(persistent: true)
+        )
+
+        view.render(frame(context: context, events: events, actual: actual))
+        var snapshot = view.snapshotForTesting()
+        XCTAssertEqual(snapshot.currentEventCount, events.count)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.historyEventCounts, [events.count])
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+
+        view.clearTransientState()
+        snapshot = view.snapshotForTesting()
+        XCTAssertEqual(snapshot.currentEventCount, events.count)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.historyEventCounts, [events.count])
+
+        view.render(frame(context: context, events: Array(events.prefix(1)), actual: nil))
+        snapshot = view.snapshotForTesting()
+        XCTAssertEqual(snapshot.currentEventCount, 1)
+        XCTAssertEqual(snapshot.historyEventCounts, [events.count])
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+    }
+
     func testBestTrackedWindowMatchPrefersTitleMatch() {
         let target = trackedTarget(title: "Candidate Detail", frame: CGRect(x: 100, y: 80, width: 900, height: 700))
         let windows = [
@@ -124,14 +159,14 @@ final class HIDOverlayTrackingTests: XCTestCase {
         )
     }
 
-    private func visualContext(actionId: String) -> HIDActionVisualContext {
+    private func visualContext(actionId: String, dryRun: Bool = true) -> HIDActionVisualContext {
         HIDActionVisualContext(
             actionId: actionId,
             bundleIdentifier: "com.example.Target",
             pid: 42,
             windowTitle: "Demo",
             windowFrame: CodableRect(x: 0, y: 0, width: 320, height: 240),
-            dryRun: true,
+            dryRun: dryRun,
             postMode: "global",
             actionTypes: ["click"]
         )

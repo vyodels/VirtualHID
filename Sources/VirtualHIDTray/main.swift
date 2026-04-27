@@ -100,7 +100,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningSamplesLabel: NSTextField?
     private var learningTracesLabel: NSTextField?
     private var learningTemplatesLabel: NSTextField?
-    private var templateInventoryLabel: NSTextField?
+    private var templateInventoryCountLabel: NSTextField?
+    private var templateInventoryTextView: NSTextView?
     private var learningAnalysisLabel: NSTextField?
     private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
@@ -680,7 +681,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningSamplesLabel = nil
         learningTracesLabel = nil
         learningTemplatesLabel = nil
-        templateInventoryLabel = nil
+        templateInventoryCountLabel = nil
+        templateInventoryTextView = nil
         learningAnalysisLabel = nil
         learningDemoStatusLabel = nil
         learningEnabledCheckbox = nil
@@ -1047,22 +1049,40 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         cardContent.addArrangedSubview(label("能力模板管理", size: 16, weight: .semibold))
         cardContent.addArrangedSubview(label("模板来自自动入库的键鼠片段。它们只影响 VirtualHID 执行层的轨迹、节奏、停顿、按压和键盘间隔，不包含业务站点逻辑。", size: 12, color: .secondaryLabelColor))
 
-        let inventory = label("", size: 11, color: .secondaryLabelColor)
-        inventory.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        inventory.maximumNumberOfLines = 0
-        inventory.preferredMaxLayoutWidth = 642
-        templateInventoryLabel = inventory
+        let inventoryCount = label("", size: 11, weight: .medium, color: .secondaryLabelColor)
+        templateInventoryCountLabel = inventoryCount
+        cardContent.addArrangedSubview(inventoryCount)
+
         let inventoryScroll = NSScrollView()
         inventoryScroll.drawsBackground = false
         inventoryScroll.hasVerticalScroller = true
+        inventoryScroll.hasHorizontalScroller = false
         inventoryScroll.autohidesScrollers = false
         inventoryScroll.borderType = .noBorder
         inventoryScroll.translatesAutoresizingMaskIntoConstraints = false
-        inventory.translatesAutoresizingMaskIntoConstraints = false
-        inventoryScroll.documentView = inventory
+
+        let inventoryTextView = NSTextView(frame: NSRect(x: 0, y: 0, width: 642, height: 360))
+        inventoryTextView.drawsBackground = false
+        inventoryTextView.isEditable = false
+        inventoryTextView.isSelectable = true
+        inventoryTextView.isRichText = false
+        inventoryTextView.importsGraphics = false
+        inventoryTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        inventoryTextView.textColor = .secondaryLabelColor
+        inventoryTextView.textContainerInset = NSSize(width: 0, height: 8)
+        inventoryTextView.textContainer?.lineFragmentPadding = 0
+        inventoryTextView.textContainer?.containerSize = NSSize(width: 642, height: CGFloat.greatestFiniteMagnitude)
+        inventoryTextView.textContainer?.widthTracksTextView = true
+        inventoryTextView.isHorizontallyResizable = false
+        inventoryTextView.isVerticallyResizable = true
+        inventoryTextView.minSize = NSSize(width: 0, height: 360)
+        inventoryTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        inventoryTextView.autoresizingMask = [.width]
+        templateInventoryTextView = inventoryTextView
+
+        inventoryScroll.documentView = inventoryTextView
         inventoryScroll.widthAnchor.constraint(equalToConstant: 642).isActive = true
         inventoryScroll.heightAnchor.constraint(equalToConstant: 360).isActive = true
-        inventory.widthAnchor.constraint(equalTo: inventoryScroll.contentView.widthAnchor).isActive = true
         cardContent.addArrangedSubview(inventoryScroll)
 
         let buttons = NSStackView()
@@ -1201,6 +1221,27 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         return button
     }
 
+    private func updateTemplateInventoryTextView(_ textView: NSTextView, text: String, color: NSColor) {
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let didChangeText = textView.string != text
+        if didChangeText {
+            textView.string = text
+        }
+        textView.font = font
+        textView.textColor = color
+
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        if fullRange.length > 0 {
+            textView.textStorage?.setAttributes([
+                .font: font,
+                .foregroundColor: color
+            ], range: fullRange)
+        }
+        if didChangeText {
+            textView.scrollToBeginningOfDocument(nil)
+        }
+    }
+
     private func updateControls() {
         statusItem.button?.toolTip = lastState.statusText
         statusItem.button?.alphaValue = lastState.available ? 1.0 : 0.6
@@ -1232,8 +1273,16 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningTracesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         learningTemplatesLabel?.stringValue = lastLearningState.templateListText
         learningTemplatesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
-        templateInventoryLabel?.stringValue = lastLearningState.templateInventoryText
-        templateInventoryLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
+        let templateInventoryColor: NSColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
+        templateInventoryCountLabel?.stringValue = lastLearningState.templateInventoryCountText
+        templateInventoryCountLabel?.textColor = templateInventoryColor
+        if let templateInventoryTextView {
+            updateTemplateInventoryTextView(
+                templateInventoryTextView,
+                text: lastLearningState.templateInventoryText,
+                color: templateInventoryColor
+            )
+        }
         learningAnalysisLabel?.stringValue = lastLearningState.analysisText
         learningAnalysisLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         learningDemoStatusLabel?.stringValue = lastLearningDemoStatus
@@ -1462,11 +1511,26 @@ private struct LearningState {
             return message ?? "学习服务不可用"
         }
         guard !templates.isEmpty else {
+            if totalTemplates > 0 {
+                return "当前服务报告共有 \(totalTemplates) 个能力模板，但本次 inspect 未返回模板详情，暂无法展开列表。请点击「刷新」或检查 learning.inspect 的 templates 字段。"
+            }
             return "暂无能力模板。模板至少需要足够数量的历史片段才能聚合生成。"
         }
         return templates.enumerated().map { index, template in
             "\(index + 1). \(template.detailText)"
         }.joined(separator: "\n\n")
+    }
+
+    var templateInventoryCountText: String {
+        guard available else {
+            return "模板清单不可用"
+        }
+        let visibleCount = templates.count
+        let totalCount = max(totalTemplates, visibleCount)
+        if totalCount == visibleCount {
+            return "显示 \(visibleCount) / 共 \(totalCount) 个模板"
+        }
+        return "显示 \(visibleCount) / 共 \(totalCount) 个模板（本次接口返回 \(visibleCount) 个）"
     }
 
     var analysisText: String {

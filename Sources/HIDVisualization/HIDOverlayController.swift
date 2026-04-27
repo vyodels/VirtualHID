@@ -250,7 +250,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                         stepDetail: self.playbackStep(for: summary.events, context: summary.context).detail
                     )
                 )
-                self.scheduleClear()
+                if !self.shouldRetainCompletedAction(for: summary.context) {
+                    self.scheduleClear()
+                }
             }
         }
     }
@@ -324,7 +326,11 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     }
 
     private func shouldRetainPlayback(for context: HIDActionVisualContext) -> Bool {
-        context.dryRun && currentSettings.persistent
+        shouldRetainCompletedAction(for: context)
+    }
+
+    private func shouldRetainCompletedAction(for context: HIDActionVisualContext) -> Bool {
+        accepts(context) && currentSettings.persistent
     }
 
     private func controllerDemoActionTitle(for context: HIDActionVisualContext) -> String {
@@ -634,7 +640,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     }
 
     private func retainOverlayAfterTrackingLoss(for context: HIDActionVisualContext) -> Bool {
-        guard shouldRetainPlayback(for: context) else {
+        guard context.dryRun, shouldRetainCompletedAction(for: context) else {
             return false
         }
         trackedTarget = nil
@@ -1147,8 +1153,7 @@ func hidOverlayTrailPoints(events: [InjectedEvent], actual: CodablePoint?) -> [C
 }
 
 private func hidOverlayIsCompletedHistoryFrame(_ frame: HIDOverlayFrame) -> Bool {
-    frame.context.dryRun
-        && frame.actual != nil
+    frame.actual != nil
         && frame.events.count > 1
         && hidOverlayTrailPoints(events: frame.events, actual: frame.actual).count >= 2
 }
