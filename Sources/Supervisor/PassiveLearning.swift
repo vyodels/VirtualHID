@@ -812,7 +812,7 @@ final class PassiveLearningRecorder {
     }
 
     private func resolvedHost(_ host: String?) -> String {
-        activeSession?.host ?? normalized(host) ?? Self.globalHost
+        Self.globalHost
     }
 
     private func normalized(_ value: String?) -> String? {

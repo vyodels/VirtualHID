@@ -323,7 +323,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             try advanceTeachingInstruction()
             startTeachingInstructionTimer()
         } catch {
-            lastLearningState = .offline(message: localizedErrorMessage(error))
+            handleTeachingError(error)
         }
         updateControls()
     }
@@ -332,7 +332,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         do {
             try advanceTeachingInstruction()
         } catch {
-            lastLearningState = .offline(message: localizedErrorMessage(error))
+            handleTeachingError(error)
         }
         updateControls()
     }
@@ -348,7 +348,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 try self?.advanceTeachingInstruction()
                 self?.updateControls()
             } catch {
-                self?.lastLearningState = .offline(message: localizedErrorMessage(error))
+                self?.handleTeachingError(error)
                 self?.updateControls()
             }
         }
@@ -361,8 +361,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func advanceTeachingInstruction() throws {
         let response = try call(method: "learning.teaching.next", params: [:])
-        guard let guide = response["guide"] as? [String: Any],
-              let teaching = response["teaching"] as? [String: Any] else {
+        let result = resultPayload(from: response)
+        guard let guide = result["guide"] as? [String: Any],
+              let teaching = result["teaching"] as? [String: Any] else {
             throw NSError(domain: "VirtualHIDTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "现场教学未返回下一条教学指令"])
         }
         _ = try call(method: "hud.configure", params: [
@@ -391,6 +392,17 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
         lastLearningState = LearningState(response: learningResponse)
         lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+    }
+
+    private func handleTeachingError(_ error: Error) {
+        let message = localizedErrorMessage(error)
+        teachingStatusLabel?.stringValue = "现场教学指令失败：\(message)"
+        teachingStatusLabel?.textColor = .systemRed
+        if let response = try? call(method: "learning.inspect", params: ["limit": learningInspectLimit]) {
+            lastLearningState = LearningState(response: response)
+        } else {
+            lastLearningState = .offline(message: message)
+        }
     }
 
     @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
@@ -1486,6 +1498,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
         }
         return try runtime.call(method: method, params: params)
+    }
+
+    private func resultPayload(from response: [String: Any]) -> [String: Any] {
+        response["result"] as? [String: Any] ?? response
     }
 
     private func openSystemSettings(_ urlString: String) {

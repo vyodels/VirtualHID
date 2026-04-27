@@ -135,7 +135,7 @@
 - `PassiveLearning` 已接入 `PassiveObserver`，在用户显式开启后从真实键鼠事件流自动生成 compact 行为样本。
 - `learning.state / learning.configure / learning.teaching.start / learning.teaching.next / learning.teaching.stop` 已进入 daemon JSON-RPC 控制面；`learning.session.start / learning.session.stop` 仅作为兼容别名保留。
 - 现场教学样本实时自动写入 `ProfileStore`；`learning.teaching.next` 由 VirtualHID 生成下一条教学动作、起点和目标点，并过滤掉非当前教学动作的输入；`learning.teaching.stop` 只结束教学窗口，不再作为手动保存入口。
-- `ProfileStore.lookupTemplate` 已加入 `__global__` 全局键鼠能力模板 fallback，避免按站点硬编码行为规则。
+- `ProfileStore.lookupTemplate` 已加入 `__global__` 全局键鼠能力模板 fallback；管理中心能力模板只展示全局个人键鼠习惯，站点 host 不再作为学习模板维度，避免按站点硬编码行为规则。
 - 仍缺真实人工/HID 长期样本回归；当前 synthetic smoke 只证明闭环通路可用。
 
 任务：

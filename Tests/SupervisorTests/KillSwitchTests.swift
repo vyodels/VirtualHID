@@ -93,14 +93,14 @@ final class KillSwitchTests: XCTestCase {
         _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 58, y: 30), ts: 2_150)
         XCTAssertEqual(published.count, 3, "teaching movement samples are persisted automatically")
         XCTAssertEqual(published[2].source, "user-teaching")
-        XCTAssertEqual(published[2].host, "training.local")
+        XCTAssertEqual(published[2].host, "__global__")
         XCTAssertEqual(published[2].actionType, "move")
 
         _ = observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 76, y: 44), ts: 2_230)
         _ = observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 76, y: 44), ts: 2_300)
         XCTAssertEqual(published.count, 4, "teaching click samples are persisted automatically")
         XCTAssertEqual(published[3].source, "user-teaching")
-        XCTAssertEqual(published[3].host, "training.local")
+        XCTAssertEqual(published[3].host, "__global__")
         XCTAssertEqual(published[3].actionType, "click")
 
         let stop = observer.stopLearningSession(commit: true)

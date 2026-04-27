@@ -300,9 +300,10 @@ final class ControlServiceTests: XCTestCase {
     func testLearningStateIncludesTemplateSummaries() throws {
         let store = try ProfileStore(path: ":memory:")
         let service = try makeService(profileStore: store)
-        _ = service.handleLine(
-            #"{"id":"apply-summary","method":"profiles.apply","params":{"host":"example.com","elementSig":"sig-summary","taskId":"task","actionType":"click","sampleSize":12,"confidence":0.75,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":12,"motion":{"pointCount":{"min":10,"max":14}}}}}"#
-        )
+        let applyPayload = try decode(service.handleLine(
+            #"{"id":"apply-summary","method":"profiles.apply","params":{"host":"__global__","elementSig":"","actionType":"click","sampleSize":12,"confidence":0.75,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":12,"motion":{"pointCount":{"min":10,"max":14}}}}}"#
+        ))
+        XCTAssertEqual(applyPayload["ok"] as? Bool, true, String(describing: applyPayload))
 
         let payload = try decode(service.handleLine(#"{"id":"learning-state","method":"learning.state","params":{}}"#))
         let result = payload["result"] as? [String: Any]
@@ -310,8 +311,8 @@ final class ControlServiceTests: XCTestCase {
 
         XCTAssertEqual(payload["ok"] as? Bool, true)
         XCTAssertEqual(result?["totalTemplates"] as? Int, 1)
-        XCTAssertEqual(templates?.first?["host"] as? String, "example.com")
-        XCTAssertEqual(templates?.first?["elementSig"] as? String, "sig-summary")
+        XCTAssertEqual(templates?.first?["host"] as? String, "__global__")
+        XCTAssertEqual(templates?.first?["elementSig"] as? String, "")
         XCTAssertEqual(templates?.first?["actionType"] as? String, "click")
         XCTAssertEqual(templates?.first?["sampleSize"] as? Int, 12)
     }
@@ -344,8 +345,8 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(safety?["dryRun"] as? Bool, true)
         XCTAssertEqual(safety?["realClickPosted"] as? Bool, false)
         XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, false)
-        XCTAssertEqual(template?["host"] as? String, "example.com")
-        XCTAssertEqual(template?["elementSig"] as? String, "sig-click-demo")
+        XCTAssertEqual(template?["host"] as? String, "__global__")
+        XCTAssertEqual(template?["elementSig"] as? String, "")
         XCTAssertEqual(baseline?["profileApplied"] as? Bool, false)
         XCTAssertEqual(actions.count, 2)
         XCTAssertEqual(actions.allSatisfy { $0["profileApplied"] as? Bool == true }, true)
@@ -549,27 +550,54 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(activeSession?["targetAction"] as? String, "drag")
     }
 
-    func testLearningInspectReturnsAllTemplateSummariesForThirteenLearnedTemplates() throws {
+    func testLearningInspectOnlyShowsGlobalAbilityTemplates() throws {
         let service = try makeService()
         try seedTemplateInventory(service: service, count: 13)
+        let visibleClickPayload = try decode(service.handleLine(try profilesApplyLine(
+            id: "apply-visible-click",
+            host: "__global__",
+            elementSig: "",
+            taskId: nil,
+            actionType: "click",
+            sampleSize: 18
+        )))
+        XCTAssertEqual(visibleClickPayload["ok"] as? Bool, true, String(describing: visibleClickPayload))
+        let visibleMovePayload = try decode(service.handleLine(try profilesApplyLine(
+            id: "apply-visible-move",
+            host: "__global__",
+            elementSig: "",
+            taskId: nil,
+            actionType: "move",
+            sampleSize: 21
+        )))
+        XCTAssertEqual(visibleMovePayload["ok"] as? Bool, true, String(describing: visibleMovePayload))
+        let hiddenGlobalTaskPayload = try decode(service.handleLine(try profilesApplyLine(
+            id: "apply-hidden-global-task",
+            host: "__global__",
+            elementSig: "",
+            taskId: "management-learning-demo",
+            actionType: "drag",
+            sampleSize: 30
+        )))
+        XCTAssertEqual(hiddenGlobalTaskPayload["ok"] as? Bool, true, String(describing: hiddenGlobalTaskPayload))
 
         let inspectPayload = try decode(service.handleLine(#"{"id":"learning-inspect-all","method":"learning.inspect","params":{}}"#))
         let inspectResult = inspectPayload["result"] as? [String: Any]
         let inspectTemplates = inspectResult?["templates"] as? [[String: Any]] ?? []
-        let inspectSigs = Set(inspectTemplates.compactMap { $0["elementSig"] as? String })
         let statePayload = try decode(service.handleLine(#"{"id":"learning-state-all","method":"learning.state","params":{}}"#))
         let stateResult = statePayload["result"] as? [String: Any]
         let stateTemplates = stateResult?["templates"] as? [[String: Any]] ?? []
 
         XCTAssertEqual(inspectPayload["ok"] as? Bool, true)
-        XCTAssertEqual(inspectResult?["totalTemplates"] as? Int, 13)
-        XCTAssertEqual(inspectResult?["returnedTemplates"] as? Int, 13)
-        XCTAssertGreaterThanOrEqual(inspectResult?["templateLimit"] as? Int ?? 0, 13)
-        XCTAssertEqual(inspectTemplates.count, 13)
-        XCTAssertEqual(inspectSigs.count, 13)
+        XCTAssertEqual(inspectResult?["totalTemplates"] as? Int, 2)
+        XCTAssertEqual(inspectResult?["returnedTemplates"] as? Int, 2)
+        XCTAssertEqual(Set(inspectTemplates.compactMap { $0["host"] as? String }), Set(["__global__"]))
+        XCTAssertEqual(Set(inspectTemplates.compactMap { $0["elementSig"] as? String }), Set([""]))
+        XCTAssertEqual(Set(inspectTemplates.compactMap { $0["taskId"] as? String }), Set<String>())
+        XCTAssertEqual(Set(inspectTemplates.compactMap { $0["actionType"] as? String }), Set(["click", "move"]))
         XCTAssertEqual(statePayload["ok"] as? Bool, true)
-        XCTAssertEqual(stateResult?["totalTemplates"] as? Int, 13)
-        XCTAssertEqual(stateTemplates.count, 13)
+        XCTAssertEqual(stateResult?["totalTemplates"] as? Int, 2)
+        XCTAssertEqual(stateTemplates.count, 2)
     }
 
     func testTraceCommitPayloadPreservesRawHIDFieldsForRebuild() throws {
@@ -983,6 +1011,37 @@ final class ControlServiceTests: XCTestCase {
 
         let payload = try decode(service.handleLine(#"{"id":"rebuild-demo","method":"profiles.rebuild","params":{"host":"example.com"}}"#))
         XCTAssertEqual(payload["ok"] as? Bool, true)
+        try publishSeededTemplatesAsGlobal(service: service, sourceHost: "example.com", actions: actions)
+    }
+
+    private func publishSeededTemplatesAsGlobal(
+        service: ControlService,
+        sourceHost: String,
+        actions: Set<String>
+    ) throws {
+        let listPayload = try decode(service.handleLine(#"{"id":"list-seeded","method":"profiles.list","params":{"host":"\#(sourceHost)"}}"#))
+        let result = listPayload["result"] as? [String: Any]
+        let templates = result?["templates"] as? [[String: Any]] ?? []
+        for template in templates {
+            guard let actionType = template["actionType"] as? String,
+                  actions.contains(actionType),
+                  let params = template["params"] as? [String: Any]
+            else {
+                continue
+            }
+            let line = try profilesApplyLine(
+                id: "apply-global-\(actionType)",
+                host: "__global__",
+                elementSig: "",
+                taskId: nil,
+                actionType: actionType,
+                sampleSize: template["sampleSize"] as? Int ?? 25,
+                confidence: template["confidence"] as? Double ?? 0.8,
+                params: params
+            )
+            let payload = try decode(service.handleLine(line))
+            XCTAssertEqual(payload["ok"] as? Bool, true, String(describing: payload))
+        }
     }
 
     private func seedTemplateInventory(service: ControlService, count: Int) throws {
@@ -1017,6 +1076,45 @@ final class ControlServiceTests: XCTestCase {
 
         let payload = try decode(service.handleLine(#"{"id":"rebuild-inventory","method":"profiles.rebuild","params":{"host":"example.com"}}"#))
         XCTAssertEqual(payload["ok"] as? Bool, true)
+    }
+
+    private func profilesApplyLine(
+        id: String,
+        host: String,
+        elementSig: String,
+        taskId: String?,
+        actionType: String,
+        sampleSize: Int,
+        confidence: Double = 0.85,
+        params: [String: Any]? = nil
+    ) throws -> String {
+        var applyParams: [String: Any] = [
+            "host": host,
+            "elementSig": elementSig,
+            "actionType": actionType,
+            "sampleSize": sampleSize,
+            "confidence": confidence,
+            "params": params ?? [
+                "version": 2,
+                "strategy": "profile",
+                "actionType": actionType,
+                "sampleSize": sampleSize,
+                "motion": [
+                    "pointCount": ["min": 8, "max": 16],
+                    "speedPxS": ["min": 180, "max": 760]
+                ]
+            ]
+        ]
+        if let taskId {
+            applyParams["taskId"] = taskId
+        }
+        let object: [String: Any] = [
+            "id": id,
+            "method": "profiles.apply",
+            "params": applyParams
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     private func traceCommitLine(

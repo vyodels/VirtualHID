@@ -591,11 +591,11 @@ public final class ControlService {
     private func handleLearningState() throws -> [String: Any] {
         ensureEventTapForLearningIfNeeded()
         var state = try encodableObject(supervisor.observer.learningState) as? [String: Any] ?? [:]
+        let templates = (try? userVisibleLearningTemplates()) ?? []
         state["persistedSamples"] = lock.withLock { persistedLearningSamples }
-        state["totalTemplates"] = (try? profileStore.totalTemplates()) ?? 0
+        state["totalTemplates"] = templates.count
         state["traceCount"] = (try? profileStore.traceCount()) ?? 0
         state["lastLearnedAt"] = (try? profileStore.lastLearnedAtMs()).flatMap { $0.map(isoString(ms:)) } ?? NSNull()
-        let templates = (try? profileStore.listTemplates()) ?? []
         state["templateLimit"] = Self.defaultLearningTemplateLimit
         state["returnedTemplates"] = min(templates.count, Self.defaultLearningTemplateLimit)
         state["templates"] = templates.prefix(Self.defaultLearningTemplateLimit).map(learningTemplateSummaryObject)
@@ -621,11 +621,11 @@ public final class ControlService {
         object["templateLimit"] = templateLimit
         object["recentEvents"] = supervisor.observer.tail(limit: recentLimit).map(observedEventObject)
         object["recentTraces"] = try profileStore.listTraceSummaries(limit: recentLimit).map(traceSummaryObject)
-        let templates = try profileStore.listTemplates()
+        let templates = try userVisibleLearningTemplates()
         object["returnedTemplates"] = min(templates.count, templateLimit)
         object["templates"] = templates.prefix(templateLimit).map(learningTemplateSummaryObject)
         object["definitions"] = [
-            "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局键鼠能力。",
+            "scope": "能力模板只展示全局键鼠习惯；网页 host 只作为执行上下文或 trace 归因，不作为个人习惯模板维度。",
             "actionType": "动作类型来自真实键鼠事件链，例如点击、拖拽、滚动、键盘输入；模板只影响执行轨迹和节奏，不选择业务目标。",
             "continuousLearning": "开启键鼠输入学习分析后，真实事件会自动生成动作片段并实时入库。",
             "liveTeaching": "现场教学由 VirtualHID 连续生成教学动作、起点和目标点，并通过 HUD 显示给用户模仿；样本仍来自物理输入事件，且只接收当前教学动作相关事件。",
@@ -664,7 +664,7 @@ public final class ControlService {
         }
         var object = try encodableObject(result) as? [String: Any] ?? [:]
         object["persistedSamples"] = lock.withLock { persistedLearningSamples }
-        object["generatedTemplates"] = (try? profileStore.totalTemplates()) ?? 0
+        object["generatedTemplates"] = (try? userVisibleLearningTemplates().count) ?? 0
         return object
     }
 
@@ -1058,18 +1058,12 @@ public final class ControlService {
     }
 
     private func learnedDemoTemplate(from params: [String: Any]) throws -> ProfileTemplate? {
-        let host = nonEmptyString(params["host"])
-        let sig = nonEmptyString(params["elementSig"] ?? params["element_sig"] ?? params["sig"])
         let actionType = nonEmptyString(params["actionType"] ?? params["action_type"])
-        let taskId = nonEmptyString(params["taskId"] ?? params["task_id"])
-        return try profileStore.listTemplates(host: host)
+        return try userVisibleLearningTemplates()
             .filter { template in
                 ["click", "move", "drag", "type", "scroll"].contains(template.actionType)
-                    && template.host != Self.managementLearningDemoBaselineHost
                     && template.confidence >= 0.5
-                    && (sig == nil || template.elementSig == sig)
                     && (actionType == nil || template.actionType == actionType)
-                    && (taskId == nil || template.taskId == taskId)
             }
             .sorted { lhs, rhs in
                 if lhs.confidence != rhs.confidence {
@@ -1081,6 +1075,17 @@ public final class ControlService {
                 return lhs.updatedAt > rhs.updatedAt
             }
             .first
+    }
+
+    private func userVisibleLearningTemplates() throws -> [ProfileTemplate] {
+        try profileStore.listTemplates()
+            .filter(Self.isUserVisibleLearningTemplate)
+    }
+
+    private static func isUserVisibleLearningTemplate(_ template: ProfileTemplate) -> Bool {
+        template.host == ProfileStore.globalLearningHost
+            && template.elementSig.isEmpty
+            && (template.taskId ?? "").isEmpty
     }
 
     private func managementDemoPoints(width: Double, height: Double, count: Int) -> [(origin: CGPoint, target: CGPoint)] {

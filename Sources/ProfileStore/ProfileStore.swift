@@ -566,7 +566,7 @@ public final class ProfileStore {
         guard !host.isEmpty else {
             throw ProfileStoreError.invalidInput("host is required")
         }
-        guard !elementSig.isEmpty else {
+        guard !elementSig.isEmpty || host == Self.globalLearningHost else {
             throw ProfileStoreError.invalidInput("element_sig is required")
         }
 
@@ -696,7 +696,7 @@ public final class ProfileStore {
         guard !host.isEmpty else {
             throw ProfileStoreError.invalidInput("host is required")
         }
-        guard !elementSig.isEmpty else {
+        guard !elementSig.isEmpty || host == Self.globalLearningHost else {
             throw ProfileStoreError.invalidInput("element_sig is required")
         }
         guard !actionType.isEmpty else {
