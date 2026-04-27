@@ -101,10 +101,8 @@ public final class ControlService {
     private var persistedLearningSamples = 0
     private var activeLearningDemoId: String?
     private var lastLearningDemoStep: [String: Any]?
-    private static let managementLearningDemoHost = "virtualhid-management-demo.local"
     private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
-    private static let managementLearningDemoSig = "management-learning-demo-target"
-    private static let managementLearningDemoTask = "management-learning-demo"
+    private static let managementLearningDemoDefaultTask = "management-learning-demo"
 
     public init(
         configuration: ControlServerConfiguration,
@@ -644,32 +642,16 @@ public final class ControlService {
     private func handleLearningDemoRun(_ params: [String: Any]) throws -> [String: Any] {
         let actionCount = max(1, min(intValue(params["actionCount"] ?? params["action_count"]) ?? 3, 6))
         let stepDelayMs = max(0, min(intValue(params["stepDelayMs"] ?? params["step_delay_ms"]) ?? 650, 2_500))
-        let seedDemoTemplate = params["seedDemoTemplate"] as? Bool
-            ?? params["seed_demo_template"] as? Bool
-            ?? false
         var templateParams = params
         if nonEmptyString(templateParams["actionType"] ?? templateParams["action_type"]) == nil {
             templateParams["actionType"] = "click"
         }
-        var template = try confidentLearningTemplate(from: templateParams)
-        var seededDemoTemplate = false
-        if seedDemoTemplate || template == nil {
-            _ = try seedManagementLearningDemoTemplate()
-            seededDemoTemplate = true
-            if seedDemoTemplate {
-                template = try confidentLearningTemplate(from: templateParams)
-            }
-            if template == nil {
-                template = try? profileStore.lookupTemplate(
-                    host: Self.managementLearningDemoHost,
-                    sig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    actionType: "click"
-                )
-            }
-        }
+        let template = try learnedDemoTemplate(from: templateParams)
         guard let template else {
-            throw ControlServerError.coded("E_PROFILE_MISS", "no learned template is available for management demo")
+            throw ControlServerError.coded(
+                "E_PROFILE_MISS",
+                "no applicable learned profile is available for this demo; collect enough input samples and rebuild profiles first"
+            )
         }
 
         let target = selfTarget()
@@ -743,7 +725,7 @@ public final class ControlService {
             "template": learningTemplateSummaryObject(template),
             "demoPlan": learningDemoPlanObject(template: template, actionCount: actionCount),
             "learningEffect": learningEffectObject(template: template),
-            "seededDemoTemplate": seededDemoTemplate,
+            "seededDemoTemplate": false,
             "baseline": baselineSummary,
             "actions": actions,
             "assertions": [
@@ -767,13 +749,13 @@ public final class ControlService {
             finishLearningDemo(id: demoId)
         }
 
-        let seedDemoTemplate = params["seedDemoTemplate"] as? Bool
-            ?? params["seed_demo_template"] as? Bool
-            ?? true
-        if seedDemoTemplate {
-            _ = try seedManagementLearningDemoTemplate()
-        }
         let template = try managementDemoTemplate(for: action, params: params)
+        guard let template else {
+            throw ControlServerError.coded(
+                "E_PROFILE_MISS",
+                "no applicable learned profile is available for \(action.rawValue); collect enough input samples and rebuild profiles first"
+            )
+        }
 
         let target = selfTarget()
         let viewport = target.viewportFrame ?? target.frame
@@ -823,13 +805,9 @@ public final class ControlService {
             ],
             "demoAction": action.rawValue,
             "title": action.title,
-            "template": template.map(learningTemplateSummaryObject) ?? NSNull(),
-            "learningEffect": template.map(learningEffectObject) ?? [
-                "learns": NSNull(),
-                "appliesThrough": [],
-                "activeFields": []
-            ],
-            "seededDemoTemplate": seedDemoTemplate,
+            "template": learningTemplateSummaryObject(template),
+            "learningEffect": learningEffectObject(template: template),
+            "seededDemoTemplate": false,
             "action": summary,
             "actions": [summary],
             "lastActionOnly": true
@@ -891,187 +869,34 @@ public final class ControlService {
             return nil
         }
         var scoped = params
-        scoped["host"] = scoped["host"] ?? Self.managementLearningDemoHost
-        scoped["elementSig"] = scoped["elementSig"] ?? scoped["element_sig"] ?? scoped["sig"] ?? Self.managementLearningDemoSig
-        scoped["taskId"] = scoped["taskId"] ?? scoped["task_id"] ?? Self.managementLearningDemoTask
         scoped["actionType"] = actionType
-        return try confidentLearningTemplate(from: scoped)
-            ?? (try? profileStore.lookupTemplate(
-                host: Self.managementLearningDemoHost,
-                sig: Self.managementLearningDemoSig,
-                taskId: Self.managementLearningDemoTask,
-                actionType: actionType
-            ))
+        return try learnedDemoTemplate(from: scoped)
     }
 
-    private func confidentLearningTemplate(from params: [String: Any]) throws -> ProfileTemplate? {
+    private func learnedDemoTemplate(from params: [String: Any]) throws -> ProfileTemplate? {
         let host = nonEmptyString(params["host"])
         let sig = nonEmptyString(params["elementSig"] ?? params["element_sig"] ?? params["sig"])
         let actionType = nonEmptyString(params["actionType"] ?? params["action_type"])
         let taskId = nonEmptyString(params["taskId"] ?? params["task_id"])
         return try profileStore.listTemplates(host: host)
             .filter { template in
-                template.confidence >= 0.5
-                    && ["click", "move", "drag", "type"].contains(template.actionType)
+                ["click", "move", "drag", "type", "scroll"].contains(template.actionType)
+                    && template.host != Self.managementLearningDemoBaselineHost
+                    && template.confidence >= 0.5
                     && (sig == nil || template.elementSig == sig)
                     && (actionType == nil || template.actionType == actionType)
                     && (taskId == nil || template.taskId == taskId)
             }
+            .sorted { lhs, rhs in
+                if lhs.confidence != rhs.confidence {
+                    return lhs.confidence > rhs.confidence
+                }
+                if lhs.sampleSize != rhs.sampleSize {
+                    return lhs.sampleSize > rhs.sampleSize
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
             .first
-    }
-
-    private func seedManagementLearningDemoTemplate() throws -> AggregateReport {
-        _ = try profileStore.forget(host: Self.managementLearningDemoHost, sig: Self.managementLearningDemoSig)
-        _ = try profileStore.forget(host: Self.managementLearningDemoBaselineHost, sig: nil)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        for index in 0..<30 {
-            let origin = CGPoint(x: 70 + Double(index % 5) * 7, y: 78 + Double(index % 4) * 9)
-            let target = CGPoint(x: 370 + Double(index % 6) * 6, y: 250 + Double(index % 5) * 8)
-            let control = CGPoint(
-                x: 190 + Double(index % 4) * 18,
-                y: 120 + Double(index % 6) * 14
-            )
-            let path = [
-                origin,
-                CGPoint(x: (origin.x + control.x) / 2, y: control.y - 18),
-                control,
-                CGPoint(x: (control.x + target.x) / 2, y: control.y + 52),
-                target
-            ]
-            let pathLength = zip(path.dropLast(), path.dropFirst()).map { hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) }.reduce(0, +)
-            let durationMs = 420 + Double(index % 7) * 34
-            _ = try profileStore.insertTrace(
-                TraceInput(
-                    ts: nowMs + Int64(index),
-                    source: "management-center-demo",
-                    host: Self.managementLearningDemoHost,
-                    elementSig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    stage: "seed",
-                    actionType: "click",
-                    payload: TracePayload(
-                        eventId: "management-learning-demo-\(index)",
-                        type: "leftMouseUp",
-                        point: tracePoint(target),
-                        points: path.map(tracePoint),
-                        origin: tracePoint(origin),
-                        targetPoint: tracePoint(target),
-                        targetRadiusPx: 5 + Double(index % 4),
-                        landingErrorPx: 1.2 + Double(index % 5) * 0.7,
-                        durationMs: durationMs,
-                        segmentMs: [82, 96 + Double(index % 5) * 6, 118, 130 + Double(index % 3) * 9],
-                        hesitationMs: index.isMultiple(of: 4) ? [44 + Double(index % 5) * 12] : [],
-                        clickHoldMs: [62 + Double(index % 6) * 9],
-                        interClickMs: [142 + Double(index % 5) * 16],
-                        straightness: 0.78 + Double(index % 6) * 0.018,
-                        turnJitter: 0.22 + Double(index % 5) * 0.045,
-                        pathLengthPx: pathLength,
-                        speedPxS: pathLength / max(durationMs / 1_000, 0.1)
-                    )
-                )
-            )
-            _ = try profileStore.insertTrace(
-                TraceInput(
-                    ts: nowMs + 1_000 + Int64(index),
-                    source: "management-center-demo",
-                    host: Self.managementLearningDemoHost,
-                    elementSig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    stage: "seed",
-                    actionType: "move",
-                    payload: TracePayload(
-                        eventId: "management-learning-demo-move-\(index)",
-                        type: "mouseMoved",
-                        point: tracePoint(target),
-                        points: path.map(tracePoint),
-                        origin: tracePoint(origin),
-                        targetPoint: tracePoint(target),
-                        targetRadiusPx: 4 + Double(index % 3),
-                        landingErrorPx: 0.8 + Double(index % 4) * 0.5,
-                        durationMs: durationMs,
-                        segmentMs: [78, 92 + Double(index % 4) * 7, 126, 118 + Double(index % 5) * 8],
-                        hesitationMs: index.isMultiple(of: 5) ? [52 + Double(index % 4) * 10] : [],
-                        straightness: 0.80 + Double(index % 6) * 0.018,
-                        turnJitter: 0.18 + Double(index % 5) * 0.04,
-                        pathLengthPx: pathLength,
-                        speedPxS: pathLength / max(durationMs / 1_000, 0.1)
-                    )
-                )
-            )
-            _ = try profileStore.insertTrace(
-                TraceInput(
-                    ts: nowMs + 2_000 + Int64(index),
-                    source: "management-center-demo",
-                    host: Self.managementLearningDemoHost,
-                    elementSig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    stage: "seed",
-                    actionType: "drag",
-                    payload: TracePayload(
-                        eventId: "management-learning-demo-drag-\(index)",
-                        type: "leftMouseDragged",
-                        point: tracePoint(target),
-                        points: path.map(tracePoint),
-                        origin: tracePoint(origin),
-                        targetPoint: tracePoint(target),
-                        targetRadiusPx: 6 + Double(index % 3),
-                        landingErrorPx: 1.4 + Double(index % 4) * 0.8,
-                        durationMs: durationMs + 180,
-                        segmentMs: [88, 112 + Double(index % 5) * 8, 146, 142 + Double(index % 4) * 9],
-                        hesitationMs: index.isMultiple(of: 4) ? [62 + Double(index % 4) * 12] : [],
-                        clickHoldMs: [94 + Double(index % 6) * 8],
-                        straightness: 0.76 + Double(index % 6) * 0.02,
-                        turnJitter: 0.24 + Double(index % 5) * 0.05,
-                        pathLengthPx: pathLength,
-                        speedPxS: pathLength / max((durationMs + 180) / 1_000, 0.1)
-                    )
-                )
-            )
-            _ = try profileStore.insertTrace(
-                TraceInput(
-                    ts: nowMs + 3_000 + Int64(index),
-                    source: "management-center-demo",
-                    host: Self.managementLearningDemoHost,
-                    elementSig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    stage: "seed",
-                    actionType: "type",
-                    payload: TracePayload(
-                        eventId: "management-learning-demo-type-\(index)",
-                        type: "keyDown",
-                        keyCode: 9,
-                        durationMs: 360 + Double(index % 5) * 28,
-                        dwellMs: [72 + Double(index % 6) * 7],
-                        interKeyMs: [104 + Double(index % 5) * 11]
-                    )
-                )
-            )
-            _ = try profileStore.insertTrace(
-                TraceInput(
-                    ts: nowMs + 4_000 + Int64(index),
-                    source: "management-center-demo",
-                    host: Self.managementLearningDemoHost,
-                    elementSig: Self.managementLearningDemoSig,
-                    taskId: Self.managementLearningDemoTask,
-                    stage: "seed",
-                    actionType: "scroll",
-                    payload: TracePayload(
-                        eventId: "management-learning-demo-scroll-\(index)",
-                        type: "scrollWheel",
-                        point: tracePoint(origin),
-                        durationMs: 210 + Double(index % 5) * 24,
-                        scrollDeltas: [
-                            TraceScrollDelta(dx: 0, dy: -148 - Double(index % 5) * 6),
-                            TraceScrollDelta(dx: 0, dy: -92 - Double(index % 4) * 5),
-                            TraceScrollDelta(dx: 0, dy: -48 - Double(index % 3) * 4)
-                        ],
-                        scrollIntervalsMs: [38 + Double(index % 5) * 6, 52 + Double(index % 4) * 7],
-                        eventTimeline: ["scrollWheel", "scrollWheel", "scrollWheel"]
-                    )
-                )
-            )
-        }
-        return try profileStore.rebuild(host: Self.managementLearningDemoHost)
     }
 
     private func managementDemoPoints(width: Double, height: Double, count: Int) -> [(origin: CGPoint, target: CGPoint)] {
@@ -1140,7 +965,7 @@ public final class ControlService {
             "context": [
                 "host": host,
                 "element": ["sig": sig, "role": "button"],
-                "taskId": template.taskId ?? Self.managementLearningDemoTask,
+                "taskId": template.taskId ?? Self.managementLearningDemoDefaultTask,
                 "stage": baseline ? "baseline" : "management-center-demo"
             ],
             "options": [
@@ -1171,7 +996,7 @@ public final class ControlService {
 
     private func managementDemoStepActionParams(
         action: ManagementDemoAction,
-        template: ProfileTemplate?,
+        template: ProfileTemplate,
         width: Double,
         height: Double,
         spec: [String: Any],
@@ -1179,9 +1004,9 @@ public final class ControlService {
     ) throws -> [String: Any] {
         let origin = try point(spec["startPoint"] as? [String: Any], name: "startPoint")
         let target = try point(spec["targetPoint"] as? [String: Any], name: "targetPoint")
-        let host = template?.host ?? Self.managementLearningDemoHost
-        let sig = template?.elementSig ?? Self.managementLearningDemoSig
-        let taskId = template?.taskId ?? Self.managementLearningDemoTask
+        let host = template.host
+        let sig = template.elementSig
+        let taskId = template.taskId ?? Self.managementLearningDemoDefaultTask
         let primitives: [[String: Any]]
         switch action {
         case .move:

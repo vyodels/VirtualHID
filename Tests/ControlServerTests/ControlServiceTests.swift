@@ -316,10 +316,11 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(templates?.first?["sampleSize"] as? Int, 12)
     }
 
-    func testLearningDemoRunSeedsTemplateAndReturnsActionEvidence() throws {
+    func testLearningDemoRunUsesRealLearnedTemplateAndReturnsActionEvidence() throws {
         let service = try makeService()
+        try seedLearnedDemoProfiles(service: service, actions: ["click"])
         let response = service.handleLine(
-            #"{"id":"learning-demo","method":"learning.demo.run","params":{"seedDemoTemplate":true,"actionCount":2,"stepDelayMs":0}}"#
+            #"{"id":"learning-demo","method":"learning.demo.run","params":{"host":"example.com","elementSig":"sig-click-demo","taskId":"task-click-demo","actionType":"click","actionCount":2,"stepDelayMs":0}}"#
         )
         let payload = try decode(response)
         let result = payload["result"] as? [String: Any]
@@ -342,8 +343,9 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(result?["mode"] as? String, "safe-dry-run-preview")
         XCTAssertEqual(safety?["dryRun"] as? Bool, true)
         XCTAssertEqual(safety?["realClickPosted"] as? Bool, false)
-        XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, true)
-        XCTAssertEqual(template?["host"] as? String, "virtualhid-management-demo.local")
+        XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, false)
+        XCTAssertEqual(template?["host"] as? String, "example.com")
+        XCTAssertEqual(template?["elementSig"] as? String, "sig-click-demo")
         XCTAssertEqual(baseline?["profileApplied"] as? Bool, false)
         XCTAssertEqual(actions.count, 2)
         XCTAssertEqual(actions.allSatisfy { $0["profileApplied"] as? Bool == true }, true)
@@ -368,11 +370,24 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertTrue(activeFields?.contains("clickHoldMs") == true)
     }
 
+    func testLearningDemoStepRequiresRealLearnedTemplate() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"demo-step-missing","method":"learning.demo.step","params":{"action":"click"}}"#
+        )
+        let payload = try decode(response)
+        let error = payload["error"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, false)
+        XCTAssertEqual(error?["code"] as? String, "E_PROFILE_MISS")
+    }
+
     func testLearningDemoStepIsManualRepeatableAndActionScoped() throws {
         let service = try makeService()
+        try seedLearnedDemoProfiles(service: service)
         for action in ["move", "click", "dblclick", "drag", "scroll", "keyboard"] {
             let response = service.handleLine(
-                #"{"id":"demo-step-\#(action)","method":"learning.demo.step","params":{"action":"\#(action)","seedDemoTemplate":true}}"#
+                #"{"id":"demo-step-\#(action)","method":"learning.demo.step","params":{"action":"\#(action)"}}"#
             )
             let payload = try decode(response)
             let result = payload["result"] as? [String: Any]
@@ -386,6 +401,7 @@ final class ControlServiceTests: XCTestCase {
             XCTAssertEqual(result?["ok"] as? Bool, true)
             XCTAssertEqual(result?["mode"] as? String, "manual-safe-dry-run-preview")
             XCTAssertEqual(result?["demoAction"] as? String, action)
+            XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, false)
             XCTAssertEqual(manual?["maxActiveDemo"] as? Int, 1)
             XCTAssertEqual(manual?["autoAdvance"] as? Bool, false)
             XCTAssertEqual(manual?["repeatable"] as? Bool, true)
@@ -402,9 +418,7 @@ final class ControlServiceTests: XCTestCase {
 
     func testLearningInspectReturnsObservableLearningData() throws {
         let service = try makeService()
-        _ = service.handleLine(
-            #"{"id":"learning-demo","method":"learning.demo.run","params":{"seedDemoTemplate":true,"actionCount":1,"stepDelayMs":0}}"#
-        )
+        try seedLearnedDemoProfiles(service: service, actions: ["click"])
 
         let payload = try decode(service.handleLine(#"{"id":"learning-inspect","method":"learning.inspect","params":{"limit":4}}"#))
         let result = payload["result"] as? [String: Any]
@@ -682,6 +696,139 @@ final class ControlServiceTests: XCTestCase {
 
     private func decode(_ text: String) throws -> [String: Any] {
         try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] ?? [:]
+    }
+
+    private func seedLearnedDemoProfiles(
+        service: ControlService,
+        actions: Set<String> = ["move", "click", "drag", "scroll", "type"]
+    ) throws {
+        for index in 0..<25 {
+            let start = ["x": 40 + index * 3, "y": 60 + index * 2]
+            let mid = ["x": 132 + index * 4, "y": 104 + index * 5]
+            let end = ["x": 260 + index * 5, "y": 166 + index * 3]
+            let path = [start, mid, end]
+
+            if actions.contains("move") {
+                let line = try traceCommitLine(
+                    id: "demo-move-\(index)",
+                    host: "example.com",
+                    sig: "sig-move-demo",
+                    task: "task-move-demo",
+                    traceType: "move",
+                    payload: [
+                        "type": "mouseMoved",
+                        "point": end,
+                        "points": path,
+                        "origin": start,
+                        "targetPoint": end,
+                        "durationMs": 360 + index * 18,
+                        "segmentMs": [120 + index, 128 + index],
+                        "straightness": 0.78,
+                        "turnJitter": 0.24
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+
+            if actions.contains("click") {
+                let line = try traceCommitLine(
+                    id: "demo-click-\(index)",
+                    host: "example.com",
+                    sig: "sig-click-demo",
+                    task: "task-click-demo",
+                    traceType: "click",
+                    payload: [
+                        "type": "leftMouseUp",
+                        "point": end,
+                        "points": path,
+                        "origin": start,
+                        "targetPoint": end,
+                        "durationMs": 420 + index * 16,
+                        "segmentMs": [108 + index, 142 + index, 86 + index],
+                        "clickHoldMs": [74 + index * 3],
+                        "interClickMs": [158 + index * 4],
+                        "doubleClickIntervalMs": [174 + index * 5],
+                        "eventTimeline": ["leftMouseDown", "leftMouseUp", "leftMouseDown", "leftMouseUp"],
+                        "straightness": 0.74,
+                        "turnJitter": 0.28
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+
+            if actions.contains("drag") {
+                let line = try traceCommitLine(
+                    id: "demo-drag-\(index)",
+                    host: "example.com",
+                    sig: "sig-drag-demo",
+                    task: "task-drag-demo",
+                    traceType: "drag",
+                    payload: [
+                        "type": "leftMouseDragged",
+                        "point": end,
+                        "points": path,
+                        "origin": start,
+                        "targetPoint": end,
+                        "durationMs": 560 + index * 20,
+                        "segmentMs": [146 + index, 172 + index, 152 + index],
+                        "clickHoldMs": [112 + index * 4],
+                        "eventTimeline": ["leftMouseDown", "leftMouseDragged", "leftMouseUp"],
+                        "straightness": 0.70,
+                        "turnJitter": 0.32
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+
+            if actions.contains("scroll") {
+                let line = try traceCommitLine(
+                    id: "demo-scroll-\(index)",
+                    host: "example.com",
+                    sig: "sig-scroll-demo",
+                    task: "task-scroll-demo",
+                    traceType: "scroll",
+                    payload: [
+                        "type": "scrollWheel",
+                        "point": start,
+                        "durationMs": 230 + index * 15,
+                        "scrollDeltas": [
+                            ["dx": 0, "dy": -132 - index * 6],
+                            ["dx": 0, "dy": -82 - index * 4],
+                            ["dx": 0, "dy": -38 - index * 2]
+                        ],
+                        "scrollIntervalsMs": [34 + index, 48 + index],
+                        "eventTimeline": ["scrollWheel", "scrollWheel", "scrollWheel"]
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+
+            if actions.contains("type") {
+                let line = try traceCommitLine(
+                    id: "demo-type-\(index)",
+                    host: "example.com",
+                    sig: "sig-type-demo",
+                    task: "task-type-demo",
+                    traceType: "type",
+                    payload: [
+                        "type": "keyUp",
+                        "keyCode": 9,
+                        "durationMs": 320 + index * 12,
+                        "dwellMs": [64 + index * 3],
+                        "interKeyMs": [102 + index * 4],
+                        "modifierFlags": [1 << 17],
+                        "flagsChangedKeyCodes": [56],
+                        "comboKeyCodes": [56, 9],
+                        "repeatCount": 1,
+                        "eventTimeline": ["flagsChanged", "keyDown", "keyUp"]
+                    ]
+                )
+                XCTAssertEqual(try decode(service.handleLine(line))["ok"] as? Bool, true)
+            }
+        }
+
+        let payload = try decode(service.handleLine(#"{"id":"rebuild-demo","method":"profiles.rebuild","params":{"host":"example.com"}}"#))
+        XCTAssertEqual(payload["ok"] as? Bool, true)
     }
 
     private func traceCommitLine(

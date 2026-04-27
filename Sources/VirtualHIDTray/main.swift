@@ -449,7 +449,6 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 ])
                 let demoResponse = try runtime.call(method: "learning.demo.step", params: [
                     "action": action,
-                    "seedDemoTemplate": true,
                     "demoId": "management-center-\(action)"
                 ])
                 let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": 20])
@@ -1416,7 +1415,7 @@ private struct LearningState {
             return message ?? "学习服务不可用"
         }
         guard !templates.isEmpty else {
-            return "暂无能力模板。开启键鼠学习分析积累真实片段，或在效果分析中触发安全演示模板。"
+            return "暂无能力模板。开启键鼠输入学习分析积累真实片段后，点击「重建能力模板」再演示学习效果。"
         }
         return "能力模板\n" + templates.prefix(5).map(\.displayText).joined(separator: "\n")
     }
@@ -1796,6 +1795,11 @@ private struct LearningDemoResult {
         let result = response["result"] as? [String: Any] ?? response
         let assertions = result["assertions"] as? [String: Any] ?? [:]
         guard result["ok"] as? Bool == true else {
+            if let error = response["error"] as? [String: Any] {
+                let message = error["message"] as? String ?? "暂无可演示的真实学习结果"
+                statusText = "演示失败：\(message)。请先开启键鼠输入学习分析，完成若干真实操作后重建能力模板。"
+                return
+            }
             let profile = assertions["learnedProfilesApplied"] as? Bool == true ? "模板已命中" : "模板未命中"
             let click = assertions["learnedActionsHaveClickEvents"] as? Bool == true ? "点击事件已生成" : "点击事件缺失"
             statusText = "安全预览未通过：\(profile)，\(click)。不会实际点击页面。"
@@ -1810,7 +1814,7 @@ private struct LearningDemoResult {
         let activeFields = (effect["activeFields"] as? [String] ?? []).prefix(8).joined(separator: ", ")
         let title = result["title"] as? String ?? fallbackTitle
         var lines = [
-            "\(title) 完成：已使用 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
+            "\(title) 完成：已使用真实学习结果 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
             "学习生效字段：\(activeFields.isEmpty ? "暂无" : activeFields)。"
         ]
         if let manual = result["manualControl"] as? [String: Any] {
@@ -1971,8 +1975,6 @@ private func displayScope(_ value: String) -> String {
     switch value {
     case "", "__global__":
         return "全局"
-    case "virtualhid-management-demo.local":
-        return "安全演示"
     case "virtualhid-management-demo-baseline.local":
         return "未使用模板"
     default:

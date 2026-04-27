@@ -467,8 +467,8 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             } else {
                 rawDelta = 0.07
             }
-            let boundedDelta = min(max(rawDelta, 0.075), 0.55)
-            delays.append(delays[index - 1] + boundedDelta)
+            let actualDelta = rawDelta.isFinite ? max(rawDelta, 0) : 0
+            delays.append(delays[index - 1] + actualDelta)
         }
         return delays
     }
