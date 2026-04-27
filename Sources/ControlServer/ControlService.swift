@@ -108,10 +108,12 @@ public final class ControlService {
     private var lastPostUsed: String?
     private var persistedLearningSamples = 0
     private var activeLearningDemoId: String?
+    private var nextTeachingActionIndex = 0
     private var lastLearningDemoStep: [String: Any]?
     private var lastLearningDemoPointSpecs = [String: LearningDemoPointSpec]()
     private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
     private static let managementLearningDemoDefaultTask = "management-learning-demo"
+    private static let teachingActionSequence = ["move", "click", "drag", "scroll", "dblclick", "keyboard"]
     private static let defaultLearningRecentLimit = 8
     private static let maxLearningRecentLimit = 100
     private static let defaultLearningTemplateLimit = 100
@@ -647,6 +649,9 @@ public final class ControlService {
     }
 
     private func handleLearningSessionStart(_ params: [String: Any]) throws -> [String: Any] {
+        lock.withLock {
+            nextTeachingActionIndex = 0
+        }
         let state = supervisor.observer.startLearningSession(
             label: nonEmptyString(params["label"]),
             host: nonEmptyString(params["host"]),
@@ -670,9 +675,9 @@ public final class ControlService {
 
     private func handleLearningTeachingNext(_ params: [String: Any]) throws -> [String: Any] {
         let action = normalizedTeachingAction(nonEmptyString(params["action"] ?? params["targetAction"] ?? params["target_action"]))
-            ?? randomTeachingAction()
+            ?? nextTeachingAction()
         let host = nonEmptyString(params["host"]) ?? ProfileStore.globalLearningHost
-        let guide = teachingGuide(action: action)
+        let guide = teachingGuide(action: action, bounds: teachingBounds(from: params))
         let state = supervisor.observer.updateLearningSession(
             label: "现场教学：\(teachingActionTitle(action))",
             host: host,
@@ -691,8 +696,12 @@ public final class ControlService {
         ]
     }
 
-    private func randomTeachingAction() -> String {
-        ["move", "click", "dblclick", "drag", "scroll", "keyboard"].randomElement() ?? "move"
+    private func nextTeachingAction() -> String {
+        lock.withLock {
+            let action = Self.teachingActionSequence[nextTeachingActionIndex % Self.teachingActionSequence.count]
+            nextTeachingActionIndex += 1
+            return action
+        }
     }
 
     private func normalizedTeachingAction(_ raw: String?) -> String? {
@@ -774,49 +783,73 @@ public final class ControlService {
         }
     }
 
-    private func teachingGuide(action: String) -> [String: Any] {
-        let points = teachingGuidePoints(action: action)
+    private func teachingGuide(action: String, bounds: CGRect?) -> [String: Any] {
+        let points = teachingGuidePoints(action: action, bounds: bounds)
         return [
             "id": "teaching-\(action)-\(Int(Date().timeIntervalSince1970 * 1000))",
             "action": action,
             "startPoint": points.start,
             "targetPoint": points.target,
             "title": "现场教学：\(teachingActionTitle(action))",
-            "detail": teachingInstruction(action)
+            "detail": teachingInstruction(action),
+            "bounds": rectObject(points.bounds)
         ]
     }
 
-    private func teachingGuidePoints(action: String) -> (start: [String: Double], target: [String: Double]) {
-        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let inset: CGFloat = 120
+    private func teachingGuidePoints(action: String, bounds: CGRect?) -> (start: [String: Double], target: [String: Double], bounds: CGRect) {
+        let visible = bounds ?? defaultTeachingBounds()
+        let inset = min(max(32.0, min(visible.width, visible.height) * 0.12), 120.0)
         let minX = visible.minX + inset
         let maxX = max(minX + 160, visible.maxX - inset)
         let minY = visible.minY + inset
         let maxY = max(minY + 160, visible.maxY - inset)
-        let startAppKit = CGPoint(
+        let start = CGPoint(
             x: Double.random(in: Double(minX)...Double(maxX)),
             y: Double.random(in: Double(minY)...Double(maxY))
         )
-        let targetAppKit: CGPoint
+        let target: CGPoint
         switch action {
         case "keyboard":
-            targetAppKit = startAppKit
+            target = start
         case "scroll":
-            targetAppKit = CGPoint(
-                x: min(max(Double(minX), startAppKit.x + Double.random(in: -40...40)), Double(maxX)),
-                y: min(max(Double(minY), startAppKit.y + Double.random(in: -40...40)), Double(maxY))
+            target = CGPoint(
+                x: min(max(Double(minX), start.x + Double.random(in: -40...40)), Double(maxX)),
+                y: min(max(Double(minY), start.y + Double.random(in: -40...40)), Double(maxY))
             )
         default:
-            targetAppKit = CGPoint(
+            target = CGPoint(
                 x: Double.random(in: Double(minX)...Double(maxX)),
                 y: Double.random(in: Double(minY)...Double(maxY))
             )
         }
-        return (screenPoint(fromAppKit: startAppKit), screenPoint(fromAppKit: targetAppKit))
+        return (pointObject(start), pointObject(target), visible)
     }
 
-    private func screenPoint(fromAppKit point: CGPoint) -> [String: Double] {
-        ["x": point.x, "y": screenTopY() - point.y]
+    private func teachingBounds(from params: [String: Any]) -> CGRect? {
+        let raw = params["teachingBounds"] as? [String: Any]
+            ?? params["teaching_bounds"] as? [String: Any]
+            ?? params["bounds"] as? [String: Any]
+        guard let raw,
+              let x = number(raw["x"]),
+              let y = number(raw["y"]),
+              let width = number(raw["width"] ?? raw["w"]),
+              let height = number(raw["height"] ?? raw["h"]),
+              width >= 160,
+              height >= 160
+        else {
+            return nil
+        }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func defaultTeachingBounds() -> CGRect {
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return CGRect(
+            x: visible.minX,
+            y: screenTopY() - visible.maxY,
+            width: visible.width,
+            height: visible.height
+        )
     }
 
     private func screenTopY() -> Double {

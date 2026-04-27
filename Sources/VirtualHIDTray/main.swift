@@ -360,7 +360,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     private func advanceTeachingInstruction() throws {
-        let response = try call(method: "learning.teaching.next", params: [:])
+        let response = try call(method: "learning.teaching.next", params: [
+            "teachingBounds": teachingBoundsForCurrentPanel()
+        ])
         let result = resultPayload(from: response)
         guard let guide = result["guide"] as? [String: Any],
               let teaching = result["teaching"] as? [String: Any] else {
@@ -392,6 +394,44 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
         lastLearningState = LearningState(response: learningResponse)
         lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+    }
+
+    private func teachingBoundsForCurrentPanel() -> [String: Double] {
+        let screen = panel?.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let panelFrame = panel?.frame.insetBy(dx: -24, dy: -24) ?? .zero
+        let candidates = teachingCandidateRects(visible: visible, avoiding: panelFrame)
+            .filter { $0.width >= 260 && $0.height >= 220 }
+        let selected = candidates.max { lhs, rhs in
+            lhs.width * lhs.height < rhs.width * rhs.height
+        } ?? visible.insetBy(dx: 80, dy: 80)
+        return screenRectObject(selected)
+    }
+
+    private func teachingCandidateRects(visible: NSRect, avoiding avoid: NSRect) -> [NSRect] {
+        guard avoid.intersects(visible) else {
+            return [visible]
+        }
+        let clipped = avoid.intersection(visible)
+        return [
+            NSRect(x: visible.minX, y: visible.minY, width: max(0, clipped.minX - visible.minX), height: visible.height),
+            NSRect(x: clipped.maxX, y: visible.minY, width: max(0, visible.maxX - clipped.maxX), height: visible.height),
+            NSRect(x: visible.minX, y: clipped.maxY, width: visible.width, height: max(0, visible.maxY - clipped.maxY)),
+            NSRect(x: visible.minX, y: visible.minY, width: visible.width, height: max(0, clipped.minY - visible.minY))
+        ].filter { $0.width > 0 && $0.height > 0 }
+    }
+
+    private func screenRectObject(_ rect: NSRect) -> [String: Double] {
+        [
+            "x": rect.minX,
+            "y": screenTopY() - rect.maxY,
+            "width": rect.width,
+            "height": rect.height
+        ]
+    }
+
+    private func screenTopY() -> Double {
+        Double(NSScreen.screens.map(\.frame.maxY).max() ?? (NSScreen.main?.frame.maxY ?? 900))
     }
 
     private func handleTeachingError(_ error: Error) {
@@ -650,12 +690,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func buildPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
-            styleMask: [.titled, .closable, .utilityWindow],
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
         panel.title = "VirtualHID 管理中心"
+        panel.minSize = NSSize(width: 940, height: 640)
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.delegate = self
@@ -674,7 +715,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         root.translatesAutoresizingMaskIntoConstraints = false
 
         let sidebar = makeSidebar()
-        sidebar.widthAnchor.constraint(equalToConstant: 148).isActive = true
+        sidebar.widthAnchor.constraint(equalToConstant: 176).isActive = true
         root.addArrangedSubview(sidebar)
 
         let content = NSStackView()
@@ -701,19 +742,33 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func makeSidebar() -> NSView {
         let sidebar = CardView()
-        let stack = cardStack(spacing: 12)
-        stack.addArrangedSubview(label("VHID", size: 22, weight: .heavy))
+        let content = NSView()
+        let stack = cardStack(spacing: 10)
+        let title = label("VHID", size: 22, weight: .heavy)
+        stack.addArrangedSubview(title)
         stack.addArrangedSubview(label("可视化与学习", size: 11, color: .secondaryLabelColor))
         for section in ManagementSection.allCases {
             let row = navigationButton(section)
             sidebarButtons[section] = row
             stack.addArrangedSubview(row)
         }
-        let spacer = NSView()
-        spacer.heightAnchor.constraint(equalToConstant: 150).isActive = true
-        stack.addArrangedSubview(spacer)
-        stack.addArrangedSubview(label("单击托盘：快捷菜单\n双击托盘：管理中心", size: 11, color: .secondaryLabelColor))
-        sidebar.addContent(stack)
+        let footer = label("单击托盘：快捷菜单\n双击托盘：管理中心", size: 11, color: .secondaryLabelColor)
+        footer.maximumNumberOfLines = 2
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        content.addSubview(stack)
+        content.addSubview(footer)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            footer.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor, constant: -18)
+        ])
+
+        sidebar.addContent(content)
         updateSidebarSelection()
         return sidebar
     }
@@ -729,7 +784,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         button.layer?.cornerRadius = 9
         button.translatesAutoresizingMaskIntoConstraints = false
         button.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        button.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        button.widthAnchor.constraint(equalToConstant: 148).isActive = true
         return button
     }
 

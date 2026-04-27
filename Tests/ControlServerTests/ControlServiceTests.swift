@@ -550,6 +550,35 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(activeSession?["targetAction"] as? String, "drag")
     }
 
+    func testLearningTeachingNextCyclesActionsAndKeepsGuideInsideProvidedBounds() throws {
+        let service = try makeService()
+        let rect = CGRect(x: 120, y: 140, width: 520, height: 360)
+        let boundsJSON = #"{"x":120,"y":140,"width":520,"height":360}"#
+        let expectedActions = ["move", "click", "drag", "scroll", "dblclick", "keyboard", "move"]
+
+        _ = try decode(service.handleLine(
+            #"{"id":"teaching-start","method":"learning.teaching.start","params":{"label":"现场教学","host":"__global__"}}"#
+        ))
+
+        for (index, expectedAction) in expectedActions.enumerated() {
+            let payload = try decode(service.handleLine(
+                #"{"id":"teaching-next-\#(index)","method":"learning.teaching.next","params":{"teachingBounds":\#(boundsJSON)}}"#
+            ))
+            let result = payload["result"] as? [String: Any]
+            let guide = result?["guide"] as? [String: Any]
+            let bounds = guide?["bounds"] as? [String: Any]
+
+            XCTAssertEqual(payload["ok"] as? Bool, true)
+            XCTAssertEqual(guide?["action"] as? String, expectedAction)
+            assertPoint(guide?["startPoint"], inside: rect)
+            assertPoint(guide?["targetPoint"], inside: rect)
+            XCTAssertEqual(bounds?["x"] as? Double, rect.minX)
+            XCTAssertEqual(bounds?["y"] as? Double, rect.minY)
+            XCTAssertEqual(bounds?["width"] as? Double, rect.width)
+            XCTAssertEqual(bounds?["height"] as? Double, rect.height)
+        }
+    }
+
     func testLearningInspectOnlyShowsGlobalAbilityTemplates() throws {
         let service = try makeService()
         try seedTemplateInventory(service: service, count: 13)
@@ -878,6 +907,20 @@ final class ControlServiceTests: XCTestCase {
             return nil
         }
         return "\(Int(x.rounded())):\(Int(y.rounded()))"
+    }
+
+    private func assertPoint(_ value: Any?, inside rect: CGRect, file: StaticString = #filePath, line: UInt = #line) {
+        guard let point = value as? [String: Any],
+              let x = point["x"] as? Double,
+              let y = point["y"] as? Double
+        else {
+            XCTFail("missing point", file: file, line: line)
+            return
+        }
+        XCTAssertGreaterThanOrEqual(x, rect.minX, file: file, line: line)
+        XCTAssertLessThanOrEqual(x, rect.maxX, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(y, rect.minY, file: file, line: line)
+        XCTAssertLessThanOrEqual(y, rect.maxY, file: file, line: line)
     }
 
     private func seedLearnedDemoProfiles(
