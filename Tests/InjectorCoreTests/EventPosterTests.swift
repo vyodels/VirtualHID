@@ -155,6 +155,34 @@ final class EventPosterTests: XCTestCase {
         assertPoint(points.last, equals: targetPoint)
     }
 
+    func testDryRunMoveFailsWhenCursorIsContinuouslyGrabbedAway() throws {
+        let grabbedPoint = CGPoint(x: 36, y: 420)
+        let executor = ActionExecutor(
+            target: testTarget(),
+            cursorLocationProvider: { grabbedPoint }
+        )
+
+        XCTAssertThrowsError(try executor.execute(
+            ActionRequest(
+                id: "move-continuous-user-interference",
+                primitives: [
+                    .move(
+                        to: CGPoint(x: 320, y: 160),
+                        via: .wind,
+                        durationMs: nil,
+                        profile: PrimitiveProfile(origin: CGPoint(x: 20, y: 80))
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )) { error in
+            guard case ActionExecutionError.cursorInterference = error else {
+                return XCTFail("expected cursorInterference, got \(error)")
+            }
+        }
+    }
+
     func testHidEventSinkReceivesOnlyRecordedEvents() {
         let app = NSRunningApplication.current
         let target = BrowserTarget(

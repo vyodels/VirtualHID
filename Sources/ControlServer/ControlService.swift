@@ -2457,6 +2457,8 @@ public final class ControlService {
                 return ("E_TIMEOUT", "injector action exceeded timeoutMs=\(timeoutMs)")
             case .eventCreationFailed(let detail):
                 return ("E_UNKNOWN", "failed to create event: \(detail)")
+            case .cursorInterference:
+                return ("E_CURSOR_INTERFERENCE", "cursor was continuously moved away from the planned HID path")
             }
         }
         if let error = error as? ViewportGeometryResolverError {

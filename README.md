@@ -147,7 +147,7 @@ HUD、学习成果、能力模板和学习效果演示的正式入口是 `Virtua
 - VirtualHID 接收**目标锚点**和可选 `landingZone`；业务目标选择由上游 Agent 负责，实际 HID 落点和轨迹由 VirtualHID 负责生成
 - MCP 对外不暴露独立 `move` 操作；网页点击由上游传 `click` 原语，VirtualHID 在内部生成拟人化鼠标移动轨迹、实际落点和点击事件
 - 上游、MCP shim、管理中心和演示入口都不得预先生成拟人化策略参数：不能传外部估算的鼠标轨迹、补点、总移动时长、点击 hold/inter-click、滚动节奏或键盘节律来替代学习策略。它们只能给动作意图、目标锚点、可选起点提示/`landingZone` 和归因 context；轨迹形状、总时长、阶段节奏、实际落点、点击/双击/拖拽/滚轮/键盘时序必须由 VirtualHID 在 daemon/runtime 内根据已学习 profile 或默认 HumanizationKit 策略采样生成。
-- 执行鼠标目标动作时，VirtualHID 不允许把物理光标瞬移到目标点；必须先按拟人化轨迹移动到目标，再执行 click / drag / scroll。真实执行中如果检测到用户抢鼠标导致物理光标偏离计划轨迹，VirtualHID 必须从当前物理位置重新规划到目标点；在 click / drag 关键事件前还要校正到目标点，不能依赖单个绝对坐标事件硬跳。
+- 执行鼠标目标动作时，VirtualHID 不允许把物理光标瞬移到目标点；必须先按拟人化轨迹移动到目标，再执行 click / drag / scroll。真实执行中如果检测到用户抢鼠标导致物理光标偏离计划轨迹，VirtualHID 必须从当前物理位置重新规划到目标点；在 click / drag 关键事件前还要校正到目标点，不能依赖单个绝对坐标事件硬跳。若用户持续强行抢占导致无法安全回到目标点，必须返回 `E_CURSOR_INTERFERENCE`，不得伪装执行成功。
 - 网页目标的 viewport/document → macOS screen 坐标换算由 VirtualHID 负责；browser/recruit-agent 只传页面坐标、target 身份和可选页面证据（如 scrollOffset/pageScale/viewportSize），不要从 browser `screenX/screenY` 合成或信任 `viewportInScreen`
 - `ActionContext` 只读白名单字段：`host / element.sig / element.role / taskId / stage / hints.urgency`
 - 网页目标的 `host` 必须来自 browser active tab、tab list、snapshot URL 或上游已规范化的 `browser_target.host`；`target.host` 与 `context.host` 同时存在时必须一致，不能由 Agent 或 VirtualHID 按站点名编造

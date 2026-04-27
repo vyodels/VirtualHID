@@ -34,7 +34,7 @@ HUD / visualization 是 VirtualHID 正式本地观察能力，不是额外数据
 
 核心策略约束：调用方只能传动作意图、目标锚点、可选起点提示 / `landingZone` 和归因 context；不得用 demo、前端、mock、Agent 或 MCP shim 的本地 heuristic 预先固定鼠标轨迹、补点、移动总时长、点击 hold/inter-click、滚动节奏、键盘 dwell/inter-key 等拟人化参数。VirtualHID 的执行层必须在 daemon/runtime 内基于已学习 profile 或默认 HumanizationKit 策略采样生成这些参数。管理中心 dry-run 效果演示也必须走同一条执行链路；演示 UI 只能选择动作类型、随机或复用起终点、清空/保留 HUD 历史，不能绕过学习策略。
 
-鼠标物理执行约束：MCP / Agent 传入目标锚点后，VirtualHID 不能通过单个绝对坐标事件把物理光标瞬移到目标点。click / drag / scroll 的目标定位必须经过 VirtualHID 生成的正常鼠标轨迹；真实执行期间若用户抢鼠标导致当前物理光标偏离计划轨迹，执行层必须检测偏差，并从当前物理位置重新规划剩余轨迹到目标点。click / drag 的关键 down/up 事件前必须确认或校正指针在目标点附近，最终落点证据仍以 VirtualHID events / verification 为准。
+鼠标物理执行约束：MCP / Agent 传入目标锚点后，VirtualHID 不能通过单个绝对坐标事件把物理光标瞬移到目标点。click / drag / scroll 的目标定位必须经过 VirtualHID 生成的正常鼠标轨迹；真实执行期间若用户抢鼠标导致当前物理光标偏离计划轨迹，执行层必须检测偏差，并从当前物理位置重新规划剩余轨迹到目标点。click / drag 的关键 down/up 事件前必须确认或校正指针在目标点附近，最终落点证据仍以 VirtualHID events / verification 为准。若用户持续强行抢占导致无法安全回到目标点，必须返回 `E_CURSOR_INTERFERENCE`，不得伪装执行成功。
 
 Chrome 下载气泡、下载列表、菜单、popover 等浏览器外壳 UI 不属于网页 DOM，也不应由页面 JS / mock 页面 / recruit-agent fallback 处理。网页目标 `hid_action` 默认 `options.browserChromeOverlayPolicy = "auto"`，VirtualHID 通过 macOS AX 检测与目标浏览器窗口重叠的非标准外壳瞬态窗口，必要时发送 Escape 清理，并把结果写入 `result.preflight.browserChromeOverlay`。该 preflight 不进入业务 `events`、HUD 轨迹或 replay 学习样本。
 

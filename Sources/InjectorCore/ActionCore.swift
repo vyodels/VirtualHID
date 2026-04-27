@@ -233,6 +233,7 @@ public enum ActionExecutionError: Error, LocalizedError {
     case cancelled
     case timedOut(Int)
     case eventCreationFailed(String)
+    case cursorInterference
 
     public var errorDescription: String? {
         switch self {
@@ -244,6 +245,8 @@ public enum ActionExecutionError: Error, LocalizedError {
             return "执行超过超时时间：\(timeoutMs)ms"
         case .eventCreationFailed(let detail):
             return "无法创建事件：\(detail)"
+        case .cursorInterference:
+            return "检测到持续鼠标抢占，无法安全完成目标落点"
         }
     }
 }
@@ -757,6 +760,11 @@ public final class ActionExecutor {
                     ))
                     return emitted
                 }
+            } else if correctionBudget == 0,
+                      index > 0,
+                      shouldMonitorPhysicalCursor(dryRun: dryRun),
+                      distance(currentMouseLocation(fallback: lastPlannedPoint), lastPlannedPoint) > cursorInterferenceTolerancePx {
+                throw ActionExecutionError.cursorInterference
             }
             emitted.append(try postMouse(type: .mouseMoved, location: point, button: button, poster: poster, dryRun: dryRun))
             lastPlannedPoint = point
@@ -764,9 +772,9 @@ public final class ActionExecutor {
                 try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
             }
         }
-        if correctionBudget > 0, shouldMonitorPhysicalCursor(dryRun: dryRun) {
+        if shouldMonitorPhysicalCursor(dryRun: dryRun) {
             let actual = currentMouseLocation(fallback: end)
-            if distance(actual, end) > terminalPointerTolerancePx {
+            if correctionBudget > 0, distance(actual, end) > terminalPointerTolerancePx {
                 emitted.append(contentsOf: try emitMovePath(
                     from: actual,
                     to: end,
@@ -780,6 +788,8 @@ public final class ActionExecutor {
                     rng: &rng,
                     correctionBudget: correctionBudget - 1
                 ))
+            } else if correctionBudget == 0, distance(actual, end) > terminalPointerTolerancePx {
+                throw ActionExecutionError.cursorInterference
             }
         }
         return emitted
