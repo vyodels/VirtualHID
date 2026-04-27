@@ -857,9 +857,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         modeStack.orientation = .horizontal
         modeStack.alignment = .centerY
         modeStack.spacing = 8
-        modeStack.addArrangedSubview(label("模式", size: 12, color: .secondaryLabelColor))
+        modeStack.addArrangedSubview(label("持续学习", size: 12, color: .secondaryLabelColor))
         let modePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        modePopup.addItems(withTitles: ["被动学习", "专项训练", "关闭"])
+        modePopup.addItems(withTitles: ["被动学习", "关闭"])
         modePopup.target = self
         modePopup.action = #selector(applyLearningAction(_:))
         modePopup.widthAnchor.constraint(equalToConstant: 128).isActive = true
@@ -1105,8 +1105,6 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private func selectedLearningMode() -> String {
         switch learningModePopup?.indexOfSelectedItem ?? 0 {
         case 1:
-            return "training"
-        case 2:
             return "off"
         default:
             return "passive"
@@ -1130,10 +1128,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private func setLearningMode(_ mode: String) {
         let index: Int
         switch mode {
-        case "training":
-            index = 1
         case "off":
-            index = 2
+            index = 1
         default:
             index = 0
         }
@@ -1210,6 +1206,7 @@ private struct LearningState {
     let enabled: Bool
     let mode: String
     let activeSessionLabel: String?
+    let activeSessionSampleCount: Int
     let producedSamples: Int
     let pendingTrainingSamples: Int
     let persistedSamples: Int
@@ -1227,21 +1224,20 @@ private struct LearningState {
     let message: String?
 
     var modeText: String {
-        switch mode {
-        case "training":
-            return "专项训练"
-        case "off":
+        if mode == "off" {
             return "关闭"
-        default:
-            return "被动学习"
         }
+        if activeSessionLabel != nil || activeSessionSampleCount > 0 {
+            return "本次采集中"
+        }
+        return "被动学习"
     }
 
     var statusText: String {
         if let message {
             return "学习离线：\(message)"
         }
-        let sessionText = activeSessionLabel.map { "，训练：\($0)" } ?? ""
+        let sessionText = activeSessionLabel.map { "，本次采集：\($0)（\(activeSessionSampleCount) 个片段）" } ?? ""
         return "鼠标习惯学习：\(enabled ? "开启" : "关闭") / \(modeText)，已捕捉 \(producedSamples) 个片段，本次待保存 \(pendingTrainingSamples) 个，习惯模板 \(totalTemplates) 个\(sessionText)"
     }
 
@@ -1317,6 +1313,7 @@ private struct LearningState {
         enabled = settings["enabled"] as? Bool ?? false
         mode = settings["mode"] as? String ?? "off"
         activeSessionLabel = activeSession?["label"] as? String
+        activeSessionSampleCount = intValue(activeSession?["sampleCount"]) ?? 0
         producedSamples = intValue(result["producedSamples"]) ?? 0
         pendingTrainingSamples = intValue(result["pendingTrainingSamples"]) ?? 0
         persistedSamples = intValue(responseResult["persistedSamples"]) ?? intValue(result["persistedSamples"]) ?? 0
@@ -1346,6 +1343,7 @@ private struct LearningState {
             enabled: false,
             mode: "off",
             activeSessionLabel: nil,
+            activeSessionSampleCount: 0,
             producedSamples: 0,
             pendingTrainingSamples: 0,
             persistedSamples: 0,
@@ -1369,6 +1367,7 @@ private struct LearningState {
         enabled: Bool,
         mode: String,
         activeSessionLabel: String?,
+        activeSessionSampleCount: Int,
         producedSamples: Int,
         pendingTrainingSamples: Int,
         persistedSamples: Int,
@@ -1389,6 +1388,7 @@ private struct LearningState {
         self.enabled = enabled
         self.mode = mode
         self.activeSessionLabel = activeSessionLabel
+        self.activeSessionSampleCount = activeSessionSampleCount
         self.producedSamples = producedSamples
         self.pendingTrainingSamples = pendingTrainingSamples
         self.persistedSamples = persistedSamples

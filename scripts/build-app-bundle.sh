@@ -54,6 +54,16 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-/usr/bin/codesign --force --sign - --timestamp=none "$APP_DIR" >/dev/null
+SIGN_IDENTITY="${VIRTUALHID_CODESIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  if SIGN_IDENTITY="$("$ROOT_DIR/scripts/ensure-local-codesign-identity.sh" 2>/dev/null)"; then
+    :
+  else
+    SIGN_IDENTITY="-"
+    echo "WARN: falling back to ad-hoc signing; macOS privacy permissions may need to be re-granted after rebuilds" >&2
+  fi
+fi
+
+/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP_DIR" >/dev/null
 
 echo "$APP_DIR"

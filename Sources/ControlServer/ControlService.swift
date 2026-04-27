@@ -523,6 +523,7 @@ public final class ControlService {
     }
 
     private func handleLearningState() throws -> [String: Any] {
+        ensureEventTapForLearningIfNeeded()
         var state = try encodableObject(supervisor.observer.learningState) as? [String: Any] ?? [:]
         state["persistedSamples"] = lock.withLock { persistedLearningSamples }
         state["totalTemplates"] = (try? profileStore.totalTemplates()) ?? 0
@@ -563,6 +564,7 @@ public final class ControlService {
             enabled: params["enabled"] as? Bool,
             mode: mode
         )
+        ensureEventTapForLearningIfNeeded()
         var object = try encodableObject(state) as? [String: Any] ?? [:]
         object["persistedSamples"] = lock.withLock { persistedLearningSamples }
         return object
@@ -574,6 +576,7 @@ public final class ControlService {
             host: nonEmptyString(params["host"]),
             targetAction: nonEmptyString(params["targetAction"] ?? params["target_action"])
         )
+        ensureEventTapForLearningIfNeeded()
         return try encodableObject(state) as? [String: Any] ?? [:]
     }
 
@@ -887,6 +890,17 @@ public final class ControlService {
         lock.withLock {
             currentExecutor?.cancel()
         }
+    }
+
+    private func ensureEventTapForLearningIfNeeded() {
+        let learning = supervisor.observer.learningState
+        guard learning.settings.enabled, learning.settings.mode != .off else {
+            return
+        }
+        guard !supervisor.snapshot().eventTapRunning else {
+            return
+        }
+        try? supervisor.startEventTap(promptForPermission: false)
     }
 
     private func persistPassiveLearningSample(_ sample: PassiveGestureSample) {
