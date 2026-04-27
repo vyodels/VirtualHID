@@ -86,6 +86,14 @@ private enum ManagementDemoAction: String, CaseIterable {
     }
 }
 
+private struct LearningDemoPointSpec {
+    let startPoint: CGPoint
+    let targetPoint: CGPoint
+    let actualPointExpected: CGPoint
+    let scrollDelta: CGVector?
+    let text: String?
+}
+
 public final class ControlService {
     private let configuration: ControlServerConfiguration
     private let supervisor: SupervisorService
@@ -101,6 +109,7 @@ public final class ControlService {
     private var persistedLearningSamples = 0
     private var activeLearningDemoId: String?
     private var lastLearningDemoStep: [String: Any]?
+    private var lastLearningDemoPointSpecs = [String: LearningDemoPointSpec]()
     private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
     private static let managementLearningDemoDefaultTask = "management-learning-demo"
 
@@ -761,7 +770,7 @@ public final class ControlService {
         let viewport = target.viewportFrame ?? target.frame
         let width = max(Double(viewport.width), 420)
         let height = max(Double(viewport.height), 320)
-        let spec = managementDemoStepSpec(action: action, width: width, height: height)
+        let spec = managementDemoStepSpec(action: action, width: width, height: height, params: params)
         let requestId = "\(demoId)-\(action.rawValue)-\(Int(Date().timeIntervalSince1970 * 1000))"
         let actionParams = try managementDemoStepActionParams(
             action: action,
@@ -904,15 +913,16 @@ public final class ControlService {
         let maxX = min(width - 56, width * 0.84)
         let minY = max(64, height * 0.16)
         let maxY = min(height - 64, height * 0.72)
+        var rng = SystemRandomNumberGenerator()
         return (0..<count).map { index in
             let progress = Double(index) / Double(max(count - 1, 1))
             let origin = CGPoint(
-                x: minX + (maxX - minX) * (0.10 + 0.18 * Double(index % 3)),
-                y: maxY - (maxY - minY) * (0.15 + 0.21 * Double(index % 2))
+                x: minX + (maxX - minX) * Double.random(in: 0.06..<0.38, using: &rng),
+                y: maxY - (maxY - minY) * Double.random(in: 0.04..<0.34, using: &rng)
             )
             let target = CGPoint(
-                x: minX + (maxX - minX) * (0.58 + 0.28 * progress),
-                y: minY + (maxY - minY) * (0.22 + 0.36 * Double((index + 1) % 3) / 2.0)
+                x: minX + (maxX - minX) * min(0.92, Double.random(in: 0.52..<0.88, using: &rng) + progress * 0.04),
+                y: minY + (maxY - minY) * Double.random(in: 0.18..<0.62, using: &rng)
             )
             return (origin, target)
         }
@@ -935,7 +945,6 @@ public final class ControlService {
             primitive = [
                 "type": "move",
                 "to": pointObject(target),
-                "durationMs": 420,
                 "profile": ["origin": pointObject(origin)]
             ]
         case "drag":
@@ -950,7 +959,6 @@ public final class ControlService {
                 "type": "click",
                 "at": pointObject(target),
                 "button": "left",
-                "holdMs": 82,
                 "profile": ["origin": pointObject(origin)]
             ]
         }
@@ -979,19 +987,66 @@ public final class ControlService {
         ]
     }
 
-    private func managementDemoStepSpec(action: ManagementDemoAction, width: Double, height: Double) -> [String: Any] {
-        let origin = CGPoint(x: max(56, width * 0.20), y: max(72, height * 0.66))
-        let target = CGPoint(x: min(width - 56, width * 0.72), y: max(72, height * 0.34))
-        let secondary = CGPoint(x: min(width - 56, width * 0.66), y: min(height - 64, height * 0.60))
-        let scrollDelta = ["dx": 0, "dy": -168]
+    private func managementDemoStepSpec(
+        action: ManagementDemoAction,
+        width: Double,
+        height: Double,
+        params: [String: Any]
+    ) -> [String: Any] {
+        let reuseLastPoints = boolValue(params["reuseLastPoints"] ?? params["reuse_last_points"] ?? params["reusePoints"]) ?? false
+        let spec: LearningDemoPointSpec
+        let pointMode: String
+        if reuseLastPoints, let previous = lock.withLock({ lastLearningDemoPointSpecs[action.rawValue] }) {
+            spec = previous
+            pointMode = "reused-last"
+        } else {
+            spec = randomLearningDemoPointSpec(action: action, width: width, height: height)
+            pointMode = "random"
+            lock.withLock {
+                lastLearningDemoPointSpecs[action.rawValue] = spec
+            }
+        }
         return [
             "action": action.rawValue,
-            "startPoint": pointObject(origin),
-            "targetPoint": pointObject(action == .drag ? secondary : target),
-            "actualPointExpected": action == .keyboard ? pointObject(target) : pointObject(action == .drag ? secondary : target),
-            "scrollDelta": action == .scroll ? scrollDelta : NSNull(),
-            "text": action == .keyboard ? "vhid" : NSNull()
+            "pointMode": pointMode,
+            "reuseLastPoints": reuseLastPoints,
+            "startPoint": pointObject(spec.startPoint),
+            "targetPoint": pointObject(spec.targetPoint),
+            "actualPointExpected": pointObject(spec.actualPointExpected),
+            "scrollDelta": spec.scrollDelta.map { ["dx": Int($0.dx), "dy": Int($0.dy)] } ?? NSNull(),
+            "text": spec.text ?? NSNull()
         ]
+    }
+
+    private func randomLearningDemoPointSpec(action: ManagementDemoAction, width: Double, height: Double) -> LearningDemoPointSpec {
+        var rng = SystemRandomNumberGenerator()
+        let minX = max(48, width * 0.10)
+        let maxX = min(width - 48, width * 0.88)
+        let minY = max(64, height * 0.14)
+        let maxY = min(height - 64, height * 0.78)
+        let start = CGPoint(
+            x: minX + (maxX - minX) * Double.random(in: 0.04..<0.42, using: &rng),
+            y: minY + (maxY - minY) * Double.random(in: 0.56..<0.94, using: &rng)
+        )
+        let target = CGPoint(
+            x: minX + (maxX - minX) * Double.random(in: 0.48..<0.94, using: &rng),
+            y: minY + (maxY - minY) * Double.random(in: 0.08..<0.56, using: &rng)
+        )
+        switch action {
+        case .drag:
+            let end = CGPoint(
+                x: minX + (maxX - minX) * Double.random(in: 0.50..<0.92, using: &rng),
+                y: minY + (maxY - minY) * Double.random(in: 0.46..<0.88, using: &rng)
+            )
+            return LearningDemoPointSpec(startPoint: start, targetPoint: end, actualPointExpected: end, scrollDelta: nil, text: nil)
+        case .scroll:
+            let dy = -Int(Double.random(in: 96..<260, using: &rng).rounded())
+            return LearningDemoPointSpec(startPoint: start, targetPoint: target, actualPointExpected: target, scrollDelta: CGVector(dx: 0, dy: dy), text: nil)
+        case .keyboard:
+            return LearningDemoPointSpec(startPoint: start, targetPoint: target, actualPointExpected: target, scrollDelta: nil, text: "vhid")
+        default:
+            return LearningDemoPointSpec(startPoint: start, targetPoint: target, actualPointExpected: target, scrollDelta: nil, text: nil)
+        }
     }
 
     private func managementDemoStepActionParams(
@@ -1004,6 +1059,8 @@ public final class ControlService {
     ) throws -> [String: Any] {
         let origin = try point(spec["startPoint"] as? [String: Any], name: "startPoint")
         let target = try point(spec["targetPoint"] as? [String: Any], name: "targetPoint")
+        let scrollDelta = spec["scrollDelta"] as? [String: Any]
+        let scrollDy = number(scrollDelta?["dy"]) ?? -168
         let host = template.host
         let sig = template.elementSig
         let taskId = template.taskId ?? Self.managementLearningDemoDefaultTask
@@ -1013,7 +1070,6 @@ public final class ControlService {
             primitives = [[
                 "type": "move",
                 "to": pointObject(target),
-                "durationMs": 540,
                 "profile": ["origin": pointObject(origin)]
             ]]
         case .click:
@@ -1021,7 +1077,6 @@ public final class ControlService {
                 "type": "click",
                 "at": pointObject(target),
                 "button": "left",
-                "holdMs": 82,
                 "profile": ["origin": pointObject(origin)]
             ]]
         case .dblclick:
@@ -1030,7 +1085,6 @@ public final class ControlService {
                 "at": pointObject(target),
                 "button": "left",
                 "count": 2,
-                "holdMs": 74,
                 "profile": ["origin": pointObject(origin)]
             ]]
         case .drag:
@@ -1044,21 +1098,19 @@ public final class ControlService {
             primitives = [
                 [
                     "type": "move",
-                    "to": pointObject(origin),
-                    "durationMs": 260,
+                    "to": pointObject(target),
                     "profile": ["origin": pointObject(CGPoint(x: max(40, origin.x - 120), y: origin.y))]
                 ],
-                ["type": "scroll", "at": pointObject(origin), "dx": 0, "dy": -168, "style": "wheel"]
+                ["type": "scroll", "at": pointObject(target), "dx": 0, "dy": scrollDy, "style": "wheel"]
             ]
         case .keyboard:
             primitives = [
                 [
                     "type": "move",
                     "to": pointObject(target),
-                    "durationMs": 260,
                     "profile": ["origin": pointObject(origin)]
                 ],
-                ["type": "type", "text": "vhid", "layout": "us"]
+                ["type": "type", "text": spec["text"] as? String ?? "vhid", "layout": "us"]
             ]
         }
         return [
@@ -2615,6 +2667,26 @@ private func number(_ value: Any?) -> Double? {
     }
     if let string = value as? String {
         return Double(string)
+    }
+    return nil
+}
+
+private func boolValue(_ value: Any?) -> Bool? {
+    if let bool = value as? Bool {
+        return bool
+    }
+    if let int = value as? Int {
+        return int != 0
+    }
+    if let string = value as? String {
+        switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
     }
     return nil
 }

@@ -323,6 +323,44 @@ final class EventPosterTests: XCTestCase {
         XCTAssertNotEqual(firstClick, secondClick)
     }
 
+    func testLearnedClickPreludeUsesProfileDurationInsteadOfTimeoutHeuristic() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            moveSpeedPxS: DoubleRange(min: 90, max: 90),
+            pointCount: IntRange(min: 8, max: 8),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 0, max: 0),
+            clickHoldMs: IntRange(min: 40, max: 40)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-click-prelude-duration",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 420, y: 100),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(
+                            origin: CGPoint(x: 20, y: 100),
+                            motionProfile: profile
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, timeoutMs: 8_000, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preludeDeltas = Array(timestampDeltas(result.events).prefix(mouseDownIndex))
+
+        XCTAssertGreaterThanOrEqual(result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }.count, 8)
+        XCTAssertGreaterThan(preludeDeltas.reduce(0, +), 1_000)
+    }
+
     func testLearnedKeyboardRangesAffectTypeDryRunTiming() throws {
         let executor = ActionExecutor(target: testTarget())
         let profile = MotionProfile(

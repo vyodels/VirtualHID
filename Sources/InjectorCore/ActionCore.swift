@@ -428,11 +428,14 @@ public final class ActionExecutor {
             var emitted = [InjectedEvent]()
             let start = profile?.origin ?? currentMouseLocation(fallback: clickPoint)
             if needsCursorTravel(from: start, to: clickPoint) {
+                let travelDurationMs = motionProfile == nil
+                    ? implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: 72)
+                    : nil
                 emitted.append(contentsOf: try emitMovePath(
                     from: start,
                     to: clickPoint,
                     style: pointerActionStyle(for: motionProfile),
-                    durationMs: implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: 72),
+                    durationMs: travelDurationMs,
                     motionProfile: motionProfile,
                     button: button.cgButton,
                     poster: poster,

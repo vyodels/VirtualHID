@@ -416,6 +416,36 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(stopPayload["ok"] as? Bool, true)
     }
 
+    func testLearningDemoStepRandomizesPointsUnlessReuseRequested() throws {
+        let service = try makeService()
+        try seedLearnedDemoProfiles(service: service, actions: ["click"])
+
+        let firstPayload = try decode(service.handleLine(
+            #"{"id":"demo-step-random-a","method":"learning.demo.step","params":{"action":"click"}}"#
+        ))
+        let secondPayload = try decode(service.handleLine(
+            #"{"id":"demo-step-random-b","method":"learning.demo.step","params":{"action":"click"}}"#
+        ))
+        let reusePayload = try decode(service.handleLine(
+            #"{"id":"demo-step-reuse","method":"learning.demo.step","params":{"action":"click","reuseLastPoints":true}}"#
+        ))
+
+        let firstRequested = learningDemoRequested(firstPayload)
+        let secondRequested = learningDemoRequested(secondPayload)
+        let reuseRequested = learningDemoRequested(reusePayload)
+
+        XCTAssertEqual(firstPayload["ok"] as? Bool, true)
+        XCTAssertEqual(secondPayload["ok"] as? Bool, true)
+        XCTAssertEqual(reusePayload["ok"] as? Bool, true)
+        XCTAssertEqual(firstRequested?["pointMode"] as? String, "random")
+        XCTAssertEqual(secondRequested?["pointMode"] as? String, "random")
+        XCTAssertEqual(reuseRequested?["pointMode"] as? String, "reused-last")
+        XCTAssertNotEqual(pointSignature(firstRequested?["startPoint"]), pointSignature(secondRequested?["startPoint"]))
+        XCTAssertNotEqual(pointSignature(firstRequested?["targetPoint"]), pointSignature(secondRequested?["targetPoint"]))
+        XCTAssertEqual(pointSignature(secondRequested?["startPoint"]), pointSignature(reuseRequested?["startPoint"]))
+        XCTAssertEqual(pointSignature(secondRequested?["targetPoint"]), pointSignature(reuseRequested?["targetPoint"]))
+    }
+
     func testLearningInspectReturnsObservableLearningData() throws {
         let service = try makeService()
         try seedLearnedDemoProfiles(service: service, actions: ["click"])
@@ -696,6 +726,22 @@ final class ControlServiceTests: XCTestCase {
 
     private func decode(_ text: String) throws -> [String: Any] {
         try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] ?? [:]
+    }
+
+    private func learningDemoRequested(_ payload: [String: Any]) -> [String: Any]? {
+        let result = payload["result"] as? [String: Any]
+        let action = result?["action"] as? [String: Any]
+        return action?["requested"] as? [String: Any]
+    }
+
+    private func pointSignature(_ value: Any?) -> String? {
+        guard let point = value as? [String: Any],
+              let x = point["x"] as? Double,
+              let y = point["y"] as? Double
+        else {
+            return nil
+        }
+        return "\(Int(x.rounded())):\(Int(y.rounded()))"
     }
 
     private func seedLearnedDemoProfiles(

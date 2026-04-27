@@ -1108,10 +1108,12 @@ private struct HIDPlaybackStep {
 }
 
 private final class HIDOverlayView: NSView {
+    private let maxHistoricalFrames = 20
     private var screenFrame: NSRect
     private var settings: HIDOverlaySettings
     private var frameData: HIDOverlayFrame?
     private var lastPersistentFrame: HIDOverlayFrame?
+    private var historicalFrames = [HIDOverlayFrame]()
 
     init(frame: NSRect, screenFrame: NSRect, settings: HIDOverlaySettings) {
         self.screenFrame = screenFrame
@@ -1129,6 +1131,12 @@ private final class HIDOverlayView: NSView {
     func render(_ data: HIDOverlayFrame) {
         frameData = data
         lastPersistentFrame = data
+        if settings.persistent, data.context.dryRun, data.actual != nil, data.events.count > 1 {
+            historicalFrames.append(data)
+            if historicalFrames.count > maxHistoricalFrames {
+                historicalFrames.removeFirst(historicalFrames.count - maxHistoricalFrames)
+            }
+        }
         needsDisplay = true
         displayIfNeeded()
     }
@@ -1172,6 +1180,17 @@ private final class HIDOverlayView: NSView {
                 stepDetail: lastPersistentFrame.stepDetail
             )
         }
+        historicalFrames = historicalFrames.map { frame in
+            HIDOverlayFrame(
+                context: replacingWindowFrame(in: frame.context, with: windowFrame),
+                events: frame.events,
+                expected: frame.expected,
+                actual: frame.actual,
+                errorCode: frame.errorCode,
+                stepTitle: frame.stepTitle,
+                stepDetail: frame.stepDetail
+            )
+        }
         needsDisplay = true
         displayIfNeeded()
     }
@@ -1195,15 +1214,7 @@ private final class HIDOverlayView: NSView {
 
     func clearTransientState() {
         if settings.persistent, let lastPersistentFrame {
-            frameData = HIDOverlayFrame(
-                context: lastPersistentFrame.context,
-                events: [],
-                expected: lastPersistentFrame.expected,
-                actual: lastPersistentFrame.actual,
-                errorCode: lastPersistentFrame.errorCode,
-                stepTitle: lastPersistentFrame.stepTitle,
-                stepDetail: lastPersistentFrame.stepDetail
-            )
+            frameData = lastPersistentFrame
         } else {
             frameData = nil
         }
@@ -1214,21 +1225,26 @@ private final class HIDOverlayView: NSView {
     func clearAll() {
         frameData = nil
         lastPersistentFrame = nil
+        historicalFrames.removeAll()
         needsDisplay = true
         displayIfNeeded()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let frameData else {
+        guard frameData != nil || !historicalFrames.isEmpty else {
             return
         }
         NSGraphicsContext.current?.shouldAntialias = true
-        if settings.showDiagnostic {
+        if let frameData, settings.showDiagnostic {
             drawDiagnostic(frameData)
         }
-        if settings.showWindowFrame {
+        if let frameData, settings.showWindowFrame {
             drawWindowFrame(frameData.context.windowFrame)
+        }
+        drawHistoricalFrames(excluding: frameData?.context.actionId)
+        guard let frameData else {
+            return
         }
         if settings.showTrail {
             drawTrail(frameData.events, final: frameData.actual != nil)
@@ -1301,6 +1317,51 @@ private final class HIDOverlayView: NSView {
         if let end = points.last {
             drawTrailEndpointMarker(at: end, title: final ? "终点" : "当前", color: .white)
         }
+    }
+
+    private func drawHistoricalFrames(excluding currentActionId: String?) {
+        guard settings.persistent, settings.showTrail, !historicalFrames.isEmpty else {
+            return
+        }
+        for (index, frame) in historicalFrames.enumerated() where currentActionId == nil || frame.context.actionId != currentActionId {
+            drawHistoricalTrail(frame.events, ordinal: index + 1)
+            if settings.showExpectedPoint, let expected = frame.expected {
+                drawHistoricalPoint(expected, title: "目标\(index + 1)", color: .systemOrange)
+            }
+            if settings.showActualPoint, let actual = frame.actual {
+                drawHistoricalPoint(actual, title: "实际\(index + 1)", color: .systemRed)
+            }
+        }
+    }
+
+    private func drawHistoricalTrail(_ events: [InjectedEvent], ordinal: Int) {
+        let points = events.compactMap(\.location).map(convert(_:))
+        guard points.count >= 2 else {
+            return
+        }
+        let path = NSBezierPath()
+        path.move(to: points[0])
+        for point in points.dropFirst() {
+            path.line(to: point)
+        }
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        NSColor(calibratedRed: 0.15, green: 0.56, blue: 1.0, alpha: 0.24).setStroke()
+        path.lineWidth = 0.8
+        path.stroke()
+        drawTrailEndpointMarker(at: points[0], title: "起\(ordinal)", color: .systemTeal.withAlphaComponent(0.72))
+        if let end = points.last {
+            drawTrailEndpointMarker(at: end, title: "终\(ordinal)", color: .white.withAlphaComponent(0.72))
+        }
+    }
+
+    private func drawHistoricalPoint(_ point: CodablePoint, title: String, color: NSColor) {
+        let converted = convert(point)
+        color.withAlphaComponent(0.58).setStroke()
+        let marker = NSBezierPath(ovalIn: NSRect(x: converted.x - 6, y: converted.y - 6, width: 12, height: 12))
+        marker.lineWidth = 0.8
+        marker.stroke()
+        drawSmallLabel(title, at: NSPoint(x: converted.x + 8, y: converted.y + 3), color: color.withAlphaComponent(0.82))
     }
 
     private func drawEffects(_ events: [InjectedEvent], context: HIDActionVisualContext) {

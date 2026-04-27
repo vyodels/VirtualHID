@@ -10,8 +10,8 @@ HUD 开启时应展示：
 - `ActionExecutor` 记录的实际 HID 事件轨迹。
 - 点击、拖拽、滚轮、输入等事件效果。
 - `OutcomeVerifier` 基于同一批 `ActionResult.events` 计算出的 `expectedPointer` 与 `finalPointer`。
-- 常驻显示开启时，action 结束并超过清除延迟后仍保留最后一次 VirtualHID 目标窗口、状态、expected/final point；只清除动态轨迹和事件特效。
-- HUD 生命周期必须绑定 VirtualHID 当前 target window：目标窗口打开并开始 action 时自动显示；目标窗口移动或 resize 时，HUD 外框、viewport/window 诊断和 expected/final 标记必须跟随同一窗口重算并移动；目标窗口关闭、失去可解析 target 或 action 被取消/停止后，HUD 必须关闭或隐藏，不能停留在旧屏幕坐标。
+- 常驻显示开启时，action 结束并超过清除延迟后仍保留 VirtualHID 产生的历史轨迹、目标窗口、状态、expected/final point；这些历史可叠加展示，最近 20 条以内不得自动清空，直到用户通过管理中心或 `hud.configure(clear=true)` 主动清空。
+- HUD 生命周期必须绑定 VirtualHID 当前 target window：目标窗口打开并开始 action 时自动显示；目标窗口移动或 resize 时，HUD 外框、viewport/window 诊断和 expected/final 标记必须跟随同一窗口重算并移动；目标窗口关闭、失去可解析 target 或 action 被取消/停止后，非持久态 HUD 必须关闭或隐藏，持久态历史必须有明确的管理中心清空入口，不能伪装成仍绑定旧 target 的实时状态。
 
 ## 2. VirtualHID 正式 HUD / 控制面语义
 
@@ -44,7 +44,7 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 - drag 起止与路径环。
 - scroll 方向/幅度 glyph。
 - keyboard / type / paste 输入徽标。
-- HUD 清除延迟；常驻显示开启时该延迟只清动态轨迹/特效，关闭时到期后隐藏 HUD 内容。
+- HUD 清除延迟；常驻显示开启时该延迟不删除历史轨迹，历史只由用户主动清空，关闭时到期后隐藏 HUD 内容。
 
 这些内容只能来自 VirtualHID action events、execution context 和 verification；不得由网页 mock、browser snapshot 或 recruit-agent 自行补画。
 

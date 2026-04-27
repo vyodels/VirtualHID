@@ -8,6 +8,8 @@ VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟�
 
 本审计只收敛通用 HID 能力，不引入招聘站点规则。上游 browser / recruit-agent 仍只负责目标选择、DOM 发现、业务语义确认；实际 screen 坐标换算、HID 落点、轨迹和节奏必须由 VirtualHID 产生。
 
+核心约束：学习效果必须体现在 VirtualHID 执行策略本身，而不是通过管理中心、demo 页面、mock 页面或 MCP shim 写死更慢的播放、更固定的时长或预构造轨迹来“看起来像”。管理中心效果演示只能触发同一套 `action -> applyProfiles -> ActionExecutor -> HumanizationKit` 链路；起点/终点可随机或显式复用，但轨迹、总时长、阶段节奏、点击/双击/拖拽/滚动/键盘时序必须由已学习 profile 或默认策略采样生成。
+
 ## 已具备能力
 
 - 拟人化执行：`Sources/HumanizationKit/HumanizationKit.swift` 已提供 `WindMouse` / `BezierMouse`、`HumanTimingCurve`、`BehaviorBlend`、`MotionProfile`、`KeystrokeRhythm`；执行层在 `Sources/InjectorCore/ActionCore.swift` 中把 click / drag / move / type 转成完整事件流，并支持 `landingZone` 内 HID 自采样落点。

@@ -104,6 +104,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningAnalysisLabel: NSTextField?
     private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
+    private var reuseDemoPointsCheckbox: NSButton?
     private var trainingHostField: NSTextField?
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningDemoAction: (action: String, title: String)?
@@ -374,6 +375,17 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         updateControls()
     }
 
+    @objc private func clearLearningDemoHistoryAction(_ sender: Any?) {
+        do {
+            let hudResponse = try call(method: "hud.configure", params: ["clear": true])
+            lastState = HUDState(response: hudResponse)
+            lastLearningDemoStatus = "已清空 HUD 历史轨迹和历史落点。后续演示会重新累计，除非关闭常驻显示。"
+        } catch {
+            lastLearningDemoStatus = "清空历史失败：\(localizedErrorMessage(error))"
+        }
+        updateControls()
+    }
+
     @objc private func replayLearningDemoAction(_ sender: Any?) {
         guard let lastLearningDemoAction else {
             lastLearningDemoStatus = "暂无可重放的演示结果。请先点击一个动作生成 dry-run HUD 结果。"
@@ -449,7 +461,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 ])
                 let demoResponse = try runtime.call(method: "learning.demo.step", params: [
                     "action": action,
-                    "demoId": "management-center-\(action)"
+                    "demoId": "management-center-\(action)",
+                    "reuseLastPoints": self?.reuseDemoPointsCheckbox?.state == .on
                 ])
                 let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": 20])
                 DispatchQueue.main.async {
@@ -1074,6 +1087,11 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningDemoStatusLabel = demoStatus
         cardContent.addArrangedSubview(demoStatus)
 
+        let reusePoints = NSButton(checkboxWithTitle: "沿用上次起点 / 终点新增演示", target: nil, action: nil)
+        reusePoints.toolTip = "关闭时每次演示随机选择新的起点和终点；开启时复用该动作上一次起点和终点，但轨迹仍由 VirtualHID 学习策略重新生成。"
+        reuseDemoPointsCheckbox = reusePoints
+        cardContent.addArrangedSubview(reusePoints)
+
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -1089,6 +1107,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         moreButtons.addArrangedSubview(actionButton("滚轮", action: #selector(runScrollDemoAction(_:))))
         moreButtons.addArrangedSubview(actionButton("键盘事件", action: #selector(runKeyboardDemoAction(_:))))
         moreButtons.addArrangedSubview(actionButton("重放上次演示", action: #selector(replayLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("清空历史轨迹", action: #selector(clearLearningDemoHistoryAction(_:))))
         moreButtons.addArrangedSubview(actionButton("关闭 HUD 演示", action: #selector(stopLearningDemoAction(_:))))
         moreButtons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
         cardContent.addArrangedSubview(moreButtons)
