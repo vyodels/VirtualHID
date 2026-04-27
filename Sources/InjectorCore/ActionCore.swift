@@ -288,8 +288,11 @@ public final class ActionExecutor {
     private let defaultPostMode: PostMode
     private let humanizationProfile: HumanizationProfile
     private let eventSink: HIDEventSink?
+    private let cursorLocationProvider: (() -> CGPoint?)?
     private let isoFormatter: ISO8601DateFormatter
     private let lock = NSLock()
+    private let cursorInterferenceTolerancePx: CGFloat = 24
+    private let terminalPointerTolerancePx: CGFloat = 3
     private var busy = false
     private var cancelled = false
     private var activeVisualContext: HIDActionVisualContext?
@@ -299,12 +302,14 @@ public final class ActionExecutor {
         target: BrowserTarget,
         defaultPostMode: PostMode = .global,
         humanizationProfile: HumanizationProfile = HumanizationProfile(),
-        eventSink: HIDEventSink? = nil
+        eventSink: HIDEventSink? = nil,
+        cursorLocationProvider: (() -> CGPoint?)? = nil
     ) {
         self.target = target
         self.defaultPostMode = defaultPostMode
         self.humanizationProfile = humanizationProfile
         self.eventSink = eventSink
+        self.cursorLocationProvider = cursorLocationProvider
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         self.isoFormatter = formatter
@@ -452,6 +457,16 @@ public final class ActionExecutor {
                     ? motionProfile?.resolvedDoubleClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
                     : motionProfile?.resolvedClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
                 let perClickPoint = index == 1 ? CGPoint(x: clickPoint.x + secondClickOffset.x, y: clickPoint.y + secondClickOffset.y) : clickPoint
+                emitted.append(contentsOf: try ensurePointerAtTarget(
+                    perClickPoint,
+                    style: pointerActionStyle(for: motionProfile),
+                    motionProfile: motionProfile,
+                    button: button.cgButton,
+                    poster: poster,
+                    dryRun: dryRun,
+                    deadline: deadline,
+                    rng: &rng
+                ))
                 emitted.append(try postMouse(type: button.downEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
                 try sleep(milliseconds: perClickHoldMs, dryRun: dryRun, deadline: deadline)
                 emitted.append(try postMouse(type: button.upEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
@@ -488,7 +503,19 @@ public final class ActionExecutor {
             let preHoldMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 40
             let dragHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: 56, rng: &rng) ?? 56
             var emitted = [InjectedEvent]()
-            emitted.append(try postMouse(type: .mouseMoved, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
+            emitted.append(contentsOf: try ensurePointerAtTarget(
+                start,
+                style: pointerActionStyle(for: motionProfile),
+                motionProfile: motionProfile,
+                button: button.cgButton,
+                poster: poster,
+                dryRun: dryRun,
+                deadline: deadline,
+                rng: &rng
+            ))
+            if emitted.last?.location.map({ distance(CGPoint(x: $0.x, y: $0.y), start) <= terminalPointerTolerancePx }) != true {
+                emitted.append(try postMouse(type: .mouseMoved, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
+            }
             try sleep(milliseconds: preHoldMs, dryRun: dryRun, deadline: deadline)
             emitted.append(try postMouse(type: button.downEventType, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
             try sleep(milliseconds: dragHoldMs, dryRun: dryRun, deadline: deadline)
@@ -689,7 +716,8 @@ public final class ActionExecutor {
         poster: EventPoster,
         dryRun: Bool,
         deadline: ActionDeadline,
-        rng: inout SystemRandomNumberGenerator
+        rng: inout SystemRandomNumberGenerator,
+        correctionBudget: Int = 2
     ) throws -> [InjectedEvent] {
         let path = trajectoryPath(
             from: start,
@@ -706,14 +734,87 @@ public final class ActionExecutor {
             rng: &rng
         )
         var emitted = [InjectedEvent]()
+        var lastPlannedPoint = start
         for (index, point) in path.enumerated() {
             try deadline.assertNotExpired()
+            if correctionBudget > 0,
+               index > 0,
+               shouldMonitorPhysicalCursor(dryRun: dryRun) {
+                let actual = currentMouseLocation(fallback: lastPlannedPoint)
+                if distance(actual, lastPlannedPoint) > cursorInterferenceTolerancePx {
+                    emitted.append(contentsOf: try emitMovePath(
+                        from: actual,
+                        to: end,
+                        style: style,
+                        durationMs: nil,
+                        motionProfile: motionProfile,
+                        button: button,
+                        poster: poster,
+                        dryRun: dryRun,
+                        deadline: deadline,
+                        rng: &rng,
+                        correctionBudget: correctionBudget - 1
+                    ))
+                    return emitted
+                }
+            }
             emitted.append(try postMouse(type: .mouseMoved, location: point, button: button, poster: poster, dryRun: dryRun))
+            lastPlannedPoint = point
             if index < path.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
                 try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
             }
         }
+        if correctionBudget > 0, shouldMonitorPhysicalCursor(dryRun: dryRun) {
+            let actual = currentMouseLocation(fallback: end)
+            if distance(actual, end) > terminalPointerTolerancePx {
+                emitted.append(contentsOf: try emitMovePath(
+                    from: actual,
+                    to: end,
+                    style: style,
+                    durationMs: nil,
+                    motionProfile: motionProfile,
+                    button: button,
+                    poster: poster,
+                    dryRun: dryRun,
+                    deadline: deadline,
+                    rng: &rng,
+                    correctionBudget: correctionBudget - 1
+                ))
+            }
+        }
         return emitted
+    }
+
+    private func ensurePointerAtTarget(
+        _ targetPoint: CGPoint,
+        style: TrajectoryStyle,
+        motionProfile: MotionProfile?,
+        button: CGMouseButton,
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline,
+        rng: inout SystemRandomNumberGenerator
+    ) throws -> [InjectedEvent] {
+        guard shouldMonitorPhysicalCursor(dryRun: dryRun) else {
+            return []
+        }
+        let actual = currentMouseLocation(fallback: targetPoint)
+        guard distance(actual, targetPoint) > terminalPointerTolerancePx else {
+            return []
+        }
+        return try emitMovePath(
+            from: actual,
+            to: targetPoint,
+            style: style,
+            durationMs: nil,
+            motionProfile: motionProfile,
+            button: button,
+            poster: poster,
+            dryRun: dryRun,
+            deadline: deadline,
+            rng: &rng,
+            correctionBudget: 1
+        )
     }
 
     private func implicitPointerTravelDurationMs(options: ActionOptions, holdMs: Int, settleMs: Int) -> Int {
@@ -1063,11 +1164,22 @@ public final class ActionExecutor {
     }
 
     private func currentMouseLocation(fallback: CGPoint) -> CGPoint {
-        CGEvent(source: nil)?.location ?? fallback
+        if let cursorLocationProvider {
+            return cursorLocationProvider() ?? fallback
+        }
+        return CGEvent(source: nil)?.location ?? fallback
+    }
+
+    private func shouldMonitorPhysicalCursor(dryRun: Bool) -> Bool {
+        !dryRun || cursorLocationProvider != nil
     }
 
     private func needsCursorTravel(from start: CGPoint, to end: CGPoint) -> Bool {
-        hypot(end.x - start.x, end.y - start.y) > 2
+        distance(start, end) > 2
+    }
+
+    private func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
     }
 
     private func pointerActionStyle(for motionProfile: MotionProfile?) -> TrajectoryStyle {

@@ -80,6 +80,81 @@ final class EventPosterTests: XCTestCase {
         XCTAssertEqual(result.events.suffix(2).map(\.type), ["leftMouseDown", "leftMouseUp"])
     }
 
+    func testDryRunClickReplansFromCursorInterferenceBeforeMouseDown() throws {
+        let targetPoint = CGPoint(x: 180, y: 140)
+        let grabbedPoint = CGPoint(x: 24, y: 360)
+        var cursorReads: [CGPoint?] = [targetPoint, grabbedPoint]
+        let executor = ActionExecutor(
+            target: testTarget(),
+            cursorLocationProvider: {
+                cursorReads.isEmpty ? nil : cursorReads.removeFirst()
+            }
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "click-user-interference",
+                primitives: [
+                    .click(
+                        at: targetPoint,
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: nil
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preDownMoves = result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }
+
+        XCTAssertGreaterThan(preDownMoves.count, 3)
+        assertPoint(preDownMoves.first?.location, equals: grabbedPoint)
+        assertPoint(preDownMoves.last?.location, equals: targetPoint)
+    }
+
+    func testDryRunMoveReplansWhenCursorIsGrabbedDuringTrajectory() throws {
+        let start = CGPoint(x: 20, y: 80)
+        let targetPoint = CGPoint(x: 320, y: 160)
+        let grabbedPoint = CGPoint(x: 36, y: 420)
+        var cursorReads: [CGPoint?] = [grabbedPoint]
+        let executor = ActionExecutor(
+            target: testTarget(),
+            cursorLocationProvider: {
+                cursorReads.isEmpty ? nil : cursorReads.removeFirst()
+            }
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "move-user-interference",
+                primitives: [
+                    .move(
+                        to: targetPoint,
+                        via: .wind,
+                        durationMs: nil,
+                        profile: PrimitiveProfile(origin: start)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let points = result.events.compactMap(\.location)
+
+        XCTAssertGreaterThan(points.count, 4)
+        assertPoint(points.first, equals: start)
+        XCTAssertTrue(points.contains { point in
+            hypot(point.x - grabbedPoint.x, point.y - grabbedPoint.y) <= 0.5
+        })
+        assertPoint(points.last, equals: targetPoint)
+    }
+
     func testHidEventSinkReceivesOnlyRecordedEvents() {
         let app = NSRunningApplication.current
         let target = BrowserTarget(
@@ -441,6 +516,11 @@ private func timestampDeltas(_ events: [InjectedEvent]) -> [Double] {
     return zip(dates.dropFirst(), dates).map { next, previous in
         next.timeIntervalSince(previous) * 1000
     }
+}
+
+private func assertPoint(_ point: CodablePoint?, equals expected: CGPoint, file: StaticString = #filePath, line: UInt = #line) {
+    XCTAssertEqual(point?.x ?? .nan, expected.x, accuracy: 0.5, file: file, line: line)
+    XCTAssertEqual(point?.y ?? .nan, expected.y, accuracy: 0.5, file: file, line: line)
 }
 
 private func maxTurnRadians(_ points: [CodablePoint]) -> Double {
