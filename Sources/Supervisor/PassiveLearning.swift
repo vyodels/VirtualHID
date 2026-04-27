@@ -140,6 +140,7 @@ public struct PassiveLearningState: Codable, Equatable {
     public let activeSession: PassiveLearningSession?
     public let producedSamples: Int
     public let pendingTrainingSamples: Int
+    public let recentSamples: [PassiveGestureSample]
     public let lastSampleAt: Int64?
 
     public init(
@@ -147,12 +148,14 @@ public struct PassiveLearningState: Codable, Equatable {
         activeSession: PassiveLearningSession?,
         producedSamples: Int,
         pendingTrainingSamples: Int,
+        recentSamples: [PassiveGestureSample] = [],
         lastSampleAt: Int64?
     ) {
         self.settings = settings
         self.activeSession = activeSession
         self.producedSamples = producedSamples
         self.pendingTrainingSamples = pendingTrainingSamples
+        self.recentSamples = recentSamples
         self.lastSampleAt = lastSampleAt
     }
 }
@@ -192,6 +195,7 @@ final class PassiveLearningRecorder {
     private var buttonDown: ButtonDown?
     private var lastClickUpAt: Int64?
     private var producedSamples = 0
+    private var recentSamples = [PassiveGestureSample]()
     private var lastSampleAt: Int64?
 
     var state: PassiveLearningState {
@@ -200,6 +204,7 @@ final class PassiveLearningRecorder {
             activeSession: activeSession,
             producedSamples: producedSamples,
             pendingTrainingSamples: pendingTrainingSamples.count,
+            recentSamples: recentSamples,
             lastSampleAt: lastSampleAt
         )
     }
@@ -369,6 +374,10 @@ final class PassiveLearningRecorder {
         }
         producedSamples += samples.count
         lastSampleAt = samples.last?.ts
+        recentSamples.append(contentsOf: samples)
+        if recentSamples.count > 24 {
+            recentSamples.removeFirst(recentSamples.count - 24)
+        }
         if var session = activeSession, settings.mode == .training {
             session.sampleCount += samples.count
             activeSession = session

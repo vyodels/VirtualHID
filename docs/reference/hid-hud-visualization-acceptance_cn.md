@@ -21,7 +21,7 @@ HUD 配置属于 VirtualHID 本地观察设置，不属于 `hid_action` 的业�
 
 `--no-hud` 或 `VIRTUALHID_NO_HUD=1` 具有最高优先级；关闭时 action、events、verification、trace 与分析链路仍照常产生，只是不挂 HUD sink。
 
-`VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动 app 即代表启动 VirtualHID 本地主程序；app 进程直接持有 `VirtualHIDRuntime`、HUD、学习控制和供 MCP shim 连接的本机 socket。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理 UI 只允许修改和观察 VirtualHID 本地能力，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本、清除延迟、被动学习、专项训练、学习模板摘要和学习效果演示；它不得写入 action payload、不得改变动作计划，也不得作为业务状态来源。
+`VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动 app 即代表启动 VirtualHID 本地主程序；app 进程直接持有 `VirtualHIDRuntime`、HUD、学习控制和供 MCP shim 连接的本机 socket。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理 UI 只允许修改和观察 VirtualHID 本地能力，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本、清除延迟、被动学习、专项训练、实时事件、动作片段、历史片段、习惯模板和安全 dry-run 学习效果演示；它不得写入业务 action payload、不得改变动作计划，也不得作为业务状态来源。
 
 ## 3. 数据来源与边界
 
@@ -85,10 +85,10 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
 1. 启动 `VirtualHID.app`。
 2. 双击托盘图标打开管理中心。
 3. 打开“学习预训练”。
-4. 查看“学习成果”中的模板摘要。
+4. 查看“实时采集”和“历史片段与习惯模板”中的事件监听状态、动作片段、历史片段和模板摘要。
 5. 点击“演示学习效果”。
 
-预期：管理中心显示 baseline 与 learned action 的演示结果；HUD 显示 VirtualHID 自己产生的轨迹、采样点、expected/final point 和点击事件；`learning.demo.run` 返回 `source = virtualhid-action-events`，baseline 不命中 profile，learned action 命中 profile。
+预期：管理中心显示安全预览结果；HUD 分步显示 VirtualHID 自己产生的轨迹、采样点、expected/final point、按下/抬起点击事件。`learning.demo.run` 返回 `source = virtualhid-action-events`、`mode = safe-dry-run-preview`、`safety.dryRun == true`、`safety.realClickPosted == false`；未使用模板的 baseline 不命中 profile，使用模板的 action 命中 profile。
 
 低层自动化 smoke 可运行：
 
@@ -103,8 +103,8 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
 - `training.generatedTemplates >= 1`。
 - `assertions.baselineProfileNotApplied == true`。
 - `assertions.learnedProfilesApplied == true`。
-- `assertions.learnedActionsHaveMouseMovement == true`。
-- learned action 的 `templateIds` 非空，并且 `mouseMoveCount` 证明轨迹来自 VirtualHID action events。
+- `assertions.learnedActionsHaveClickEvents == true`。
+- learned action 的 `templateIds` 非空，并且 `eventTypes` 中包含 `leftMouseDown / leftMouseUp`。`learnedActionsHaveMouseMovement` 用于诊断轨迹事件，不再作为安全预览失败的唯一依据。
 
 ## 6. 手动 UI 验收命令
 

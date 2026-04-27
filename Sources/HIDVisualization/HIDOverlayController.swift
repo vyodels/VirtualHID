@@ -64,6 +64,12 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     private var observedAXTargetKey: String?
     private var workspaceTerminationObserver: NSObjectProtocol?
     private var clearToken = 0
+    private var playbackToken = 0
+    private let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     public init(settings: HIDOverlaySettings = HIDOverlaySettings(), enabled: Bool = true, lockedOff: Bool = false) {
         self.settings = settings
@@ -169,6 +175,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             eventsByAction[context.actionId] = current
             return current
         }
+        if context.dryRun {
+            return
+        }
         DispatchQueue.main.async { [weak self] in
             self?.ensureOverlay(for: context)
             self?.overlayView?.render(
@@ -185,17 +194,24 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             eventsByAction[summary.context.actionId] = nil
         }
         DispatchQueue.main.async { [weak self] in
-            self?.ensureOverlay(for: summary.context)
-            self?.overlayView?.render(
-                HIDOverlayFrame(
-                    context: summary.context,
-                    events: summary.events,
-                    expected: summary.verification.expectedPointer,
-                    actual: summary.verification.finalPointer,
-                    errorCode: nil
+            guard let self else {
+                return
+            }
+            self.ensureOverlay(for: summary.context)
+            if summary.context.dryRun, summary.events.count > 1 {
+                self.playback(summary)
+            } else {
+                self.overlayView?.render(
+                    HIDOverlayFrame(
+                        context: summary.context,
+                        events: summary.events,
+                        expected: summary.verification.expectedPointer,
+                        actual: summary.verification.finalPointer,
+                        errorCode: nil
+                    )
                 )
-            )
-            self?.scheduleClear()
+                self.scheduleClear()
+            }
         }
     }
 
@@ -207,6 +223,61 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             self?.overlayView?.markFailure(errorCode: errorCode)
             self?.scheduleClear()
         }
+    }
+
+    private func playback(_ summary: HIDActionVisualSummary) {
+        playbackToken += 1
+        let token = playbackToken
+        let delays = playbackDelays(for: summary.events)
+        overlayView?.render(
+            HIDOverlayFrame(
+                context: summary.context,
+                events: [],
+                expected: summary.verification.expectedPointer,
+                actual: nil,
+                errorCode: nil
+            )
+        )
+        for index in summary.events.indices {
+            let delay = delays[index]
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.playbackToken == token else {
+                    return
+                }
+                let visibleEvents = Array(summary.events.prefix(index + 1))
+                self.overlayView?.render(
+                    HIDOverlayFrame(
+                        context: summary.context,
+                        events: visibleEvents,
+                        expected: summary.verification.expectedPointer,
+                        actual: index == summary.events.count - 1 ? summary.verification.finalPointer : nil,
+                        errorCode: nil
+                    )
+                )
+                if index == summary.events.count - 1 {
+                    self.scheduleClear()
+                }
+            }
+        }
+    }
+
+    private func playbackDelays(for events: [InjectedEvent]) -> [TimeInterval] {
+        guard !events.isEmpty else {
+            return []
+        }
+        var delays: [TimeInterval] = [0]
+        let dates = events.map { isoFormatter.date(from: $0.timestamp) }
+        for index in 1..<events.count {
+            let rawDelta: TimeInterval
+            if let previous = dates[index - 1], let current = dates[index] {
+                rawDelta = current.timeIntervalSince(previous)
+            } else {
+                rawDelta = 0.07
+            }
+            let boundedDelta = min(max(rawDelta, 0.045), 0.18)
+            delays.append(delays[index - 1] + boundedDelta)
+        }
+        return delays
     }
 
     private func ensureOverlay(for context: HIDActionVisualContext) {

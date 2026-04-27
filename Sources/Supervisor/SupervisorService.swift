@@ -24,11 +24,21 @@ public struct SupervisorSnapshot: Codable, Equatable {
     public let online: Bool
     public let observing: Bool
     public let observingHost: String?
+    public let eventTapRunning: Bool
+    public let eventTapError: String?
 
-    public init(online: Bool, observing: Bool, observingHost: String?) {
+    public init(
+        online: Bool,
+        observing: Bool,
+        observingHost: String?,
+        eventTapRunning: Bool = false,
+        eventTapError: String? = nil
+    ) {
         self.online = online
         self.observing = observing
         self.observingHost = observingHost
+        self.eventTapRunning = eventTapRunning
+        self.eventTapError = eventTapError
     }
 }
 
@@ -39,6 +49,7 @@ public final class SupervisorService {
     private let lock = NSLock()
     private let modifierTracker = ModifierTracker()
     private var eventTap: EventTap?
+    private var eventTapError: String?
     private var online = true
 
     public init(killSwitch: KillSwitch = KillSwitch(), observer: PassiveObserver = PassiveObserver()) {
@@ -61,17 +72,30 @@ public final class SupervisorService {
         }
 
         if promptForPermission, !EventTap.isAccessibilityTrusted(prompt: true) {
+            lock.withLock {
+                eventTapError = EventTapError.accessibilityPermissionMissing.localizedDescription
+                online = false
+            }
             throw EventTapError.accessibilityPermissionMissing
         }
 
         let tap = EventTap(eventsOfInterest: mask)
-        try tap.start { [weak self] (type: CGEventType, event: CGEvent) in
-            self?.feed(event, type: type)
-            return Unmanaged.passUnretained(event)
+        do {
+            try tap.start { [weak self] (type: CGEventType, event: CGEvent) in
+                self?.feed(event, type: type)
+                return Unmanaged.passUnretained(event)
+            }
+        } catch {
+            lock.withLock {
+                eventTapError = error.localizedDescription
+                online = false
+            }
+            throw error
         }
 
         lock.withLock {
             eventTap = tap
+            eventTapError = nil
             online = true
         }
     }
@@ -97,10 +121,13 @@ public final class SupervisorService {
     }
 
     public func snapshot() -> SupervisorSnapshot {
-        SupervisorSnapshot(
+        let tap = lock.withLock { eventTap }
+        return SupervisorSnapshot(
             online: lock.withLock { online },
             observing: observer.isEnabled,
-            observingHost: observer.observingHost
+            observingHost: observer.observingHost,
+            eventTapRunning: tap?.isRunning ?? false,
+            eventTapError: lock.withLock { eventTapError }
         )
     }
 

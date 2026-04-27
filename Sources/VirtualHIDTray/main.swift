@@ -15,7 +15,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             switch self {
             case .overview: return "总览"
             case .hud: return "HUD 可视化"
-            case .learning: return "学习预训练"
+            case .learning: return "鼠标习惯学习"
             case .runtime: return "运行时"
             case .security: return "安全"
             }
@@ -28,7 +28,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             case .hud:
                 return "配置透明穿透浮层、轨迹、落点、事件特效和常驻显示。"
             case .learning:
-                return "开启被动学习或专项训练，沉淀鼠标轨迹、节奏和点击行为模板。"
+                return "开启被动学习或专项训练，沉淀鼠标轨迹、节奏、点击按压和间隔习惯。"
             case .runtime:
                 return "管理本地 runtime 状态、刷新、重启和退出。"
             case .security:
@@ -87,6 +87,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var lastState = HUDState.offline(message: "未连接到 VirtualHID 执行服务")
     private var learningStatusLabel: NSTextField?
     private var learningCountersLabel: NSTextField?
+    private var learningCaptureLabel: NSTextField?
+    private var learningEventsLabel: NSTextField?
+    private var learningSamplesLabel: NSTextField?
+    private var learningTracesLabel: NSTextField?
     private var learningTemplatesLabel: NSTextField?
     private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
@@ -220,10 +224,11 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     @objc private func toggleLearningAction(_ sender: Any?) {
         do {
-            let response = try call(method: "learning.configure", params: [
+            _ = try call(method: "learning.configure", params: [
                 "enabled": !lastLearningState.enabled,
                 "mode": lastLearningState.enabled ? "off" : "passive"
             ])
+            let response = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -265,10 +270,11 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     @objc private func applyLearningAction(_ sender: Any?) {
         do {
-            let response = try call(method: "learning.configure", params: [
+            _ = try call(method: "learning.configure", params: [
                 "enabled": learningEnabledCheckbox?.state == .on,
                 "mode": selectedLearningMode()
             ])
+            let response = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -278,11 +284,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     @objc private func startTrainingAction(_ sender: Any?) {
         do {
-            let response = try call(method: "learning.session.start", params: [
+            _ = try call(method: "learning.session.start", params: [
                 "label": trainingLabelField?.stringValue ?? "",
                 "host": trainingHostField?.stringValue ?? "",
-                "targetAction": trainingActionField?.stringValue ?? ""
+                "targetAction": normalizedTrainingAction()
             ])
+            let response = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -301,7 +308,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
         do {
             _ = try call(method: "profiles.rebuild", params: [:])
-            let response = try call(method: "learning.state", params: [:])
+            let response = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: response)
             lastLearningDemoStatus = "学习模板已重建。当前模板 \(lastLearningState.totalTemplates) 个。"
         } catch {
@@ -320,7 +327,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
             }
             runtime = activeRuntime
-            lastLearningDemoStatus = "正在演示学习效果：HUD 会显示 baseline 和 learned action 的轨迹。"
+            lastLearningDemoStatus = "安全预览中：HUD 会分步显示未使用习惯模板和使用习惯模板的轨迹、落点、按下/抬起事件；不会实际点击页面。"
             updateControls()
         } catch {
             lastLearningDemoStatus = "演示失败：\(localizedErrorMessage(error))"
@@ -332,7 +339,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             do {
                 let hudResponse = try runtime.call(method: "hud.configure", params: [
                     "enabled": true,
-                    "clearDelaySeconds": 8.0,
+                    "clearDelaySeconds": 10.0,
                     "settings": [
                         "trail": true,
                         "trailPoints": true,
@@ -347,9 +354,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 let demoResponse = try runtime.call(method: "learning.demo.run", params: [
                     "seedDemoTemplate": true,
                     "actionCount": 4,
-                    "stepDelayMs": 750
+                    "stepDelayMs": 1_250
                 ])
-                let learningResponse = try runtime.call(method: "learning.state", params: [:])
+                let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": 8])
                 DispatchQueue.main.async {
                     guard let self else {
                         return
@@ -399,7 +406,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         do {
             let response = try call(method: "hud.state", params: [:])
             lastState = HUDState(response: response)
-            let learningResponse = try call(method: "learning.state", params: [:])
+            let learningResponse = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: learningResponse)
         } catch {
             lastState = .offline(message: localizedErrorMessage(error))
@@ -559,6 +566,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         componentCheckboxes.removeAll()
         learningStatusLabel = nil
         learningCountersLabel = nil
+        learningCaptureLabel = nil
+        learningEventsLabel = nil
+        learningSamplesLabel = nil
+        learningTracesLabel = nil
         learningTemplatesLabel = nil
         learningDemoStatusLabel = nil
         learningEnabledCheckbox = nil
@@ -593,7 +604,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         overview.addArrangedSubview(metricCard(title: "运行时", value: runtime == nil ? "离线" : "在线", caption: "VirtualHID.app"))
         overview.addArrangedSubview(metricCard(title: "HUD", value: lastState.enabled ? "开启" : "关闭", caption: "透明轨迹层"))
         overview.addArrangedSubview(metricCard(title: "学习", value: lastLearningState.enabled ? "开启" : "关闭", caption: lastLearningState.modeText))
-        overview.addArrangedSubview(metricCard(title: "样本", value: "\(lastLearningState.persistedSamples)", caption: "已持久化"))
+        overview.addArrangedSubview(metricCard(title: "历史片段", value: "\(lastLearningState.traceCount)", caption: "已入库"))
         stack.addArrangedSubview(overview)
 
         let shortcuts = NSStackView()
@@ -601,7 +612,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         shortcuts.alignment = .top
         shortcuts.spacing = 14
         shortcuts.addArrangedSubview(makeShortcutCard(title: "HUD 可视化", body: "控制轨迹、落点、点击/滚动/输入特效和常驻显示。", section: .hud))
-        shortcuts.addArrangedSubview(makeShortcutCard(title: "学习预训练", body: "开启被动学习或进入专项训练，沉淀可复用的人类行为模板。", section: .learning))
+        shortcuts.addArrangedSubview(makeShortcutCard(title: "鼠标习惯学习", body: "开启被动学习或进入专项训练，沉淀可复用的轨迹、节奏和点击习惯。", section: .learning))
         stack.addArrangedSubview(shortcuts)
 
         stack.addArrangedSubview(makeRuntimeCard(title: "运行时状态"))
@@ -817,6 +828,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningCountersLabel = counters
         stack.addArrangedSubview(counters)
 
+        let captureLabel = label("", size: 11, color: .secondaryLabelColor)
+        captureLabel.maximumNumberOfLines = 3
+        captureLabel.preferredMaxLayoutWidth = 292
+        learningCaptureLabel = captureLabel
+        stack.addArrangedSubview(captureLabel)
+
         let learningEnabled = NSButton(checkboxWithTitle: "开启鼠标习惯学习", target: self, action: #selector(applyLearningAction(_:)))
         learningEnabled.controlSize = .large
         learningEnabledCheckbox = learningEnabled
@@ -841,11 +858,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         rhythm.widthAnchor.constraint(equalToConstant: 292).isActive = true
         stack.addArrangedSubview(rhythm)
 
-        let labelField = NSTextField(string: "手动轨迹训练")
+        stack.addArrangedSubview(label("专项训练会把“开始本次采集”之后的真实鼠标动作先暂存；“保存本次训练”才会写入历史片段并重建习惯模板。留空复用范围表示全局鼠标习惯。", size: 11, color: .secondaryLabelColor))
+
+        let labelField = NSTextField(string: "我的鼠标操作习惯")
         let hostField = NSTextField(string: "")
-        hostField.placeholderString = "可选 host"
-        let actionField = NSTextField(string: "click")
-        actionField.placeholderString = "click / drag / scroll"
+        hostField.placeholderString = "可选：网页域名 / 应用名；留空=全局"
+        let actionField = NSTextField(string: "单击")
+        actionField.placeholderString = "单击 / 拖拽 / 滚动"
         for field in [labelField, hostField, actionField] {
             field.widthAnchor.constraint(equalToConstant: 198).isActive = true
         }
@@ -853,9 +872,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         trainingHostField = hostField
         trainingActionField = actionField
         let grid = NSGridView(views: [
-            [label("名称", size: 12, color: .secondaryLabelColor), labelField],
-            [label("Host", size: 12, color: .secondaryLabelColor), hostField],
-            [label("动作", size: 12, color: .secondaryLabelColor), actionField]
+            [label("训练名称", size: 12, color: .secondaryLabelColor), labelField],
+            [label("复用范围", size: 12, color: .secondaryLabelColor), hostField],
+            [label("练习动作", size: 12, color: .secondaryLabelColor), actionField]
         ])
         grid.rowSpacing = 6
         grid.columnSpacing = 8
@@ -864,13 +883,36 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        buttons.addArrangedSubview(actionButton("开始", action: #selector(startTrainingAction(_:))))
-        buttons.addArrangedSubview(actionButton("提交", action: #selector(commitTrainingAction(_:))))
-        buttons.addArrangedSubview(actionButton("丢弃", action: #selector(discardTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("开始本次采集", action: #selector(startTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("保存本次训练", action: #selector(commitTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("丢弃本次采集", action: #selector(discardTrainingAction(_:))))
         stack.addArrangedSubview(buttons)
 
         stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(label("学习成果", size: 14, weight: .semibold))
+        stack.addArrangedSubview(label("实时采集", size: 14, weight: .semibold))
+        let eventsLabel = label("", size: 11, color: .secondaryLabelColor)
+        eventsLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        eventsLabel.maximumNumberOfLines = 5
+        eventsLabel.preferredMaxLayoutWidth = 292
+        learningEventsLabel = eventsLabel
+        stack.addArrangedSubview(eventsLabel)
+
+        let samplesLabel = label("", size: 11, color: .secondaryLabelColor)
+        samplesLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        samplesLabel.maximumNumberOfLines = 6
+        samplesLabel.preferredMaxLayoutWidth = 292
+        learningSamplesLabel = samplesLabel
+        stack.addArrangedSubview(samplesLabel)
+
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(label("历史片段与习惯模板", size: 14, weight: .semibold))
+        let tracesLabel = label("", size: 11, color: .secondaryLabelColor)
+        tracesLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        tracesLabel.maximumNumberOfLines = 5
+        tracesLabel.preferredMaxLayoutWidth = 292
+        learningTracesLabel = tracesLabel
+        stack.addArrangedSubview(tracesLabel)
+
         let templatesLabel = label("", size: 11, color: .secondaryLabelColor)
         templatesLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         templatesLabel.maximumNumberOfLines = 7
@@ -981,6 +1023,14 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningStatusLabel?.textColor = lastLearningState.available ? .labelColor : .systemRed
         learningCountersLabel?.stringValue = lastLearningState.counterText
         learningCountersLabel?.textColor = lastLearningState.available ? .controlAccentColor : .systemRed
+        learningCaptureLabel?.stringValue = lastLearningState.captureText
+        learningCaptureLabel?.textColor = lastLearningState.captureHasProblem ? .systemRed : .secondaryLabelColor
+        learningEventsLabel?.stringValue = lastLearningState.recentEventsText
+        learningEventsLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
+        learningSamplesLabel?.stringValue = lastLearningState.recentSamplesText
+        learningSamplesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
+        learningTracesLabel?.stringValue = lastLearningState.recentTracesText
+        learningTracesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         learningTemplatesLabel?.stringValue = lastLearningState.templateListText
         learningTemplatesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         learningDemoStatusLabel?.stringValue = lastLearningDemoStatus
@@ -1012,7 +1062,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func stopTraining(commit: Bool) {
         do {
-            let response = try call(method: "learning.session.stop", params: ["commit": commit])
+            _ = try call(method: "learning.session.stop", params: ["commit": commit])
+            let response = try call(method: "learning.inspect", params: ["limit": 8])
             lastLearningState = LearningState(response: response)
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
@@ -1038,6 +1089,20 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             return "off"
         default:
             return "passive"
+        }
+    }
+
+    private func normalizedTrainingAction() -> String {
+        let raw = (trainingActionField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch raw {
+        case "", "单击", "点击", "click", "tap":
+            return "click"
+        case "拖拽", "拖动", "drag":
+            return "drag"
+        case "滚动", "滑动", "scroll", "wheel":
+            return "scroll"
+        default:
+            return raw
         }
     }
 
@@ -1129,6 +1194,13 @@ private struct LearningState {
     let persistedSamples: Int
     let totalTemplates: Int
     let traceCount: Int
+    let eventTapRunning: Bool
+    let eventTapError: String?
+    let accessibility: Bool
+    let inputMonitoring: Bool
+    let recentEvents: [LearningEventSummary]
+    let recentSamples: [LearningSampleSummary]
+    let recentTraces: [LearningTraceSummary]
     let templates: [LearningTemplateSummary]
     let lastLearnedAt: String?
     let message: String?
@@ -1149,11 +1221,60 @@ private struct LearningState {
             return "学习离线：\(message)"
         }
         let sessionText = activeSessionLabel.map { "，训练：\($0)" } ?? ""
-        return "学习：\(enabled ? "开启" : "关闭") / \(modeText)，已产出 \(producedSamples) 个样本，待提交 \(pendingTrainingSamples) 个，已持久化 \(persistedSamples) 个，模板 \(totalTemplates) 个\(sessionText)"
+        return "鼠标习惯学习：\(enabled ? "开启" : "关闭") / \(modeText)，已捕捉 \(producedSamples) 个片段，本次待保存 \(pendingTrainingSamples) 个，习惯模板 \(totalTemplates) 个\(sessionText)"
     }
 
     var counterText: String {
-        "样本 \(producedSamples)  |  待提交 \(pendingTrainingSamples)  |  持久化 \(persistedSamples)  |  轨迹 \(traceCount)  |  模板 \(totalTemplates)"
+        "已捕捉 \(producedSamples)  |  本次待保存 \(pendingTrainingSamples)  |  已入库 \(persistedSamples)  |  历史片段 \(traceCount)  |  习惯模板 \(totalTemplates)"
+    }
+
+    var captureText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        if !enabled {
+            return "学习关闭时不会采集真实鼠标事件。开启后，只有系统事件监听运行中才会增长计数。"
+        }
+        let permissionText = "辅助功能 \(accessibility ? "已授权" : "未授权")，输入监控 \(inputMonitoring ? "已授权" : "未授权")"
+        if eventTapRunning {
+            return "系统事件监听运行中。\(permissionText)。移动、单击、拖拽或滚动后，下方会出现实时事件和动作片段。"
+        }
+        let reason = eventTapError.map { "原因：\($0)。" } ?? ""
+        return "系统事件监听未运行，所以计数不会增长。\(reason)\(permissionText)。"
+    }
+
+    var captureHasProblem: Bool {
+        available && enabled && (!eventTapRunning || !accessibility)
+    }
+
+    var recentEventsText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        guard !recentEvents.isEmpty else {
+            return "最近原始事件：暂无。开启学习后移动鼠标、单击或滚动，这里应立即出现事件。"
+        }
+        return "最近原始事件\n" + recentEvents.prefix(5).map(\.displayText).joined(separator: "\n")
+    }
+
+    var recentSamplesText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        guard !recentSamples.isEmpty else {
+            return "动作片段：暂无。完整单击需要包含移动、按下、抬起；专项训练会先暂存在“本次待保存”。"
+        }
+        return "动作片段\n" + recentSamples.prefix(5).map(\.displayText).joined(separator: "\n")
+    }
+
+    var recentTracesText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        guard !recentTraces.isEmpty else {
+            return "历史片段：暂无。被动学习会自动入库；专项训练点击“保存本次训练”后入库。"
+        }
+        return "历史片段\n" + recentTraces.prefix(5).map(\.displayText).joined(separator: "\n")
     }
 
     var templateListText: String {
@@ -1163,9 +1284,7 @@ private struct LearningState {
         guard !templates.isEmpty else {
             return "暂无学习模板。开启被动学习/专项训练，或点击“演示学习效果”生成 VirtualHID 演示模板。"
         }
-        return templates.prefix(5).map { template in
-            "\(template.actionType)  \(template.host)  n=\(template.sampleSize)  c=\(String(format: "%.2f", template.confidence))"
-        }.joined(separator: "\n")
+        return "习惯模板\n" + templates.prefix(5).map(\.displayText).joined(separator: "\n")
     }
 
     init(response: [String: Any]) {
@@ -1185,6 +1304,15 @@ private struct LearningState {
             ?? intValue(result["totalTemplates"])
             ?? 0
         traceCount = intValue(responseResult["traceCount"]) ?? intValue(result["traceCount"]) ?? 0
+        let eventCapture = responseResult["eventCapture"] as? [String: Any] ?? [:]
+        eventTapRunning = eventCapture["eventTapRunning"] as? Bool ?? false
+        eventTapError = eventCapture["eventTapError"] as? String
+        accessibility = eventCapture["accessibility"] as? Bool ?? false
+        inputMonitoring = eventCapture["inputMonitoring"] as? Bool ?? false
+        recentEvents = (responseResult["recentEvents"] as? [[String: Any]] ?? []).map(LearningEventSummary.init)
+        recentSamples = (result["recentSamples"] as? [[String: Any]] ?? responseResult["recentSamples"] as? [[String: Any]] ?? [])
+            .map(LearningSampleSummary.init)
+        recentTraces = (responseResult["recentTraces"] as? [[String: Any]] ?? []).map(LearningTraceSummary.init)
         templates = (result["templates"] as? [[String: Any]] ?? responseResult["templates"] as? [[String: Any]] ?? [])
             .map(LearningTemplateSummary.init)
         lastLearnedAt = result["lastLearnedAt"] as? String
@@ -1202,6 +1330,13 @@ private struct LearningState {
             persistedSamples: 0,
             totalTemplates: 0,
             traceCount: 0,
+            eventTapRunning: false,
+            eventTapError: message,
+            accessibility: false,
+            inputMonitoring: false,
+            recentEvents: [],
+            recentSamples: [],
+            recentTraces: [],
             templates: [],
             lastLearnedAt: nil,
             message: message
@@ -1218,6 +1353,13 @@ private struct LearningState {
         persistedSamples: Int,
         totalTemplates: Int,
         traceCount: Int,
+        eventTapRunning: Bool,
+        eventTapError: String?,
+        accessibility: Bool,
+        inputMonitoring: Bool,
+        recentEvents: [LearningEventSummary],
+        recentSamples: [LearningSampleSummary],
+        recentTraces: [LearningTraceSummary],
         templates: [LearningTemplateSummary],
         lastLearnedAt: String?,
         message: String?
@@ -1231,20 +1373,118 @@ private struct LearningState {
         self.persistedSamples = persistedSamples
         self.totalTemplates = totalTemplates
         self.traceCount = traceCount
+        self.eventTapRunning = eventTapRunning
+        self.eventTapError = eventTapError
+        self.accessibility = accessibility
+        self.inputMonitoring = inputMonitoring
+        self.recentEvents = recentEvents
+        self.recentSamples = recentSamples
+        self.recentTraces = recentTraces
         self.templates = templates
         self.lastLearnedAt = lastLearnedAt
         self.message = message
     }
 }
 
+private struct LearningEventSummary {
+    let type: String
+    let x: Double?
+    let y: Double?
+
+    init(_ object: [String: Any]) {
+        type = object["type"] as? String ?? "event"
+        let point = object["point"] as? [String: Any]
+        x = doubleValue(point?["x"])
+        y = doubleValue(point?["y"])
+    }
+
+    var displayText: String {
+        if let x, let y {
+            return "\(displayEventType(type)) @ \(Int(x)),\(Int(y))"
+        }
+        return displayEventType(type)
+    }
+}
+
+private struct LearningSampleSummary {
+    let host: String
+    let actionType: String
+    let pointCount: Int
+    let durationMs: Double?
+    let clickHoldMs: [Double]
+    let speedPxS: Double?
+    let quality: Double?
+
+    init(_ object: [String: Any]) {
+        host = object["host"] as? String ?? "__global__"
+        actionType = object["actionType"] as? String ?? "action"
+        pointCount = intValue(object["pointCount"]) ?? 0
+        durationMs = doubleValue(object["durationMs"])
+        clickHoldMs = (object["clickHoldMs"] as? [Any] ?? []).compactMap(doubleValue)
+        speedPxS = doubleValue(object["speedPxS"])
+        quality = doubleValue(object["quality"])
+    }
+
+    var displayText: String {
+        var parts = ["\(displayActionType(actionType))片段", displayScope(host)]
+        if pointCount > 0 {
+            parts.append("\(pointCount)点")
+        }
+        if let durationMs {
+            parts.append(formatMs(durationMs))
+        }
+        if let hold = clickHoldMs.first {
+            parts.append("按压\(formatMs(hold))")
+        }
+        if let speedPxS {
+            parts.append("\(Int(speedPxS))px/s")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct LearningTraceSummary {
+    let host: String
+    let actionType: String
+    let pointCount: Int
+    let durationMs: Double?
+    let clickHoldMs: [Double]
+    let speedPxS: Double?
+
+    init(_ object: [String: Any]) {
+        host = object["host"] as? String ?? "__global__"
+        actionType = object["actionType"] as? String ?? "action"
+        pointCount = intValue(object["pointCount"]) ?? 0
+        durationMs = doubleValue(object["durationMs"])
+        clickHoldMs = (object["clickHoldMs"] as? [Any] ?? []).compactMap(doubleValue)
+        speedPxS = doubleValue(object["speedPxS"])
+    }
+
+    var displayText: String {
+        var parts = [displayActionType(actionType), displayScope(host)]
+        if pointCount > 0 {
+            parts.append("\(pointCount)点")
+        }
+        if let durationMs {
+            parts.append(formatMs(durationMs))
+        }
+        if let hold = clickHoldMs.first {
+            parts.append("按压\(formatMs(hold))")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
 private struct LearningTemplateSummary {
     let host: String
+    let elementSig: String
     let actionType: String
     let sampleSize: Int
     let confidence: Double
 
     init(_ object: [String: Any]) {
         host = object["host"] as? String ?? "unknown"
+        elementSig = object["elementSig"] as? String ?? object["element_sig"] as? String ?? ""
         actionType = object["actionType"] as? String ?? object["action_type"] as? String ?? "action"
         sampleSize = intValue(object["sampleSize"] ?? object["sample_size"]) ?? 0
         if let double = object["confidence"] as? Double {
@@ -1257,6 +1497,10 @@ private struct LearningTemplateSummary {
             confidence = 0
         }
     }
+
+    var displayText: String {
+        "\(displayActionType(actionType))习惯 · \(displayScope(host)) · \(sampleSize)个片段 · 置信度 \(String(format: "%.2f", confidence))"
+    }
 }
 
 private struct LearningDemoResult {
@@ -1264,18 +1508,19 @@ private struct LearningDemoResult {
 
     init(response: [String: Any]) {
         let result = response["result"] as? [String: Any] ?? response
+        let assertions = result["assertions"] as? [String: Any] ?? [:]
         guard result["ok"] as? Bool == true else {
-            statusText = "演示失败：runtime 未返回通过状态。"
+            let profile = assertions["learnedProfilesApplied"] as? Bool == true ? "模板已命中" : "模板未命中"
+            let click = assertions["learnedActionsHaveClickEvents"] as? Bool == true ? "点击事件已生成" : "点击事件缺失"
+            statusText = "安全预览未通过：\(profile)，\(click)。不会实际点击页面。"
             return
         }
         let template = result["template"] as? [String: Any] ?? [:]
         let actions = result["actions"] as? [[String: Any]] ?? []
         let counts = actions.compactMap { intValue($0["mouseMoveCount"]) }
-        let templateId = [template["host"] as? String, template["elementSig"] as? String, template["actionType"] as? String]
-            .compactMap { $0 }
-            .joined(separator: " / ")
+        let templateId = "\(displayActionType(template["actionType"] as? String ?? "click"))习惯 · \(displayScope(template["host"] as? String ?? "__global__"))"
         let countsText = counts.map(String.init).joined(separator: ", ")
-        statusText = "演示通过：模板 \(templateId)，\(actions.count) 个 learned action 已命中 profile，轨迹点 \(countsText)。HUD 数据来自 VirtualHID events。"
+        statusText = "安全预览完成：已使用 \(templateId) 生成 \(actions.count) 次干运行点击；轨迹点 \(countsText)。HUD 数据来自 VirtualHID 事件，没有真实点击页面。"
     }
 }
 
@@ -1318,6 +1563,74 @@ private func intValue(_ value: Any?) -> Int? {
         return Int(string)
     }
     return nil
+}
+
+private func doubleValue(_ value: Any?) -> Double? {
+    if let double = value as? Double {
+        return double
+    }
+    if let int = value as? Int {
+        return Double(int)
+    }
+    if let string = value as? String {
+        return Double(string)
+    }
+    return nil
+}
+
+private func displayActionType(_ value: String) -> String {
+    switch value {
+    case "click":
+        return "单击"
+    case "drag":
+        return "拖拽"
+    case "scroll":
+        return "滚动"
+    case "move":
+        return "移动"
+    case "type", "pasteText", "key":
+        return "输入"
+    default:
+        return value
+    }
+}
+
+private func displayEventType(_ value: String) -> String {
+    switch value {
+    case "mouseMoved":
+        return "移动"
+    case "leftMouseDown", "rightMouseDown", "otherMouseDown":
+        return "按下"
+    case "leftMouseUp", "rightMouseUp", "otherMouseUp":
+        return "抬起"
+    case "leftMouseDragged", "rightMouseDragged", "otherMouseDragged":
+        return "拖动"
+    case "scrollWheel":
+        return "滚动"
+    case "keyDown":
+        return "键盘按下"
+    case "keyUp":
+        return "键盘抬起"
+    default:
+        return value
+    }
+}
+
+private func displayScope(_ value: String) -> String {
+    switch value {
+    case "", "__global__":
+        return "全局"
+    case "virtualhid-management-demo.local":
+        return "安全演示"
+    case "virtualhid-management-demo-baseline.local":
+        return "未使用模板"
+    default:
+        return value
+    }
+}
+
+private func formatMs(_ value: Double) -> String {
+    "\(Int(value.rounded()))ms"
 }
 
 private final class CardView: NSView {

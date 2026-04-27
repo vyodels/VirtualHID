@@ -129,10 +129,10 @@ HUD、学习成果和学习效果演示的正式入口是 `VirtualHID.app` 管�
 
 1. `VirtualHID.app` 管理中心或 JSON-RPC `learning.configure` 显式开启学习；默认关闭。
 2. `PassiveObserver + PassiveLearning` 从真实鼠标事件流提取压缩行为指纹，包括路径骨架、分段节奏、停顿、点击按压时间、点击间隔、速度、直线度和转向抖动。
-3. 被动学习样本以 `__global__` 通用 host 聚合；专项训练可通过 `learning.session.start/stop` 指定训练名称、host 和动作类型。
-4. `ProfileStore` 写入 compact trace 并由 `profiles.rebuild` 生成学习模板。
-5. `action` 时按目标 host/sig/task/action 命中模板；没有站点级模板时可回退到全局鼠标习惯模板。模板只影响 VirtualHID 的轨迹、节奏、hold/inter-click 等参数，不改变上游目标选择。
-6. 管理中心会展示样本数、持久化轨迹数、模板数和最近模板摘要，并通过“演示学习效果”按钮调用 runtime 的 `learning.demo.run`。该演示由 VirtualHID 自己提交 baseline + learned dry-run action，HUD 轨迹、expected/final point 和事件证据仍来自 `ActionExecutor` 与 `OutcomeVerifier`，不是脚本、网页或 mock 补画。
+3. 被动学习片段以 `__global__` 通用复用范围聚合；专项训练可通过 `learning.session.start/stop` 指定训练名称、复用范围（API 字段仍为 `host`）和练习动作。
+4. `ProfileStore` 写入 compact trace，并由 `profiles.rebuild` 生成可复用的鼠标习惯模板。
+5. `action` 时按目标 `host/sig/task/action` 命中模板；没有站点级模板时可回退到全局鼠标习惯模板。模板只影响 VirtualHID 的轨迹、节奏、hold/inter-click 等参数，不改变上游目标选择。
+6. 管理中心会展示实时原始事件、动作片段、历史片段、习惯模板和事件监听/权限状态，并通过“演示学习效果”按钮调用 runtime 的 `learning.demo.run`。该演示是安全 dry-run 预览：VirtualHID 会生成未使用模板和使用模板的 planned HID events 给 HUD 分步展示，但不会投递真实点击或键盘事件。
 
 长期分析则由 `scripts/humanization_analysis.py` 和 `results/humanization-history.jsonl` 负责，按 `instructionKey` 聚合人工/HID 差异并输出调参建议。分析器现在会优先使用 `replayFingerprint / compactTrace` 中的路径骨架、节奏片段和质量分，如果历史里没有这些字段，则自动降级为摘要级长期分析。
 
@@ -151,7 +151,7 @@ HUD、学习成果和学习效果演示的正式入口是 `VirtualHID.app` 管�
 - Chrome 下载气泡、下载列表、菜单和 popover 等浏览器外壳 UI 不属于网页 DOM，也不能靠页面 JS 或 mock 页面处理。网页目标动作默认启用 `options.browserChromeOverlayPolicy = "auto"`：VirtualHID 会用 macOS AX 检测与目标浏览器窗口重叠的非标准外壳瞬态窗口，必要时先发送 Escape 清理遮挡，并在 `result.preflight.browserChromeOverlay` 返回证据；该预处理不进入业务 `events`、HUD 轨迹或 ReplayTraceStore 学习样本。需要显式处理时可设为 `"force"`，需要关闭时可设为 `"off"`。
 - `target / geometry` 是 action 顶层执行字段，不进入 `ActionContext`，不参与业务语义判断
 - HUD 是 VirtualHID 自有透明穿透覆盖层；轨迹、expected/final point、窗口框、状态、点击/拖拽/滚动/输入标记必须来自 VirtualHID action events / execution context / verification，不能由网页、browser 或 recruit-agent mock 补造。HUD 是 VirtualHID 正式本地观察能力；`VirtualHID.app` 默认持有可管理 HUD，CLI/smoke 入口可由 `--visualize-hid` / `VIRTUALHID_VISUALIZE_HID=1` 显式开启。HUD 生命周期必须跟随当前 target window：目标窗口打开并开始 action 时自动显示，窗口移动/缩放时 HUD 外框和诊断跟随新 frame，目标窗口关闭或 target 不可解析时关闭/隐藏，不能停留在旧屏幕坐标；常驻显示开启时，action 结束后 HUD 会保留最后一次目标窗口、状态和落点，清除延迟只清掉动态轨迹/特效；`--no-hud` / `VIRTUALHID_NO_HUD=1` 强制禁用且不得影响 action 结果。
-- `VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动 app 即代表启动 VirtualHID 本地主程序。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理中心可切换 HUD、常驻显示、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本、清除延迟、鼠标习惯学习开关和专项训练，并展示学习成果和触发学习效果演示。管理 UI 直接调用 app 内同一个 runtime，不生成 HID 事件，不写入 `hid_action` payload，也不改变上游业务决策。
+- `VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口；启动 app 即代表启动 VirtualHID 本地主程序。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理中心可切换 HUD、常驻显示、轨迹、目标/实际落点、点击/拖拽/滚动/输入特效、状态文本、清除延迟、鼠标习惯学习开关和专项训练，并展示实时采集、历史片段、习惯模板和安全 dry-run 演示。管理 UI 直接调用 app 内同一个 runtime，不生成业务 HID payload，不改变上游业务决策；“演示学习效果”只渲染 VirtualHID planned events，不真实点击页面。
 - `global` / `auto` 写入会先由 VirtualHID 激活目标应用，再校验 `targetApp.frontmost == true`
 - `pid` 模式只允许 `mouseMoved / scrollWheel`，不可用于 click / drag / type / pasteText / key
 - `hid_unlock` 不只是解除 kill switch，也必须释放/清空 VirtualHID 观测到的卡住修饰键和鼠标按钮状态，避免下一次动作继承脏输入状态

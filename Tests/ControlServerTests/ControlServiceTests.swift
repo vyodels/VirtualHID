@@ -296,16 +296,42 @@ final class ControlServiceTests: XCTestCase {
         let baseline = result?["baseline"] as? [String: Any]
         let actions = result?["actions"] as? [[String: Any]] ?? []
         let template = result?["template"] as? [String: Any]
+        let safety = result?["safety"] as? [String: Any]
 
         XCTAssertEqual(payload["ok"] as? Bool, true)
         XCTAssertEqual(result?["ok"] as? Bool, true)
         XCTAssertEqual(result?["source"] as? String, "virtualhid-action-events")
+        XCTAssertEqual(result?["mode"] as? String, "safe-dry-run-preview")
+        XCTAssertEqual(safety?["dryRun"] as? Bool, true)
+        XCTAssertEqual(safety?["realClickPosted"] as? Bool, false)
         XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, true)
         XCTAssertEqual(template?["host"] as? String, "virtualhid-management-demo.local")
         XCTAssertEqual(baseline?["profileApplied"] as? Bool, false)
         XCTAssertEqual(actions.count, 2)
         XCTAssertEqual(actions.allSatisfy { $0["profileApplied"] as? Bool == true }, true)
         XCTAssertEqual(actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }, true)
+        XCTAssertEqual(actions.allSatisfy { ($0["mouseDownCount"] as? Int ?? 0) > 0 }, true)
+        XCTAssertEqual(actions.allSatisfy { ($0["mouseUpCount"] as? Int ?? 0) > 0 }, true)
+    }
+
+    func testLearningInspectReturnsObservableLearningData() throws {
+        let service = try makeService()
+        _ = service.handleLine(
+            #"{"id":"learning-demo","method":"learning.demo.run","params":{"seedDemoTemplate":true,"actionCount":1,"stepDelayMs":0}}"#
+        )
+
+        let payload = try decode(service.handleLine(#"{"id":"learning-inspect","method":"learning.inspect","params":{"limit":4}}"#))
+        let result = payload["result"] as? [String: Any]
+        let capture = result?["eventCapture"] as? [String: Any]
+        let recentTraces = result?["recentTraces"] as? [[String: Any]]
+        let templates = result?["templates"] as? [[String: Any]]
+        let definitions = result?["definitions"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertNotNil(capture?["eventTapRunning"])
+        XCTAssertGreaterThan(recentTraces?.count ?? 0, 0)
+        XCTAssertGreaterThan(templates?.count ?? 0, 0)
+        XCTAssertNotNil(definitions?["scope"])
     }
 
     func testTypeFallsBackToPasteTextForChinese() throws {

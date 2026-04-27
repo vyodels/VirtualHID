@@ -39,6 +39,10 @@ public final class EventTap {
     private var callbackBox: Unmanaged<CallbackBox>?
     private var running = false
 
+    public var isRunning: Bool {
+        lifecycleLock.withLock { running && tap != nil }
+    }
+
     public init(eventsOfInterest: CGEventMask) {
         self.eventsOfInterest = eventsOfInterest
     }

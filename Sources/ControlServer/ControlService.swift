@@ -134,7 +134,9 @@ public final class ControlService {
             "supervisor": [
                 "online": supervisorSnapshot.online,
                 "observing": supervisorSnapshot.observing,
-                "observingHost": supervisorSnapshot.observingHost as Any? ?? NSNull()
+                "observingHost": supervisorSnapshot.observingHost as Any? ?? NSNull(),
+                "eventTapRunning": supervisorSnapshot.eventTapRunning,
+                "eventTapError": supervisorSnapshot.eventTapError as Any? ?? NSNull()
             ],
             "permissions": [
                 "accessibility": EventTap.isAccessibilityTrusted(prompt: false),
@@ -201,6 +203,8 @@ public final class ControlService {
             return try handleTraceCommit(params)
         case "learning.state":
             return try handleLearningState()
+        case "learning.inspect":
+            return try handleLearningInspect(params)
         case "learning.configure":
             return try handleLearningConfigure(params)
         case "learning.session.start":
@@ -528,6 +532,31 @@ public final class ControlService {
         return state
     }
 
+    private func handleLearningInspect(_ params: [String: Any]) throws -> [String: Any] {
+        let limit = max(1, min(intValue(params["limit"] ?? params["n"]) ?? 8, 30))
+        var object = try handleLearningState()
+        let supervisorSnapshot = supervisor.snapshot()
+        object["eventCapture"] = [
+            "eventTapRunning": supervisorSnapshot.eventTapRunning,
+            "eventTapError": supervisorSnapshot.eventTapError as Any? ?? NSNull(),
+            "accessibility": EventTap.isAccessibilityTrusted(prompt: false),
+            "inputMonitoring": inputMonitoringGranted(),
+            "observing": supervisorSnapshot.observing,
+            "observingHost": supervisorSnapshot.observingHost as Any? ?? NSNull()
+        ]
+        object["recentEvents"] = supervisor.observer.tail(limit: limit).map(observedEventObject)
+        object["recentTraces"] = try profileStore.listTraceSummaries(limit: limit).map(traceSummaryObject)
+        object["templates"] = try profileStore.listTemplates().prefix(limit).map(learningTemplateSummaryObject)
+        object["definitions"] = [
+            "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局鼠标习惯。",
+            "actionType": "学习动作表示要学习哪类输入时间流，例如单击、拖拽、滚动；模板只影响轨迹和节奏，不选择业务目标。",
+            "startTraining": "开始专项训练会清空本次待提交缓冲，并把后续真实鼠标动作暂存到训练会话。",
+            "commitTraining": "保存训练会把本次暂存样本写入持久化轨迹库，并重建可复用模板。",
+            "discardTraining": "放弃训练只丢弃本次暂存样本，不删除已有轨迹和模板。"
+        ]
+        return object
+    }
+
     private func handleLearningConfigure(_ params: [String: Any]) throws -> [String: Any] {
         let mode = parsePassiveLearningMode(params["mode"])
         let state = supervisor.observer.configureLearning(
@@ -635,9 +664,20 @@ public final class ControlService {
         let baselineSummary = learningDemoActionSummary(baseline)
         let profilesApplied = actions.allSatisfy { $0["profileApplied"] as? Bool == true }
         let hasMotion = actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }
+        let hasClickEvents = actions.allSatisfy {
+            ($0["mouseDownCount"] as? Int ?? 0) > 0 && ($0["mouseUpCount"] as? Int ?? 0) > 0
+        }
+        let baselineProfileNotApplied = baselineSummary["profileApplied"] as? Bool != true
         return [
-            "ok": profilesApplied && hasMotion && (baselineSummary["profileApplied"] as? Bool != true),
+            "ok": profilesApplied && baselineProfileNotApplied && hasClickEvents,
             "source": "virtualhid-action-events",
+            "mode": "safe-dry-run-preview",
+            "safety": [
+                "dryRun": true,
+                "realClickPosted": false,
+                "realKeyboardPosted": false,
+                "description": "VirtualHID only renders planned HID events in HUD; it does not post CGEvents during this demo."
+            ],
             "target": [
                 "bundleId": target.bundleIdentifier,
                 "pid": Int(target.pid),
@@ -649,9 +689,13 @@ public final class ControlService {
             "baseline": baselineSummary,
             "actions": actions,
             "assertions": [
-                "baselineProfileNotApplied": baselineSummary["profileApplied"] as? Bool != true,
+                "baselineProfileNotApplied": baselineProfileNotApplied,
                 "learnedProfilesApplied": profilesApplied,
-                "learnedActionsHaveMouseMovement": hasMotion
+                "learnedActionsHaveMouseMovement": hasMotion,
+                "learnedActionsHaveClickEvents": hasClickEvents
+            ],
+            "warnings": [
+                "missingMouseMove": hasMotion ? NSNull() as Any : "some safe preview actions contain click events but no mouseMoved events"
             ]
         ]
     }
@@ -809,6 +853,8 @@ public final class ControlService {
         let profiles = result["profiles"] as? [String: Any] ?? [:]
         let verification = result["verification"] as? [String: Any] ?? [:]
         let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
+        let mouseDowns = events.filter { ($0["type"] as? String)?.contains("MouseDown") == true }
+        let mouseUps = events.filter { ($0["type"] as? String)?.contains("MouseUp") == true }
         return [
             "id": result["id"] ?? NSNull(),
             "ok": result["ok"] as? Bool ?? false,
@@ -816,6 +862,9 @@ public final class ControlService {
             "templateIds": profiles["templateIds"] ?? [],
             "eventCount": events.count,
             "mouseMoveCount": mouseMoves.count,
+            "mouseDownCount": mouseDowns.count,
+            "mouseUpCount": mouseUps.count,
+            "eventTypes": events.compactMap { $0["type"] as? String },
             "expectedPointer": verification["expectedPointer"] ?? NSNull(),
             "finalPointer": verification["finalPointer"] ?? NSNull()
         ]
@@ -1668,6 +1717,29 @@ public final class ControlService {
         ]
     }
 
+    private func traceSummaryObject(_ trace: TraceSummary) -> [String: Any] {
+        [
+            "id": Int(trace.id),
+            "ts": trace.ts,
+            "tsText": isoString(ms: trace.ts),
+            "source": trace.source,
+            "host": trace.host,
+            "elementSig": trace.elementSig as Any? ?? NSNull(),
+            "taskId": trace.taskId as Any? ?? NSNull(),
+            "stage": trace.stage as Any? ?? NSNull(),
+            "actionType": trace.actionType,
+            "eventType": trace.eventType,
+            "pointCount": trace.pointCount,
+            "durationMs": trace.durationMs as Any? ?? NSNull(),
+            "clickHoldMs": trace.clickHoldMs,
+            "interClickMs": trace.interClickMs,
+            "pathLengthPx": trace.pathLengthPx as Any? ?? NSNull(),
+            "speedPxS": trace.speedPxS as Any? ?? NSNull(),
+            "straightness": trace.straightness as Any? ?? NSNull(),
+            "turnJitter": trace.turnJitter as Any? ?? NSNull()
+        ]
+    }
+
     private func inputMonitoringGranted() -> Bool {
         #if canImport(IOKit)
         return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
@@ -2417,15 +2489,23 @@ private func decodedMotionProfile(from template: ProfileTemplate) -> MotionProfi
     let data = Data(template.paramsJSON.utf8)
     let decoder = JSONDecoder()
     if let learned = try? decoder.decode(LearnedMotionTemplate.self, from: data) {
-        return learned.motion
+        return sanitizedMotionProfile(learned.motion)
     }
     if let direct = try? decoder.decode(MotionProfile.self, from: data) {
-        return direct
+        return sanitizedMotionProfile(direct)
     }
     guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
         return nil
     }
-    return try? parseMotionProfile(sources: [object["motion"], object["motionProfile"], object])
+    return (try? parseMotionProfile(sources: [object["motion"], object["motionProfile"], object])).map(sanitizedMotionProfile)
+}
+
+private func sanitizedMotionProfile(_ profile: MotionProfile) -> MotionProfile {
+    var sanitized = profile
+    if let controlSpread = sanitized.controlSpread, controlSpread > 1 {
+        sanitized.controlSpread = min(max(controlSpread / 180.0, 0.05), 0.34)
+    }
+    return sanitized
 }
 
 private extension NSLock {

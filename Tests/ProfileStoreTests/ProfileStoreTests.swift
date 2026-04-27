@@ -109,6 +109,7 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertTrue(moveLearned.motion.behaviorBlend != nil)
         XCTAssertTrue((moveLearned.motion.moveSpeedPxS?.max ?? 0) > (moveLearned.motion.moveSpeedPxS?.min ?? 0))
         XCTAssertTrue((moveLearned.motion.pointCount?.max ?? 0) > (moveLearned.motion.pointCount?.min ?? 0))
+        XCTAssertLessThanOrEqual(moveLearned.motion.controlSpread ?? 1, 0.34)
 
         let clickLearned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(clickTemplate.paramsJSON.utf8))
         XCTAssertEqual(clickLearned.actionType, "click")

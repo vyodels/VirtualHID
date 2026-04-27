@@ -232,6 +232,64 @@ public struct TraceInput: Equatable {
     }
 }
 
+public struct TraceSummary: Codable, Equatable {
+    public let id: Int64
+    public let ts: Int64
+    public let source: String
+    public let host: String
+    public let elementSig: String?
+    public let taskId: String?
+    public let stage: String?
+    public let actionType: String
+    public let eventType: String
+    public let pointCount: Int
+    public let durationMs: Double?
+    public let clickHoldMs: [Double]
+    public let interClickMs: [Double]
+    public let pathLengthPx: Double?
+    public let speedPxS: Double?
+    public let straightness: Double?
+    public let turnJitter: Double?
+
+    public init(
+        id: Int64,
+        ts: Int64,
+        source: String,
+        host: String,
+        elementSig: String?,
+        taskId: String?,
+        stage: String?,
+        actionType: String,
+        eventType: String,
+        pointCount: Int,
+        durationMs: Double?,
+        clickHoldMs: [Double],
+        interClickMs: [Double],
+        pathLengthPx: Double?,
+        speedPxS: Double?,
+        straightness: Double?,
+        turnJitter: Double?
+    ) {
+        self.id = id
+        self.ts = ts
+        self.source = source
+        self.host = host
+        self.elementSig = elementSig
+        self.taskId = taskId
+        self.stage = stage
+        self.actionType = actionType
+        self.eventType = eventType
+        self.pointCount = pointCount
+        self.durationMs = durationMs
+        self.clickHoldMs = clickHoldMs
+        self.interClickMs = interClickMs
+        self.pathLengthPx = pathLengthPx
+        self.speedPxS = speedPxS
+        self.straightness = straightness
+        self.turnJitter = turnJitter
+    }
+}
+
 public struct TraceCommitResult: Codable, Equatable {
     public let committed: Bool
     public let dropped: Bool
@@ -670,6 +728,66 @@ public final class ProfileStore {
     public func traceCount(host: String? = nil) throws -> Int {
         try lock.withLock {
             try countTraces(host: host)
+        }
+    }
+
+    public func listTraceSummaries(host: String? = nil, limit: Int = 20) throws -> [TraceSummary] {
+        try lock.withLock { [self] in
+            let safeLimit = max(1, min(limit, 100))
+            let sql: String
+            if host == nil {
+                sql = """
+                SELECT id, ts, source, host, element_sig, task_id, stage, action_type, payload
+                FROM traces
+                ORDER BY ts DESC, id DESC
+                LIMIT ?
+                """
+            } else {
+                sql = """
+                SELECT id, ts, source, host, element_sig, task_id, stage, action_type, payload
+                FROM traces
+                WHERE host = ?
+                ORDER BY ts DESC, id DESC
+                LIMIT ?
+                """
+            }
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            if let host {
+                bindText(host, to: statement, at: 1)
+                sqlite3_bind_int(statement, 2, Int32(safeLimit))
+            } else {
+                sqlite3_bind_int(statement, 1, Int32(safeLimit))
+            }
+
+            var summaries = [TraceSummary]()
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let payloadText = columnString(statement, 8)
+                let payloadData = payloadText.data(using: .utf8)
+                let payload = payloadData.flatMap { try? decoder.decode(TracePayload.self, from: $0) }
+                summaries.append(
+                    TraceSummary(
+                        id: sqlite3_column_int64(statement, 0),
+                        ts: sqlite3_column_int64(statement, 1),
+                        source: columnString(statement, 2),
+                        host: columnString(statement, 3),
+                        elementSig: emptyToNil(columnString(statement, 4)),
+                        taskId: emptyToNil(columnString(statement, 5)),
+                        stage: emptyToNil(columnString(statement, 6)),
+                        actionType: columnString(statement, 7),
+                        eventType: payload?.type ?? columnString(statement, 7),
+                        pointCount: payload?.points.count ?? 0,
+                        durationMs: payload?.durationMs,
+                        clickHoldMs: payload?.clickHoldMs ?? [],
+                        interClickMs: payload?.interClickMs ?? [],
+                        pathLengthPx: payload?.pathLengthPx,
+                        speedPxS: payload?.speedPxS,
+                        straightness: payload?.straightness,
+                        turnJitter: payload?.turnJitter
+                    )
+                )
+            }
+            return summaries
         }
     }
 
@@ -1217,7 +1335,8 @@ public final class ProfileStore {
         guard turnJitter != nil || targetSpread != nil else {
             return nil
         }
-        return clamp(18 + (turnJitter ?? 0.12) * 42 + (targetSpread ?? 4) * 1.8, min: 12, max: 120)
+        let targetRatio = min((targetSpread ?? 4) / 180, 0.16)
+        return clamp(0.08 + (turnJitter ?? 0.12) * 0.62 + targetRatio, min: 0.05, max: 0.34)
     }
 
     private func deriveTargetSpread(from samples: [TraceSample]) -> Double? {
