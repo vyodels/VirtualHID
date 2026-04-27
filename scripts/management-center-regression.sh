@@ -42,26 +42,24 @@ assert controls_pos < analysis_label_pos < demo_status_pos, "效果分析按钮�
 templates_start = source.index("private func makeTemplatesSection()")
 templates_end = source.index("private func makeAnalysisSection()", templates_start)
 templates_section = source[templates_start:templates_end]
-inventory_text_start = source.index("var templateInventoryText: String")
-inventory_text_end = source.index("var analysisText: String", inventory_text_start)
-inventory_text = source[inventory_text_start:inventory_text_end]
+inventory_list_start = source.index("private func updateTemplateInventoryList")
+inventory_list_end = source.index("private func templateInventoryMessageRow", inventory_list_start)
+inventory_list = source[inventory_list_start:inventory_list_end]
 update_status_start = source.index("private func updateControls()")
 update_status_end = source.index("private func position(panel:", update_status_start)
 update_status = source[update_status_start:update_status_end]
 
 assert "templates.prefix(" not in source, "管理中心不允许截断能力模板列表"
 assert "private let learningInspectLimit = 200" in source, "管理中心必须请求足够的模板库存"
-assert ".prefix(" not in inventory_text, "能力模板库存文本必须枚举全部模板，不能在源头截断"
-assert "templates.enumerated().map" in inventory_text, "能力模板库存文本必须保留完整序号和详情"
+assert ".prefix(" not in inventory_list, "能力模板库存列表必须枚举全部模板，不能在源头截断"
+assert "state.templates.enumerated()" in inventory_list, "能力模板库存列表必须保留完整序号和详情"
 assert "NSScrollView()" in templates_section, "能力模板库存必须放在可滚动容器内"
 assert "hasVerticalScroller = true" in templates_section, "能力模板库存滚动容器必须开启纵向滚动条"
+assert "hasHorizontalScroller = true" in templates_section, "能力模板库存列表必须允许横向查看完整模板身份"
 assert "autohidesScrollers = false" in templates_section, "能力模板库存滚动条必须常显，避免误判只有少量模板"
-assert "NSTextView" in templates_section, "能力模板库存必须使用 NSTextView 作为滚动内容，避免 NSTextField 在 NSScrollView 中裁剪长库存"
-assert "templateInventoryLabel?.stringValue = lastLearningState.templateInventoryText" not in update_status, "能力模板库存不能写入 NSTextField.stringValue；应写入 NSTextView.string"
-assert (
-    re.search(r"templateInventory\w*\?\.string\s*=\s*lastLearningState\.templateInventoryText", update_status)
-    or "text: lastLearningState.templateInventoryText" in update_status
-), "能力模板库存刷新必须写入 NSTextView.string"
+assert "templateInventoryListStack" in templates_section, "能力模板库存必须使用结构化列表，不允许退回纯文本"
+assert "templateInventoryText" not in source, "能力模板库存不能退回纯文本拼接；必须使用结构化列表"
+assert "updateTemplateInventoryList(templateInventoryListStack" in update_status, "能力模板库存刷新必须写入结构化列表"
 
 print("management-center source invariants OK")
 PY

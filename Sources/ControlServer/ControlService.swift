@@ -269,6 +269,8 @@ public final class ControlService {
             return try handleLearningSessionStart(params)
         case "learning.teaching.stop":
             return try handleLearningSessionStop(params)
+        case "learning.teaching.next":
+            return try handleLearningTeachingNext(params)
         case "learning.demo.run":
             return try handleLearningDemoRun(params)
         case "learning.demo.step":
@@ -626,7 +628,7 @@ public final class ControlService {
             "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局键鼠能力。",
             "actionType": "动作类型来自真实键鼠事件链，例如点击、拖拽、滚动、键盘输入；模板只影响执行轨迹和节奏，不选择业务目标。",
             "continuousLearning": "开启键鼠输入学习分析后，真实事件会自动生成动作片段并实时入库。",
-            "liveTeaching": "现场教学会给一段真实键鼠练习窗口加范围标签，并可通过 HUD 显示用户指定的起点、目标点和动作说明；样本仍来自物理输入事件并实时入库。",
+            "liveTeaching": "现场教学由 VirtualHID 连续生成教学动作、起点和目标点，并通过 HUD 显示给用户模仿；样本仍来自物理输入事件，且只接收当前教学动作相关事件。",
             "templates": "能力模板由历史片段聚合生成，包含速度、点数、停顿、按压、键盘 dwell/inter-key 等执行参数。"
         ]
         return object
@@ -664,6 +666,161 @@ public final class ControlService {
         object["persistedSamples"] = lock.withLock { persistedLearningSamples }
         object["generatedTemplates"] = (try? profileStore.totalTemplates()) ?? 0
         return object
+    }
+
+    private func handleLearningTeachingNext(_ params: [String: Any]) throws -> [String: Any] {
+        let action = normalizedTeachingAction(nonEmptyString(params["action"] ?? params["targetAction"] ?? params["target_action"]))
+            ?? randomTeachingAction()
+        let host = nonEmptyString(params["host"]) ?? ProfileStore.globalLearningHost
+        let guide = teachingGuide(action: action)
+        let state = supervisor.observer.updateLearningSession(
+            label: "现场教学：\(teachingActionTitle(action))",
+            host: host,
+            targetAction: action
+        )
+        ensureEventTapForLearningIfNeeded()
+        return [
+            "state": (try? encodableObject(state)) ?? NSNull(),
+            "guide": guide,
+            "teaching": [
+                "action": action,
+                "title": teachingActionTitle(action),
+                "instruction": teachingInstruction(action),
+                "acceptedActionTypes": acceptedTeachingActionTypes(action)
+            ]
+        ]
+    }
+
+    private func randomTeachingAction() -> String {
+        ["move", "click", "dblclick", "drag", "scroll", "keyboard"].randomElement() ?? "move"
+    }
+
+    private func normalizedTeachingAction(_ raw: String?) -> String? {
+        guard let raw else {
+            return nil
+        }
+        switch raw.lowercased() {
+        case "move", "mouse_move", "mousemove":
+            return "move"
+        case "click", "single_click":
+            return "click"
+        case "dblclick", "doubleclick", "double-click":
+            return "dblclick"
+        case "drag":
+            return "drag"
+        case "scroll", "wheel":
+            return "scroll"
+        case "keyboard", "type", "key":
+            return "keyboard"
+        default:
+            return nil
+        }
+    }
+
+    private func teachingActionTitle(_ action: String) -> String {
+        switch action {
+        case "move":
+            return "移动轨迹"
+        case "click":
+            return "完整点击"
+        case "dblclick":
+            return "双击"
+        case "drag":
+            return "拖拽"
+        case "scroll":
+            return "滚轮"
+        case "keyboard":
+            return "键盘输入"
+        default:
+            return "键鼠动作"
+        }
+    }
+
+    private func teachingInstruction(_ action: String) -> String {
+        switch action {
+        case "move":
+            return "从教学起点自然移动到教学目标；不要点击。"
+        case "click":
+            return "从教学起点移动到教学目标，在目标点完成一次真实单击。"
+        case "dblclick":
+            return "移动到教学目标，在目标点完成一次真实双击。"
+        case "drag":
+            return "从教学起点按下并拖拽到教学目标后松开。"
+        case "scroll":
+            return "把鼠标移到教学目标附近，按真实习惯滚动一小段。"
+        case "keyboard":
+            return "保持鼠标不操作，按真实习惯输入几个键或组合键。"
+        default:
+            return "按 HUD 提示完成一次真实键鼠动作。"
+        }
+    }
+
+    private func acceptedTeachingActionTypes(_ action: String) -> [String] {
+        switch action {
+        case "move":
+            return ["move"]
+        case "click":
+            return ["click"]
+        case "dblclick":
+            return ["click(doubleClickOnly)"]
+        case "drag":
+            return ["drag"]
+        case "scroll":
+            return ["scroll"]
+        case "keyboard":
+            return ["type", "key"]
+        default:
+            return [action]
+        }
+    }
+
+    private func teachingGuide(action: String) -> [String: Any] {
+        let points = teachingGuidePoints(action: action)
+        return [
+            "id": "teaching-\(action)-\(Int(Date().timeIntervalSince1970 * 1000))",
+            "action": action,
+            "startPoint": points.start,
+            "targetPoint": points.target,
+            "title": "现场教学：\(teachingActionTitle(action))",
+            "detail": teachingInstruction(action)
+        ]
+    }
+
+    private func teachingGuidePoints(action: String) -> (start: [String: Double], target: [String: Double]) {
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let inset: CGFloat = 120
+        let minX = visible.minX + inset
+        let maxX = max(minX + 160, visible.maxX - inset)
+        let minY = visible.minY + inset
+        let maxY = max(minY + 160, visible.maxY - inset)
+        let startAppKit = CGPoint(
+            x: Double.random(in: Double(minX)...Double(maxX)),
+            y: Double.random(in: Double(minY)...Double(maxY))
+        )
+        let targetAppKit: CGPoint
+        switch action {
+        case "keyboard":
+            targetAppKit = startAppKit
+        case "scroll":
+            targetAppKit = CGPoint(
+                x: min(max(Double(minX), startAppKit.x + Double.random(in: -40...40)), Double(maxX)),
+                y: min(max(Double(minY), startAppKit.y + Double.random(in: -40...40)), Double(maxY))
+            )
+        default:
+            targetAppKit = CGPoint(
+                x: Double.random(in: Double(minX)...Double(maxX)),
+                y: Double.random(in: Double(minY)...Double(maxY))
+            )
+        }
+        return (screenPoint(fromAppKit: startAppKit), screenPoint(fromAppKit: targetAppKit))
+    }
+
+    private func screenPoint(fromAppKit point: CGPoint) -> [String: Double] {
+        ["x": point.x, "y": screenTopY() - point.y]
+    }
+
+    private func screenTopY() -> Double {
+        Double(NSScreen.screens.map(\.frame.maxY).max() ?? (NSScreen.main?.frame.maxY ?? 900))
     }
 
     private func handleLearningDemoRun(_ params: [String: Any]) throws -> [String: Any] {

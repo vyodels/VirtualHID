@@ -122,6 +122,12 @@ public final class PassiveObserver {
         }
     }
 
+    public func updateLearningSession(label: String?, host: String?, targetAction: String?) -> PassiveLearningState {
+        lock.withLock {
+            learningRecorder.updateSession(label: label, host: host, targetAction: targetAction)
+        }
+    }
+
     public func stopLearningSession(commit: Bool) -> PassiveLearningStopResult {
         let result = lock.withLock {
             learningRecorder.stopSession(commit: commit)

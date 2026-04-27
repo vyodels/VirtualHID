@@ -29,10 +29,12 @@ assert data["passiveState"]["ok"], data
 assert data["passiveState"]["result"]["settings"]["enabled"] is True, data
 assert data["passiveState"]["result"]["settings"]["mode"] == "passive", data
 assert data["traceCountGlobal"] == 10, data
-assert data["traceCountTraining"] == 10, data
+assert data["traceCountTraining"] == 5, data
 assert data["passiveTemplate"]["sampleSize"] == 5, data
 assert data["trainingTemplate"]["sampleSize"] == 5, data
+assert data["trainingTemplate"]["actionType"] == "click", data
 assert data["trainingStop"]["ok"], data
 assert data["trainingStop"]["result"]["discardedSamples"] == 0, data
+assert data["trainingStop"]["result"]["state"]["activeSession"]["sampleCount"] == 5, data
 print("learning-smoke OK")
 PY

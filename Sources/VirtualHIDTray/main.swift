@@ -102,18 +102,15 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningTracesLabel: NSTextField?
     private var learningTemplatesLabel: NSTextField?
     private var templateInventoryCountLabel: NSTextField?
-    private var templateInventoryTextView: NSTextView?
     private var learningAnalysisLabel: NSTextField?
     private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
     private var reuseDemoPointsCheckbox: NSButton?
-    private var trainingHostField: NSTextField?
-    private var teachingActionPopup: NSPopUpButton?
-    private var teachingStartLabel: NSTextField?
-    private var teachingTargetLabel: NSTextField?
+    private var templateInventoryListStack: NSStackView?
+    private var templateInventoryDetailLabel: NSTextField?
     private var teachingStatusLabel: NSTextField?
-    private var teachingStartPoint: CGPoint?
-    private var teachingTargetPoint: CGPoint?
+    private var teachingInstructionLabel: NSTextField?
+    private var teachingInstructionTimer: Timer?
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningDemoAction: (action: String, title: String)?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
@@ -134,6 +131,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopTeachingInstructionTimer()
         stopPanelRefreshTimer()
         runtime?.stop()
     }
@@ -311,61 +309,28 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         updateControls()
     }
 
-    @objc private func recordTeachingStartAction(_ sender: Any?) {
-        teachingStartPoint = currentMousePoint()
-        updateControls()
-    }
-
-    @objc private func recordTeachingTargetAction(_ sender: Any?) {
-        teachingTargetPoint = currentMousePoint()
-        updateControls()
-    }
-
     @objc private func startTeachingAction(_ sender: Any?) {
-        guard let start = teachingStartPoint, let target = teachingTargetPoint else {
-            teachingStatusLabel?.stringValue = "请先记录起点和目标点，再开始现场教学。"
-            teachingStatusLabel?.textColor = .systemRed
-            return
-        }
-        let action = teachingActionValue()
         do {
             _ = try call(method: "learning.configure", params: [
                 "enabled": true,
                 "mode": "passive"
             ])
             _ = try call(method: "learning.teaching.start", params: [
-                "label": "现场教学 \(teachingActionTitle(action))",
-                "host": trainingHostField?.stringValue ?? "",
-                "targetAction": action
+                "label": "现场教学",
+                "host": "__global__",
+                "targetAction": "move"
             ])
-            _ = try call(method: "hud.configure", params: [
-                "enabled": true,
-                "settings": [
-                    "trail": true,
-                    "trailPoints": true,
-                    "expectedPoint": true,
-                    "actualPoint": true,
-                    "clickEffects": true,
-                    "dragEffects": true,
-                    "scrollEffects": true,
-                    "keyboardEffects": true,
-                    "windowFrame": true,
-                    "status": true,
-                    "persistent": true
-                ],
-                "teachingGuide": [
-                    "action": action,
-                    "startPoint": pointObject(start),
-                    "targetPoint": pointObject(target),
-                    "title": "现场教学：\(teachingActionTitle(action))",
-                    "detail": "请从教学起点开始，按真实习惯完成 \(teachingActionTitle(action))；样本会实时入库。"
-                ]
-            ])
-            let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
-            lastLearningState = LearningState(response: response)
-            lastState = HUDState(response: try call(method: "hud.state", params: [:]))
-            teachingStatusLabel?.stringValue = "现场教学已开始。请按 HUD 起点和目标点完成真实键鼠动作，完成后点击「结束现场教学」。"
-            teachingStatusLabel?.textColor = .secondaryLabelColor
+            try advanceTeachingInstruction()
+            startTeachingInstructionTimer()
+        } catch {
+            lastLearningState = .offline(message: localizedErrorMessage(error))
+        }
+        updateControls()
+    }
+
+    @objc private func nextTeachingInstructionAction(_ sender: Any?) {
+        do {
+            try advanceTeachingInstruction()
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
@@ -376,53 +341,56 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         stopTeaching(commit: true)
     }
 
-    private func currentMousePoint() -> CGPoint {
-        CGEvent(source: nil)?.location ?? CGPoint(x: 0, y: 0)
-    }
-
-    private func pointObject(_ point: CGPoint) -> [String: Double] {
-        ["x": Double(point.x), "y": Double(point.y)]
-    }
-
-    private func teachingActionValue() -> String {
-        switch teachingActionPopup?.titleOfSelectedItem {
-        case "移动轨迹":
-            return "move"
-        case "双击":
-            return "dblclick"
-        case "拖拽":
-            return "drag"
-        case "滚轮":
-            return "scroll"
-        case "键盘输入":
-            return "keyboard"
-        default:
-            return "click"
+    private func startTeachingInstructionTimer() {
+        teachingInstructionTimer?.invalidate()
+        teachingInstructionTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: true) { [weak self] _ in
+            do {
+                try self?.advanceTeachingInstruction()
+                self?.updateControls()
+            } catch {
+                self?.lastLearningState = .offline(message: localizedErrorMessage(error))
+                self?.updateControls()
+            }
         }
     }
 
-    private func teachingActionTitle(_ action: String) -> String {
-        switch action {
-        case "move":
-            return "移动轨迹"
-        case "dblclick":
-            return "双击"
-        case "drag":
-            return "拖拽"
-        case "scroll":
-            return "滚轮"
-        case "keyboard":
-            return "键盘输入"
-        default:
-            return "完整点击"
-        }
+    private func stopTeachingInstructionTimer() {
+        teachingInstructionTimer?.invalidate()
+        teachingInstructionTimer = nil
     }
 
-    private func teachingPointText(_ point: CGPoint?) -> String {
-        guard let point else {
-            return "未记录"
+    private func advanceTeachingInstruction() throws {
+        let response = try call(method: "learning.teaching.next", params: [:])
+        guard let guide = response["guide"] as? [String: Any],
+              let teaching = response["teaching"] as? [String: Any] else {
+            throw NSError(domain: "VirtualHIDTray", code: 1, userInfo: [NSLocalizedDescriptionKey: "现场教学未返回下一条教学指令"])
         }
-        return "(\(Int(point.x.rounded())), \(Int(point.y.rounded())))"
+        _ = try call(method: "hud.configure", params: [
+            "enabled": true,
+            "settings": [
+                "trail": true,
+                "trailPoints": true,
+                "expectedPoint": true,
+                "actualPoint": true,
+                "clickEffects": true,
+                "dragEffects": true,
+                "scrollEffects": true,
+                "keyboardEffects": true,
+                "windowFrame": true,
+                "status": true,
+                "persistent": true
+            ],
+            "teachingGuide": guide
+        ])
+        let title = teaching["title"] as? String ?? "键鼠动作"
+        let instruction = teaching["instruction"] as? String ?? "按 HUD 提示完成真实键鼠动作。"
+        let accepted = (teaching["acceptedActionTypes"] as? [String] ?? []).joined(separator: " / ")
+        teachingInstructionLabel?.stringValue = "当前教学：\(title)\n\(instruction)\n采集范围：\(accepted.isEmpty ? "当前动作相关事件" : accepted)"
+        teachingStatusLabel?.stringValue = "现场教学进行中。VirtualHID 会持续生成下一条指令；你手动点击「结束现场教学」后停止。"
+        teachingStatusLabel?.textColor = .secondaryLabelColor
+        let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
+        lastLearningState = LearningState(response: learningResponse)
+        lastState = HUDState(response: try call(method: "hud.state", params: [:]))
     }
 
     @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
@@ -786,15 +754,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningTracesLabel = nil
         learningTemplatesLabel = nil
         templateInventoryCountLabel = nil
-        templateInventoryTextView = nil
+        templateInventoryListStack = nil
+        templateInventoryDetailLabel = nil
         learningAnalysisLabel = nil
         learningDemoStatusLabel = nil
         learningEnabledCheckbox = nil
-        trainingHostField = nil
-        teachingActionPopup = nil
-        teachingStartLabel = nil
-        teachingTargetLabel = nil
         teachingStatusLabel = nil
+        teachingInstructionLabel = nil
     }
 
     private func makeSectionContent(_ section: ManagementSection) -> NSView {
@@ -965,7 +931,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             title: "学习边界",
             body: [
                 "学习只在显式开启后采集系统键鼠事件，不记录输入文本内容。",
-                "现场教学只给真实练习窗口加 HUD 起点、目标点和动作提示；样本仍来自物理键鼠事件并实时入库。",
+                "现场教学由 VirtualHID 持续生成动作、起点和目标点，并用 HUD 提示用户模仿；样本仍来自物理键鼠事件，且只接收当前教学动作相关事件。",
                 "能力模板只影响轨迹、节奏、hold/inter-click、dwell/inter-key 等执行参数，不选择业务目标。"
             ]
         )
@@ -1082,48 +1048,19 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
         stack.addArrangedSubview(separator())
         stack.addArrangedSubview(label("现场教学", size: 14, weight: .semibold))
-        stack.addArrangedSubview(label("后台学习会持续沉淀日常习惯；需要精准灌入某类行为时，记录起点和目标点，HUD 会显示教学标记，你按真实习惯完成动作，样本实时入库。", size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(label("点击开始后，VirtualHID 会持续生成教学动作、起点和目标点，并在 HUD 上标注。你只需要按提示模仿真实操作；采集层只接收本次教学动作相关的键鼠事件。", size: 11, color: .secondaryLabelColor))
 
-        let hostField = NSTextField(string: "")
-        hostField.placeholderString = "可选：网页域名 / 应用名；留空=全局键鼠能力"
-        for field in [hostField] {
-            field.widthAnchor.constraint(equalToConstant: 198).isActive = true
-        }
-        trainingHostField = hostField
-        let actionPopup = NSPopUpButton()
-        actionPopup.addItems(withTitles: ["完整点击", "移动轨迹", "双击", "拖拽", "滚轮", "键盘输入"])
-        actionPopup.widthAnchor.constraint(equalToConstant: 198).isActive = true
-        teachingActionPopup = actionPopup
-        let grid = NSGridView(views: [
-            [label("教学范围", size: 12, color: .secondaryLabelColor), hostField],
-            [label("教学动作", size: 12, color: .secondaryLabelColor), actionPopup]
-        ])
-        grid.rowSpacing = 6
-        grid.columnSpacing = 8
-        stack.addArrangedSubview(grid)
-
-        let pointLabels = NSStackView()
-        pointLabels.orientation = .vertical
-        pointLabels.spacing = 4
-        let startLabel = label("", size: 11, color: .secondaryLabelColor)
-        let targetLabel = label("", size: 11, color: .secondaryLabelColor)
-        teachingStartLabel = startLabel
-        teachingTargetLabel = targetLabel
-        pointLabels.addArrangedSubview(startLabel)
-        pointLabels.addArrangedSubview(targetLabel)
-        stack.addArrangedSubview(pointLabels)
-
-        let pointButtons = NSStackView()
-        pointButtons.orientation = .horizontal
-        pointButtons.spacing = 8
-        pointButtons.addArrangedSubview(actionButton("记录起点", action: #selector(recordTeachingStartAction(_:))))
-        pointButtons.addArrangedSubview(actionButton("记录目标点", action: #selector(recordTeachingTargetAction(_:))))
-        stack.addArrangedSubview(pointButtons)
+        let instruction = label("", size: 11, color: .labelColor)
+        instruction.maximumNumberOfLines = 5
+        instruction.preferredMaxLayoutWidth = 292
+        teachingInstructionLabel = instruction
+        stack.addArrangedSubview(instruction)
 
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.addArrangedSubview(actionButton("开始现场教学", action: #selector(startTeachingAction(_:))))
+        buttons.addArrangedSubview(actionButton("下一条指令", action: #selector(nextTeachingInstructionAction(_:))))
         buttons.addArrangedSubview(actionButton("结束现场教学", action: #selector(stopTeachingAction(_:))))
         stack.addArrangedSubview(buttons)
 
@@ -1195,34 +1132,30 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let inventoryScroll = NSScrollView()
         inventoryScroll.drawsBackground = false
         inventoryScroll.hasVerticalScroller = true
-        inventoryScroll.hasHorizontalScroller = false
+        inventoryScroll.hasHorizontalScroller = true
         inventoryScroll.autohidesScrollers = false
         inventoryScroll.borderType = .noBorder
         inventoryScroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let inventoryTextView = NSTextView(frame: NSRect(x: 0, y: 0, width: 642, height: 360))
-        inventoryTextView.drawsBackground = false
-        inventoryTextView.isEditable = false
-        inventoryTextView.isSelectable = true
-        inventoryTextView.isRichText = false
-        inventoryTextView.importsGraphics = false
-        inventoryTextView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        inventoryTextView.textColor = .secondaryLabelColor
-        inventoryTextView.textContainerInset = NSSize(width: 0, height: 8)
-        inventoryTextView.textContainer?.lineFragmentPadding = 0
-        inventoryTextView.textContainer?.containerSize = NSSize(width: 642, height: CGFloat.greatestFiniteMagnitude)
-        inventoryTextView.textContainer?.widthTracksTextView = true
-        inventoryTextView.isHorizontallyResizable = false
-        inventoryTextView.isVerticallyResizable = true
-        inventoryTextView.minSize = NSSize(width: 0, height: 360)
-        inventoryTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        inventoryTextView.autoresizingMask = [.width]
-        templateInventoryTextView = inventoryTextView
+        let inventoryList = NSStackView()
+        inventoryList.orientation = .vertical
+        inventoryList.alignment = .leading
+        inventoryList.spacing = 4
+        inventoryList.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+        inventoryList.translatesAutoresizingMaskIntoConstraints = false
+        inventoryList.widthAnchor.constraint(greaterThanOrEqualToConstant: 1_120).isActive = true
+        templateInventoryListStack = inventoryList
 
-        inventoryScroll.documentView = inventoryTextView
+        inventoryScroll.documentView = inventoryList
         inventoryScroll.widthAnchor.constraint(equalToConstant: 642).isActive = true
-        inventoryScroll.heightAnchor.constraint(equalToConstant: 360).isActive = true
+        inventoryScroll.heightAnchor.constraint(equalToConstant: 330).isActive = true
         cardContent.addArrangedSubview(inventoryScroll)
+
+        let detail = label("", size: 11, color: .secondaryLabelColor)
+        detail.maximumNumberOfLines = 4
+        detail.preferredMaxLayoutWidth = 642
+        templateInventoryDetailLabel = detail
+        cardContent.addArrangedSubview(detail)
 
         let buttons = NSStackView()
         buttons.orientation = .horizontal
@@ -1360,25 +1293,98 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         return button
     }
 
-    private func updateTemplateInventoryTextView(_ textView: NSTextView, text: String, color: NSColor) {
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let didChangeText = textView.string != text
-        if didChangeText {
-            textView.string = text
+    private func updateTemplateInventoryList(_ stack: NSStackView, state: LearningState) {
+        for view in stack.arrangedSubviews {
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
         }
-        textView.font = font
-        textView.textColor = color
 
-        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-        if fullRange.length > 0 {
-            textView.textStorage?.setAttributes([
-                .font: font,
-                .foregroundColor: color
-            ], range: fullRange)
+        guard state.available else {
+            stack.addArrangedSubview(templateInventoryMessageRow(state.message ?? "学习服务不可用"))
+            return
         }
-        if didChangeText {
-            textView.scrollToBeginningOfDocument(nil)
+        guard !state.templates.isEmpty else {
+            let text = state.totalTemplates > 0
+                ? "当前服务报告共有 \(state.totalTemplates) 个能力模板，但本次 inspect 未返回模板详情。请点击「刷新」。"
+                : "暂无能力模板。开启键鼠输入学习分析并积累真实片段后，点击「重建能力模板」。"
+            stack.addArrangedSubview(templateInventoryMessageRow(text))
+            return
         }
+
+        stack.addArrangedSubview(templateInventoryRow(
+            cells: ["#", "动作", "来源", "范围", "目标签名", "任务", "样本", "置信度", "参数摘要"],
+            header: true
+        ))
+        for (index, template) in state.templates.enumerated() {
+            stack.addArrangedSubview(templateInventoryRow(
+                cells: [
+                    "\(index + 1)",
+                    displayActionType(template.actionType),
+                    template.sourceKind,
+                    template.displayScopeText,
+                    template.displayElementSig,
+                    template.displayTaskId,
+                    "\(template.sampleSize)",
+                    String(format: "%.2f", template.confidence),
+                    template.motionText
+                ],
+                header: false,
+                emphasized: template.sourceKind == "正式"
+            ))
+        }
+    }
+
+    private func templateInventoryMessageRow(_ text: String) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: 1_120).isActive = true
+        let message = label(text, size: 12, color: .secondaryLabelColor)
+        message.maximumNumberOfLines = 2
+        message.preferredMaxLayoutWidth = 640
+        row.addArrangedSubview(message)
+        return row
+    }
+
+    private func templateInventoryRow(cells: [String], header: Bool, emphasized: Bool = false) -> NSView {
+        let widths: [CGFloat] = [34, 70, 82, 130, 180, 150, 58, 68, 330]
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: 1_120).isActive = true
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: header ? 26 : 32).isActive = true
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 8
+        if header {
+            row.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+        } else if emphasized {
+            row.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.08).cgColor
+        } else {
+            row.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.04).cgColor
+        }
+        for (index, cell) in cells.enumerated() {
+            row.addArrangedSubview(templateInventoryCell(
+                cell,
+                width: index < widths.count ? widths[index] : 120,
+                header: header
+            ))
+        }
+        return row
+    }
+
+    private func templateInventoryCell(_ text: String, width: CGFloat, header: Bool) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = header
+            ? NSFont.systemFont(ofSize: 11, weight: .semibold)
+            : NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        field.textColor = header ? .labelColor : .secondaryLabelColor
+        field.lineBreakMode = .byTruncatingMiddle
+        field.maximumNumberOfLines = 1
+        field.toolTip = text
+        field.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return field
     }
 
     private func updateControls() {
@@ -1415,27 +1421,26 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let templateInventoryColor: NSColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         templateInventoryCountLabel?.stringValue = lastLearningState.templateInventoryCountText
         templateInventoryCountLabel?.textColor = templateInventoryColor
-        if let templateInventoryTextView {
-            updateTemplateInventoryTextView(
-                templateInventoryTextView,
-                text: lastLearningState.templateInventoryText,
-                color: templateInventoryColor
-            )
+        if let templateInventoryListStack {
+            updateTemplateInventoryList(templateInventoryListStack, state: lastLearningState)
         }
+        templateInventoryDetailLabel?.stringValue = lastLearningState.templateInventoryHelpText
+        templateInventoryDetailLabel?.textColor = templateInventoryColor
         learningAnalysisLabel?.stringValue = lastLearningState.analysisText
         learningAnalysisLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
         learningDemoStatusLabel?.stringValue = lastLearningDemoStatus
         learningDemoStatusLabel?.textColor = lastLearningDemoStatus.hasPrefix("演示失败") ? .systemRed : .secondaryLabelColor
         learningEnabledCheckbox?.isEnabled = lastLearningState.available
         learningEnabledCheckbox?.state = lastLearningState.enabled ? .on : .off
-        trainingHostField?.isEnabled = lastLearningState.available
-        teachingActionPopup?.isEnabled = lastLearningState.available
-        teachingStartLabel?.stringValue = "起点：\(teachingPointText(teachingStartPoint))"
-        teachingTargetLabel?.stringValue = "目标点：\(teachingPointText(teachingTargetPoint))"
+        if teachingInstructionLabel?.stringValue.isEmpty != false {
+            teachingInstructionLabel?.stringValue = lastLearningState.hasActiveSession
+                ? "等待下一条现场教学指令。"
+                : "点击「开始现场教学」，VirtualHID 会生成第一条动作指令。"
+        }
         if teachingStatusLabel?.stringValue.isEmpty != false {
             teachingStatusLabel?.stringValue = lastLearningState.hasActiveSession
-                ? "现场教学进行中：请按 HUD 标记完成真实键鼠动作。"
-                : "记录起点和目标点后，点击「开始现场教学」。"
+                ? "现场教学进行中。"
+                : "未开始现场教学。"
         }
     }
 
@@ -1456,11 +1461,15 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     private func stopTeaching(commit: Bool) {
+        stopTeachingInstructionTimer()
         do {
             _ = try call(method: "learning.teaching.stop", params: ["commit": commit])
             _ = try call(method: "profiles.rebuild", params: [:])
+            _ = try call(method: "hud.configure", params: ["clear": true])
             let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
+            lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+            teachingInstructionLabel?.stringValue = "现场教学已停止。"
             teachingStatusLabel?.stringValue = "现场教学已结束，样本已自动入库并重建能力模板。"
             teachingStatusLabel?.textColor = .secondaryLabelColor
         } catch {
@@ -1656,21 +1665,6 @@ private struct LearningState {
         return "能力模板\n" + templates.map(\.displayText).joined(separator: "\n")
     }
 
-    var templateInventoryText: String {
-        guard available else {
-            return message ?? "学习服务不可用"
-        }
-        guard !templates.isEmpty else {
-            if totalTemplates > 0 {
-                return "当前服务报告共有 \(totalTemplates) 个能力模板，但本次 inspect 未返回模板详情，暂无法展开列表。请点击「刷新」或检查 learning.inspect 的 templates 字段。"
-            }
-            return "暂无能力模板。模板至少需要足够数量的历史片段才能聚合生成。"
-        }
-        return templates.enumerated().map { index, template in
-            "\(index + 1). \(template.detailText)"
-        }.joined(separator: "\n\n")
-    }
-
     var templateInventoryCountText: String {
         guard available else {
             return "模板清单不可用"
@@ -1681,6 +1675,13 @@ private struct LearningState {
             return "显示 \(visibleCount) / 共 \(totalCount) 个模板"
         }
         return "显示 \(visibleCount) / 共 \(totalCount) 个模板（本次接口返回 \(visibleCount) 个）"
+    }
+
+    var templateInventoryHelpText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        return "模板唯一身份由「范围 + 目标签名 + 任务 + 动作」组成；同名动作如果来源、任务或签名不同，会在列表中显示为不同模板。演示/本地临时模板可用于验证，但不等同于长期正式习惯。"
     }
 
     var analysisText: String {
@@ -1924,6 +1925,7 @@ private struct LearningTraceSummary {
 private struct LearningTemplateSummary {
     let host: String
     let elementSig: String
+    let taskId: String
     let actionType: String
     let sampleSize: Int
     let confidence: Double
@@ -1932,6 +1934,7 @@ private struct LearningTemplateSummary {
     init(_ object: [String: Any]) {
         host = object["host"] as? String ?? "unknown"
         elementSig = object["elementSig"] as? String ?? object["element_sig"] as? String ?? ""
+        taskId = object["taskId"] as? String ?? object["task_id"] as? String ?? ""
         actionType = object["actionType"] as? String ?? object["action_type"] as? String ?? "action"
         sampleSize = intValue(object["sampleSize"] ?? object["sample_size"]) ?? 0
         if let double = object["confidence"] as? Double {
@@ -1962,7 +1965,32 @@ private struct LearningTemplateSummary {
         "\(displayActionType(actionType)) / \(displayScope(host))：\(sampleSize) 个样本，置信度 \(String(format: "%.2f", confidence))，\(motionText)"
     }
 
-    private var motionText: String {
+    var displayScopeText: String {
+        displayScope(host)
+    }
+
+    var displayElementSig: String {
+        elementSig.isEmpty ? "通用" : elementSig
+    }
+
+    var displayTaskId: String {
+        taskId.isEmpty ? "通用" : taskId
+    }
+
+    var sourceKind: String {
+        if host == "virtualhid-management-demo.local" || taskId == "management-learning-demo" || elementSig == "management-learning-demo-target" {
+            return "演示"
+        }
+        if host == "__global__" && taskId.isEmpty && elementSig.isEmpty {
+            return "正式"
+        }
+        if host.hasPrefix("127.0.0.1") || host == "localhost" {
+            return "本地临时"
+        }
+        return "站点/应用"
+    }
+
+    var motionText: String {
         var parts = [String]()
         if let flavor = motion["flavor"] as? String {
             parts.append("轨迹=\(displayMotionFlavor(flavor))")

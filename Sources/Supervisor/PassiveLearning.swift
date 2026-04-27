@@ -29,7 +29,7 @@ public struct PassiveLearningSession: Codable, Equatable {
     public let id: String
     public let label: String?
     public let host: String?
-    public let targetAction: String?
+    public var targetAction: String?
     public let startedAt: Int64
     public var endedAt: Int64?
     public var status: String
@@ -316,6 +316,27 @@ final class PassiveLearningRecorder {
         settings.enabled = true
         if settings.mode == .off {
             settings.mode = .passive
+        }
+        resetGestureBuffers()
+        return state
+    }
+
+    func updateSession(label: String?, host: String?, targetAction: String?) -> PassiveLearningState {
+        if activeSession == nil {
+            return startSession(label: label, host: host, targetAction: targetAction)
+        }
+        if let session = activeSession {
+            activeSession = PassiveLearningSession(
+                id: session.id,
+                label: normalized(label) ?? session.label,
+                host: normalized(host) ?? session.host,
+                targetAction: normalized(targetAction) ?? session.targetAction,
+                startedAt: session.startedAt,
+                endedAt: session.endedAt,
+                status: session.status,
+                sampleCount: session.sampleCount,
+                discardedCount: session.discardedCount
+            )
         }
         resetGestureBuffers()
         return state
@@ -637,20 +658,43 @@ final class PassiveLearningRecorder {
     }
 
     private func publish(_ samples: [PassiveGestureSample]) -> [PassiveGestureSample] {
-        guard !samples.isEmpty else {
+        let acceptedSamples = samples.filter(acceptsSampleForActiveTeaching(_:))
+        guard !acceptedSamples.isEmpty else {
             return []
         }
-        producedSamples += samples.count
-        lastSampleAt = samples.last?.ts
-        recentSamples.append(contentsOf: samples)
+        producedSamples += acceptedSamples.count
+        lastSampleAt = acceptedSamples.last?.ts
+        recentSamples.append(contentsOf: acceptedSamples)
         if recentSamples.count > 24 {
             recentSamples.removeFirst(recentSamples.count - 24)
         }
         if var session = activeSession {
-            session.sampleCount += samples.count
+            session.sampleCount += acceptedSamples.count
             activeSession = session
         }
-        return samples
+        return acceptedSamples
+    }
+
+    private func acceptsSampleForActiveTeaching(_ sample: PassiveGestureSample) -> Bool {
+        guard let targetAction = normalized(activeSession?.targetAction) else {
+            return true
+        }
+        switch targetAction {
+        case "move":
+            return sample.actionType == "move"
+        case "click":
+            return sample.actionType == "click"
+        case "dblclick", "doubleclick", "double-click":
+            return sample.actionType == "click" && !sample.doubleClickIntervalMs.isEmpty
+        case "drag":
+            return sample.actionType == "drag"
+        case "scroll":
+            return sample.actionType == "scroll"
+        case "keyboard", "type", "key":
+            return sample.actionType == "type" || sample.actionType == "key"
+        default:
+            return sample.actionType == targetAction
+        }
     }
 
     private func makeSample(

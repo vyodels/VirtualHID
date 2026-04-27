@@ -133,8 +133,8 @@
 补充进展（2026-04-27）：
 
 - `PassiveLearning` 已接入 `PassiveObserver`，在用户显式开启后从真实键鼠事件流自动生成 compact 行为样本。
-- `learning.state / learning.configure / learning.teaching.start / learning.teaching.stop` 已进入 daemon JSON-RPC 控制面；`learning.session.start / learning.session.stop` 仅作为兼容别名保留。
-- 现场教学样本实时自动写入 `ProfileStore`；`learning.teaching.stop` 只结束教学窗口，不再作为手动保存入口。
+- `learning.state / learning.configure / learning.teaching.start / learning.teaching.next / learning.teaching.stop` 已进入 daemon JSON-RPC 控制面；`learning.session.start / learning.session.stop` 仅作为兼容别名保留。
+- 现场教学样本实时自动写入 `ProfileStore`；`learning.teaching.next` 由 VirtualHID 生成下一条教学动作、起点和目标点，并过滤掉非当前教学动作的输入；`learning.teaching.stop` 只结束教学窗口，不再作为手动保存入口。
 - `ProfileStore.lookupTemplate` 已加入 `__global__` 全局键鼠能力模板 fallback，避免按站点硬编码行为规则。
 - 仍缺真实人工/HID 长期样本回归；当前 synthetic smoke 只证明闭环通路可用。
 
@@ -143,7 +143,7 @@
 - action 完成后按 `instructionKey` 自动生成 compact trace fingerprint。
 - 将 trace 持久化到 ProfileStore/ReplayTraceStore，而不是只写临时 JSON。
 - 键鼠输入学习分析只保存压缩行为指纹，不保存完整原始轨迹、DOM、页面文本或截图。
-- 现场教学必须由托盘或本地控制 API 明确开始/结束；HUD 可显示教学起点、目标点和动作说明，样本实时入库，不要求用户手动保存。
+- 现场教学必须由托盘或本地控制 API 明确开始/结束；HUD 显示 VirtualHID 生成的教学起点、目标点和动作说明，样本实时入库，不要求用户手动保存，且必须过滤非当前教学动作事件。
 - 加入敏感字段过滤、大小限制、retention 和低质量样本淘汰。
 - 为真实样本建立最小回归集：人工样本、HID 样本、replay fingerprint、聚合 profile。
 

@@ -115,6 +115,38 @@ final class KillSwitchTests: XCTestCase {
         XCTAssertEqual(published[4].dwellMs.first, 82)
     }
 
+    func testTeachingSessionOnlyPublishesCurrentTargetActionSamples() {
+        let observer = PassiveObserver()
+        var published = [PassiveGestureSample]()
+        observer.learningSampleHandler = { sample in
+            published.append(sample)
+        }
+
+        _ = observer.configureLearning(enabled: true, mode: .passive)
+        _ = observer.startLearningSession(label: "现场教学：移动轨迹", host: nil, targetAction: "move")
+        _ = observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 20, y: 20), ts: 1_000)
+        _ = observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 20, y: 20), ts: 1_060)
+        XCTAssertEqual(published.count, 0, "move teaching must ignore unrelated click samples")
+
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 10, y: 10), ts: 1_200)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 42, y: 28), ts: 1_280)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 84, y: 56), ts: 1_370)
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(published[0].actionType, "move")
+        XCTAssertEqual(published[0].source, "user-teaching")
+
+        _ = observer.updateLearningSession(label: "现场教学：键盘输入", host: nil, targetAction: "keyboard")
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 100, y: 60), ts: 1_600)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 142, y: 78), ts: 1_680)
+        _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 184, y: 96), ts: 1_770)
+        XCTAssertEqual(published.count, 1, "keyboard teaching must ignore unrelated move samples")
+
+        _ = observer.appendSynthetic(type: "keyDown", keyCode: 12, ts: 1_900)
+        _ = observer.appendSynthetic(type: "keyUp", keyCode: 12, ts: 1_990)
+        XCTAssertEqual(published.count, 2)
+        XCTAssertEqual(published[1].actionType, "type")
+    }
+
     func testPassiveLearningCapturesFullRawInputSpectrum() {
         let observer = PassiveObserver()
         var published = [PassiveGestureSample]()

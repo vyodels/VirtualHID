@@ -526,6 +526,29 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(stopResult?["discardedSamples"] as? Int, 0)
     }
 
+    func testLearningTeachingNextGeneratesGuideAndUpdatesTargetAction() throws {
+        let service = try makeService()
+
+        _ = try decode(service.handleLine(
+            #"{"id":"teaching-start","method":"learning.teaching.start","params":{"label":"现场教学","host":"__global__","targetAction":"move"}}"#
+        ))
+        let payload = try decode(service.handleLine(
+            #"{"id":"teaching-next","method":"learning.teaching.next","params":{"action":"drag"}}"#
+        ))
+        let result = payload["result"] as? [String: Any]
+        let guide = result?["guide"] as? [String: Any]
+        let teaching = result?["teaching"] as? [String: Any]
+        let state = result?["state"] as? [String: Any]
+        let activeSession = state?["activeSession"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(guide?["action"] as? String, "drag")
+        XCTAssertNotNil(guide?["startPoint"])
+        XCTAssertNotNil(guide?["targetPoint"])
+        XCTAssertEqual(teaching?["title"] as? String, "拖拽")
+        XCTAssertEqual(activeSession?["targetAction"] as? String, "drag")
+    }
+
     func testLearningInspectReturnsAllTemplateSummariesForThirteenLearnedTemplates() throws {
         let service = try makeService()
         try seedTemplateInventory(service: service, count: 13)
