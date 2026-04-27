@@ -58,6 +58,10 @@ public final class ControlService {
     private var lastAction: [String: Any]?
     private var lastPostUsed: String?
     private var persistedLearningSamples = 0
+    private static let managementLearningDemoHost = "virtualhid-management-demo.local"
+    private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
+    private static let managementLearningDemoSig = "management-learning-demo-target"
+    private static let managementLearningDemoTask = "management-learning-demo"
 
     public init(
         configuration: ControlServerConfiguration,
@@ -203,6 +207,8 @@ public final class ControlService {
             return try handleLearningSessionStart(params)
         case "learning.session.stop":
             return try handleLearningSessionStop(params)
+        case "learning.demo.run":
+            return try handleLearningDemoRun(params)
         case "hud.state":
             return handleHUDState()
         case "hud.configure":
@@ -236,13 +242,13 @@ public final class ControlService {
         return control.hidVisualizationConfigure(params)
     }
 
-    private func handleAction(_ params: [String: Any], requestId: String) throws -> [String: Any] {
+    private func handleAction(_ params: [String: Any], requestId: String, allowInternalSelfTarget: Bool = false) throws -> [String: Any] {
         try actionQueue.sync {
-            try performAction(params, requestId: requestId)
+            try performAction(params, requestId: requestId, allowInternalSelfTarget: allowInternalSelfTarget)
         }
     }
 
-    private func performAction(_ params: [String: Any], requestId: String) throws -> [String: Any] {
+    private func performAction(_ params: [String: Any], requestId: String, allowInternalSelfTarget: Bool = false) throws -> [String: Any] {
         guard !supervisor.killSwitch.isActive else {
             let triggeredAt = supervisor.killSwitch.triggeredAt.map { isoFormatter.string(from: $0) } ?? "unknown"
             throw ControlServerError.coded("E_KILL_SWITCH", "user triggered kill switch at \(triggeredAt)")
@@ -254,7 +260,7 @@ public final class ControlService {
         let actionId = params["id"] as? String ?? requestId
         let targetDescriptor = try parseTargetDescriptor(params["target"] as? [String: Any])
         let geometryRequest = try parseViewportGeometry(params["geometry"] as? [String: Any])
-        let target = try resolveTarget(descriptor: targetDescriptor)
+        let target = try resolveTarget(descriptor: targetDescriptor, allowInternalSelfTarget: allowInternalSelfTarget)
         let geometryResolution: ViewportGeometryResolution?
         do {
             geometryResolution = try geometryRequest.map {
@@ -516,7 +522,9 @@ public final class ControlService {
         var state = try encodableObject(supervisor.observer.learningState) as? [String: Any] ?? [:]
         state["persistedSamples"] = lock.withLock { persistedLearningSamples }
         state["totalTemplates"] = (try? profileStore.totalTemplates()) ?? 0
+        state["traceCount"] = (try? profileStore.traceCount()) ?? 0
         state["lastLearnedAt"] = (try? profileStore.lastLearnedAtMs()).flatMap { $0.map(isoString(ms:)) } ?? NSNull()
+        state["templates"] = (try? profileStore.listTemplates().prefix(8).map(learningTemplateSummaryObject)) ?? []
         return state
     }
 
@@ -550,6 +558,280 @@ public final class ControlService {
         object["persistedSamples"] = lock.withLock { persistedLearningSamples }
         object["generatedTemplates"] = (try? profileStore.totalTemplates()) ?? 0
         return object
+    }
+
+    private func handleLearningDemoRun(_ params: [String: Any]) throws -> [String: Any] {
+        let actionCount = max(1, min(intValue(params["actionCount"] ?? params["action_count"]) ?? 3, 6))
+        let stepDelayMs = max(0, min(intValue(params["stepDelayMs"] ?? params["step_delay_ms"]) ?? 650, 2_500))
+        let seedDemoTemplate = params["seedDemoTemplate"] as? Bool
+            ?? params["seed_demo_template"] as? Bool
+            ?? false
+        var template = try confidentLearningTemplate(from: params)
+        var seededDemoTemplate = false
+        if seedDemoTemplate || template == nil {
+            _ = try seedManagementLearningDemoTemplate()
+            seededDemoTemplate = true
+            if seedDemoTemplate {
+                template = try confidentLearningTemplate(from: params)
+            }
+            if template == nil {
+                template = try? profileStore.lookupTemplate(
+                    host: Self.managementLearningDemoHost,
+                    sig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    actionType: "click"
+                )
+            }
+        }
+        guard let template else {
+            throw ControlServerError.coded("E_PROFILE_MISS", "no learned template is available for management demo")
+        }
+
+        let target = selfTarget()
+        let viewport = target.viewportFrame ?? target.frame
+        let width = max(Double(viewport.width), 420)
+        let height = max(Double(viewport.height), 320)
+        let points = managementDemoPoints(width: width, height: height, count: actionCount)
+        let baselineParams = try managementDemoActionParams(
+            template: template,
+            width: width,
+            height: height,
+            origin: points[0].origin,
+            target: points[0].target,
+            requestId: "management-learning-demo-baseline",
+            baseline: true
+        )
+        let baseline = try handleAction(
+            baselineParams,
+            requestId: "management-learning-demo-baseline",
+            allowInternalSelfTarget: true
+        )
+        if stepDelayMs > 0 {
+            Thread.sleep(forTimeInterval: Double(stepDelayMs) / 1_000)
+        }
+
+        var actions = [[String: Any]]()
+        for (index, point) in points.enumerated() {
+            let actionId = "management-learning-demo-\(index + 1)"
+            let result = try handleAction(
+                try managementDemoActionParams(
+                    template: template,
+                    width: width,
+                    height: height,
+                    origin: point.origin,
+                    target: point.target,
+                    requestId: actionId,
+                    baseline: false
+                ),
+                requestId: actionId,
+                allowInternalSelfTarget: true
+            )
+            actions.append(learningDemoActionSummary(result))
+            if stepDelayMs > 0, index < points.count - 1 {
+                Thread.sleep(forTimeInterval: Double(stepDelayMs) / 1_000)
+            }
+        }
+
+        let baselineSummary = learningDemoActionSummary(baseline)
+        let profilesApplied = actions.allSatisfy { $0["profileApplied"] as? Bool == true }
+        let hasMotion = actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }
+        return [
+            "ok": profilesApplied && hasMotion && (baselineSummary["profileApplied"] as? Bool != true),
+            "source": "virtualhid-action-events",
+            "target": [
+                "bundleId": target.bundleIdentifier,
+                "pid": Int(target.pid),
+                "viewportFrame": rectObject(target.viewportFrame),
+                "selfTarget": true
+            ],
+            "template": learningTemplateSummaryObject(template),
+            "seededDemoTemplate": seededDemoTemplate,
+            "baseline": baselineSummary,
+            "actions": actions,
+            "assertions": [
+                "baselineProfileNotApplied": baselineSummary["profileApplied"] as? Bool != true,
+                "learnedProfilesApplied": profilesApplied,
+                "learnedActionsHaveMouseMovement": hasMotion
+            ]
+        ]
+    }
+
+    private func confidentLearningTemplate(from params: [String: Any]) throws -> ProfileTemplate? {
+        let host = nonEmptyString(params["host"])
+        let sig = nonEmptyString(params["elementSig"] ?? params["element_sig"] ?? params["sig"])
+        let actionType = nonEmptyString(params["actionType"] ?? params["action_type"])
+        let taskId = nonEmptyString(params["taskId"] ?? params["task_id"])
+        return try profileStore.listTemplates(host: host)
+            .filter { template in
+                template.confidence >= 0.5
+                    && ["click", "move", "drag"].contains(template.actionType)
+                    && (sig == nil || template.elementSig == sig)
+                    && (actionType == nil || template.actionType == actionType)
+                    && (taskId == nil || template.taskId == taskId)
+            }
+            .first
+    }
+
+    private func seedManagementLearningDemoTemplate() throws -> AggregateReport {
+        _ = try profileStore.forget(host: Self.managementLearningDemoHost, sig: Self.managementLearningDemoSig)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        for index in 0..<30 {
+            let origin = CGPoint(x: 70 + Double(index % 5) * 7, y: 78 + Double(index % 4) * 9)
+            let target = CGPoint(x: 370 + Double(index % 6) * 6, y: 250 + Double(index % 5) * 8)
+            let control = CGPoint(
+                x: 190 + Double(index % 4) * 18,
+                y: 120 + Double(index % 6) * 14
+            )
+            let path = [
+                origin,
+                CGPoint(x: (origin.x + control.x) / 2, y: control.y - 18),
+                control,
+                CGPoint(x: (control.x + target.x) / 2, y: control.y + 52),
+                target
+            ]
+            let pathLength = zip(path.dropLast(), path.dropFirst()).map { hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) }.reduce(0, +)
+            let durationMs = 420 + Double(index % 7) * 34
+            _ = try profileStore.insertTrace(
+                TraceInput(
+                    ts: nowMs + Int64(index),
+                    source: "management-center-demo",
+                    host: Self.managementLearningDemoHost,
+                    elementSig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    stage: "seed",
+                    actionType: "click",
+                    payload: TracePayload(
+                        eventId: "management-learning-demo-\(index)",
+                        type: "leftMouseUp",
+                        point: tracePoint(target),
+                        points: path.map(tracePoint),
+                        origin: tracePoint(origin),
+                        targetPoint: tracePoint(target),
+                        targetRadiusPx: 5 + Double(index % 4),
+                        landingErrorPx: 1.2 + Double(index % 5) * 0.7,
+                        durationMs: durationMs,
+                        segmentMs: [82, 96 + Double(index % 5) * 6, 118, 130 + Double(index % 3) * 9],
+                        hesitationMs: index.isMultiple(of: 4) ? [44 + Double(index % 5) * 12] : [],
+                        clickHoldMs: [62 + Double(index % 6) * 9],
+                        interClickMs: [142 + Double(index % 5) * 16],
+                        straightness: 0.78 + Double(index % 6) * 0.018,
+                        turnJitter: 0.22 + Double(index % 5) * 0.045,
+                        pathLengthPx: pathLength,
+                        speedPxS: pathLength / max(durationMs / 1_000, 0.1)
+                    )
+                )
+            )
+        }
+        return try profileStore.rebuild(host: Self.managementLearningDemoHost)
+    }
+
+    private func managementDemoPoints(width: Double, height: Double, count: Int) -> [(origin: CGPoint, target: CGPoint)] {
+        let minX = max(56, width * 0.12)
+        let maxX = min(width - 56, width * 0.84)
+        let minY = max(64, height * 0.16)
+        let maxY = min(height - 64, height * 0.72)
+        return (0..<count).map { index in
+            let progress = Double(index) / Double(max(count - 1, 1))
+            let origin = CGPoint(
+                x: minX + (maxX - minX) * (0.10 + 0.18 * Double(index % 3)),
+                y: maxY - (maxY - minY) * (0.15 + 0.21 * Double(index % 2))
+            )
+            let target = CGPoint(
+                x: minX + (maxX - minX) * (0.58 + 0.28 * progress),
+                y: minY + (maxY - minY) * (0.22 + 0.36 * Double((index + 1) % 3) / 2.0)
+            )
+            return (origin, target)
+        }
+    }
+
+    private func managementDemoActionParams(
+        template: ProfileTemplate,
+        width: Double,
+        height: Double,
+        origin: CGPoint,
+        target: CGPoint,
+        requestId: String,
+        baseline: Bool
+    ) throws -> [String: Any] {
+        let host = baseline ? Self.managementLearningDemoBaselineHost : template.host
+        let sig = baseline ? "\(template.elementSig)-baseline" : template.elementSig
+        let primitive: [String: Any]
+        switch template.actionType {
+        case "move":
+            primitive = [
+                "type": "move",
+                "to": pointObject(target),
+                "durationMs": 420,
+                "profile": ["origin": pointObject(origin)]
+            ]
+        case "drag":
+            primitive = [
+                "type": "drag",
+                "from": pointObject(origin),
+                "to": pointObject(target),
+                "button": "left"
+            ]
+        default:
+            primitive = [
+                "type": "click",
+                "at": pointObject(target),
+                "button": "left",
+                "holdMs": 82,
+                "profile": ["origin": pointObject(origin)]
+            ]
+        }
+        return [
+            "id": requestId,
+            "geometry": [
+                "coordSpace": "viewport",
+                "pageScale": 1,
+                "scrollOffset": ["x": 0, "y": 0],
+                "viewportSize": ["x": 0, "y": 0, "width": width, "height": height]
+            ],
+            "context": [
+                "host": host,
+                "element": ["sig": sig, "role": "button"],
+                "taskId": template.taskId ?? Self.managementLearningDemoTask,
+                "stage": baseline ? "baseline" : "management-center-demo"
+            ],
+            "options": [
+                "dryRun": true,
+                "postMode": "global",
+                "browserChromeOverlayPolicy": "off",
+                "timeoutMs": 8_000
+            ],
+            "primitives": [primitive]
+        ]
+    }
+
+    private func learningDemoActionSummary(_ result: [String: Any]) -> [String: Any] {
+        let events = result["events"] as? [[String: Any]] ?? []
+        let profiles = result["profiles"] as? [String: Any] ?? [:]
+        let verification = result["verification"] as? [String: Any] ?? [:]
+        let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
+        return [
+            "id": result["id"] ?? NSNull(),
+            "ok": result["ok"] as? Bool ?? false,
+            "profileApplied": profiles["applied"] as? Bool ?? false,
+            "templateIds": profiles["templateIds"] ?? [],
+            "eventCount": events.count,
+            "mouseMoveCount": mouseMoves.count,
+            "expectedPointer": verification["expectedPointer"] ?? NSNull(),
+            "finalPointer": verification["finalPointer"] ?? NSNull()
+        ]
+    }
+
+    private func learningTemplateSummaryObject(_ template: ProfileTemplate) -> [String: Any] {
+        [
+            "host": template.host,
+            "elementSig": template.elementSig,
+            "taskId": template.taskId ?? NSNull(),
+            "actionType": template.actionType,
+            "sampleSize": template.sampleSize,
+            "confidence": template.confidence,
+            "updatedAt": template.updatedAt,
+            "updatedAtText": isoString(ms: template.updatedAt)
+        ]
     }
 
     private func cancelCurrentAction() {
@@ -603,11 +885,11 @@ public final class ControlService {
         )
     }
 
-    private func resolveTarget(descriptor: TargetDescriptor?) throws -> BrowserTarget {
+    private func resolveTarget(descriptor: TargetDescriptor?, allowInternalSelfTarget: Bool = false) throws -> BrowserTarget {
         if let targetResolverOverride {
             return try targetResolverOverride(descriptor)
         }
-        if configuration.allowSelfTarget {
+        if configuration.allowSelfTarget || allowInternalSelfTarget {
             return selfTarget()
         }
         do {
@@ -1592,6 +1874,14 @@ private func point(_ object: [String: Any]?, name: String) throws -> CGPoint {
         throw ControlServerError.coded("E_UNKNOWN", "point \(name) requires x and y")
     }
     return CGPoint(x: x, y: y)
+}
+
+private func pointObject(_ point: CGPoint) -> [String: Double] {
+    ["x": point.x, "y": point.y]
+}
+
+private func tracePoint(_ point: CGPoint) -> TracePoint {
+    TracePoint(x: point.x, y: point.y)
 }
 
 private func parseOptionalPoint(_ object: [String: Any]?) -> TracePoint? {

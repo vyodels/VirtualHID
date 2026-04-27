@@ -21,7 +21,7 @@ HUD 配置属于 VirtualHID 本地观察设置，不属于 `hid_action` 的业�
 
 `--no-hud` 或 `VIRTUALHID_NO_HUD=1` 具有最高优先级；关闭时 action、events、verification、trace 与分析链路仍照常产生，只是不挂 HUD sink。
 
-`VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动 app 即代表启动 VirtualHID 本地主程序；app 进程直接持有 `VirtualHIDRuntime`、HUD、学习控制和供 MCP shim 连接的本机 socket。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理 UI 只允许修改 VirtualHID 本地 HUD / 学习设置，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本、清除延迟、被动学习和专项训练；它不得写入 action payload、不得改变动作计划，也不得作为业务状态来源。
+`VirtualHID.app` 是 VirtualHID 的正式 macOS 菜单栏控制入口，不是 `vhid-daemon` 的附属启动模式。启动 app 即代表启动 VirtualHID 本地主程序；app 进程直接持有 `VirtualHIDRuntime`、HUD、学习控制和供 MCP shim 连接的本机 socket。单击托盘显示快捷配置菜单，双击托盘打开管理中心。管理 UI 只允许修改和观察 VirtualHID 本地能力，例如 HUD 启停、轨迹、采样点、expected/final point、点击/拖拽/滚动/输入特效、状态文本、清除延迟、被动学习、专项训练、学习模板摘要和学习效果演示；它不得写入 action payload、不得改变动作计划，也不得作为业务状态来源。
 
 ## 3. 数据来源与边界
 
@@ -53,7 +53,7 @@ HUD 设置应覆盖这些 VirtualHID 本地观察项：
 - CLI / smoke 启动参数：`--hud-control`、`--hud-show <components>`、`--hud-hide <components>`、`--hud-clear-delay <seconds>`。
 - 环境变量：`VIRTUALHID_HUD_SHOW`、`VIRTUALHID_HUD_HIDE`、`VIRTUALHID_HUD_CLEAR_DELAY_SECONDS`。
 - 组件名：`all`、`persistent`、`window-frame`、`diagnostic`、`trail`、`trail-points`、`expected-point`、`actual-point`、`click-effects`、`drag-effects`、`scroll-effects`、`keyboard-effects`、`status`。
-- 交互入口：`VirtualHID.app` 在菜单栏显示 VirtualHID 图标；单击显示快捷配置菜单，双击打开管理中心。
+- 交互入口：`VirtualHID.app` 在菜单栏显示 VirtualHID 图标；单击显示快捷配置菜单，双击打开管理中心。HUD / 学习效果演示的正式入口是管理中心，不是单独的 shell demo。
 
 ## 5. 自动化验收
 
@@ -80,13 +80,23 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
   xcrun swift test --disable-sandbox --scratch-path /tmp/virtualhid-spm-build
 ```
 
-学习效果回放验收：
+学习效果回放验收的正式入口是 `VirtualHID.app` 管理中心：
+
+1. 启动 `VirtualHID.app`。
+2. 双击托盘图标打开管理中心。
+3. 打开“学习预训练”。
+4. 查看“学习成果”中的模板摘要。
+5. 点击“演示学习效果”。
+
+预期：管理中心显示 baseline 与 learned action 的演示结果；HUD 显示 VirtualHID 自己产生的轨迹、采样点、expected/final point 和点击事件；`learning.demo.run` 返回 `source = virtualhid-action-events`，baseline 不命中 profile，learned action 命中 profile。
+
+低层自动化 smoke 可运行：
 
 ```bash
 ./scripts/learning-playback-demo.sh
 ```
 
-该脚本用于验证学习能力对后续 HID action 的真实影响：VirtualHID 先在本地生成一批可聚合的训练轨迹样本，写入 `ProfileStore`，重建 learned template，然后提交 baseline + 多个随机起止点的普通 `action` 请求。baseline 不应命中 profile；后续 learned action 必须通过 `ControlService.applyProfiles` 命中模板，并由 `ActionExecutor` 产生 `mouseMoved`、`leftMouseDown`、`leftMouseUp` 等完整事件。HUD 只显示这些 action events 与 verification，不允许脚本、mock page、browser 或 recruit-agent 自行生成轨迹、expected point 或 actual point。
+该脚本只用于 CI / smoke 验证，不是用户演示入口。它验证学习能力对后续 HID action 的真实影响：VirtualHID 先在本地生成一批可聚合的训练轨迹样本，写入 `ProfileStore`，重建 learned template，然后提交 baseline + 多个随机起止点的普通 `action` 请求。baseline 不应命中 profile；后续 learned action 必须通过 `ControlService.applyProfiles` 命中模板，并由 `ActionExecutor` 产生 `mouseMoved`、`leftMouseDown`、`leftMouseUp` 等完整事件。HUD 只显示这些 action events 与 verification，不允许脚本、mock page、browser 或 recruit-agent 自行生成轨迹、expected point 或 actual point。
 
 脚本输出会保存到 `/tmp/virtualhid-learning-playback-response.jsonl`，最后一行 `learning-playback-summary` 必须满足：
 
@@ -98,7 +108,7 @@ CLANG_MODULE_CACHE_PATH=/tmp/virtualhid-clang-cache \
 
 ## 6. 手动 UI 验收命令
 
-真实 HUD 需要 macOS 图形会话，无法稳定在 headless smoke 中断言。可用以下脚本人工确认透明覆盖层、鼠标穿透和绘制内容：
+真实 HUD 需要 macOS 图形会话，无法稳定在 headless smoke 中断言。正式人工确认应从 `VirtualHID.app` 管理中心打开 HUD 并触发“演示学习效果”。以下脚本只保留为低层 smoke / 截图证据：
 
 ```bash
 VIRTUALHID_HUD_SCREENSHOT=/tmp/virtualhid-hud-ui-smoke.png \

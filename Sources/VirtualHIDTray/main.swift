@@ -87,11 +87,14 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var lastState = HUDState.offline(message: "未连接到 VirtualHID 执行服务")
     private var learningStatusLabel: NSTextField?
     private var learningCountersLabel: NSTextField?
+    private var learningTemplatesLabel: NSTextField?
+    private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
     private var learningModePopup: NSPopUpButton?
     private var trainingLabelField: NSTextField?
     private var trainingHostField: NSTextField?
     private var trainingActionField: NSTextField?
+    private var lastLearningDemoStatus = "尚未演示。点击“演示学习效果”后，HUD 会显示 VirtualHID 生成的轨迹、落点和点击事件。"
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -295,6 +298,76 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         stopTraining(commit: false)
     }
 
+    @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
+        do {
+            _ = try call(method: "profiles.rebuild", params: [:])
+            let response = try call(method: "learning.state", params: [:])
+            lastLearningState = LearningState(response: response)
+            lastLearningDemoStatus = "学习模板已重建。当前模板 \(lastLearningState.totalTemplates) 个。"
+        } catch {
+            lastLearningDemoStatus = "重建失败：\(localizedErrorMessage(error))"
+        }
+        updateControls()
+    }
+
+    @objc private func runLearningDemoAction(_ sender: Any?) {
+        let runtime: VirtualHIDRuntimeHost
+        do {
+            if self.runtime == nil {
+                startRuntime()
+            }
+            guard let activeRuntime = self.runtime else {
+                throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
+            }
+            runtime = activeRuntime
+            lastLearningDemoStatus = "正在演示学习效果：HUD 会显示 baseline 和 learned action 的轨迹。"
+            updateControls()
+        } catch {
+            lastLearningDemoStatus = "演示失败：\(localizedErrorMessage(error))"
+            updateControls()
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let hudResponse = try runtime.call(method: "hud.configure", params: [
+                    "enabled": true,
+                    "clearDelaySeconds": 8.0,
+                    "settings": [
+                        "trail": true,
+                        "trailPoints": true,
+                        "expectedPoint": true,
+                        "actualPoint": true,
+                        "clickEffects": true,
+                        "windowFrame": true,
+                        "status": true,
+                        "persistent": true
+                    ]
+                ])
+                let demoResponse = try runtime.call(method: "learning.demo.run", params: [
+                    "seedDemoTemplate": true,
+                    "actionCount": 4,
+                    "stepDelayMs": 750
+                ])
+                let learningResponse = try runtime.call(method: "learning.state", params: [:])
+                DispatchQueue.main.async {
+                    guard let self else {
+                        return
+                    }
+                    self.lastState = HUDState(response: hudResponse)
+                    self.lastLearningState = LearningState(response: learningResponse)
+                    self.lastLearningDemoStatus = LearningDemoResult(response: demoResponse).statusText
+                    self.updateControls()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.lastLearningDemoStatus = "演示失败：\(localizedErrorMessage(error))"
+                    self?.updateControls()
+                }
+            }
+        }
+    }
+
     @objc private func startDaemonAction(_ sender: Any?) {
         startRuntime(restart: true)
         refreshState()
@@ -486,6 +559,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         componentCheckboxes.removeAll()
         learningStatusLabel = nil
         learningCountersLabel = nil
+        learningTemplatesLabel = nil
+        learningDemoStatusLabel = nil
         learningEnabledCheckbox = nil
         learningModePopup = nil
         trainingLabelField = nil
@@ -793,6 +868,28 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         buttons.addArrangedSubview(actionButton("提交", action: #selector(commitTrainingAction(_:))))
         buttons.addArrangedSubview(actionButton("丢弃", action: #selector(discardTrainingAction(_:))))
         stack.addArrangedSubview(buttons)
+
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(label("学习成果", size: 14, weight: .semibold))
+        let templatesLabel = label("", size: 11, color: .secondaryLabelColor)
+        templatesLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        templatesLabel.maximumNumberOfLines = 7
+        templatesLabel.preferredMaxLayoutWidth = 292
+        learningTemplatesLabel = templatesLabel
+        stack.addArrangedSubview(templatesLabel)
+
+        let demoStatus = label("", size: 11, color: .secondaryLabelColor)
+        demoStatus.maximumNumberOfLines = 4
+        demoStatus.preferredMaxLayoutWidth = 292
+        learningDemoStatusLabel = demoStatus
+        stack.addArrangedSubview(demoStatus)
+
+        let demoButtons = NSStackView()
+        demoButtons.orientation = .horizontal
+        demoButtons.spacing = 8
+        demoButtons.addArrangedSubview(actionButton("重建模板", action: #selector(rebuildLearningProfilesAction(_:))))
+        demoButtons.addArrangedSubview(actionButton("演示学习效果", action: #selector(runLearningDemoAction(_:))))
+        stack.addArrangedSubview(demoButtons)
         card.addContent(stack)
         return card
     }
@@ -850,6 +947,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         return field
     }
 
+    private func separator() -> NSView {
+        let view = NSBox()
+        view.boxType = .separator
+        view.widthAnchor.constraint(equalToConstant: 292).isActive = true
+        return view
+    }
+
     private func actionButton(_ title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = .rounded
@@ -877,6 +981,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningStatusLabel?.textColor = lastLearningState.available ? .labelColor : .systemRed
         learningCountersLabel?.stringValue = lastLearningState.counterText
         learningCountersLabel?.textColor = lastLearningState.available ? .controlAccentColor : .systemRed
+        learningTemplatesLabel?.stringValue = lastLearningState.templateListText
+        learningTemplatesLabel?.textColor = lastLearningState.available ? .secondaryLabelColor : .systemRed
+        learningDemoStatusLabel?.stringValue = lastLearningDemoStatus
+        learningDemoStatusLabel?.textColor = lastLearningDemoStatus.hasPrefix("演示失败") ? .systemRed : .secondaryLabelColor
         learningEnabledCheckbox?.isEnabled = lastLearningState.available
         learningEnabledCheckbox?.state = lastLearningState.enabled ? .on : .off
         setLearningMode(lastLearningState.mode)
@@ -1020,6 +1128,8 @@ private struct LearningState {
     let pendingTrainingSamples: Int
     let persistedSamples: Int
     let totalTemplates: Int
+    let traceCount: Int
+    let templates: [LearningTemplateSummary]
     let lastLearnedAt: String?
     let message: String?
 
@@ -1043,7 +1153,19 @@ private struct LearningState {
     }
 
     var counterText: String {
-        "样本 \(producedSamples)  |  待提交 \(pendingTrainingSamples)  |  持久化 \(persistedSamples)  |  模板 \(totalTemplates)"
+        "样本 \(producedSamples)  |  待提交 \(pendingTrainingSamples)  |  持久化 \(persistedSamples)  |  轨迹 \(traceCount)  |  模板 \(totalTemplates)"
+    }
+
+    var templateListText: String {
+        guard available else {
+            return message ?? "学习服务不可用"
+        }
+        guard !templates.isEmpty else {
+            return "暂无学习模板。开启被动学习/专项训练，或点击“演示学习效果”生成 VirtualHID 演示模板。"
+        }
+        return templates.prefix(5).map { template in
+            "\(template.actionType)  \(template.host)  n=\(template.sampleSize)  c=\(String(format: "%.2f", template.confidence))"
+        }.joined(separator: "\n")
     }
 
     init(response: [String: Any]) {
@@ -1062,6 +1184,9 @@ private struct LearningState {
             ?? intValue(responseResult["generatedTemplates"])
             ?? intValue(result["totalTemplates"])
             ?? 0
+        traceCount = intValue(responseResult["traceCount"]) ?? intValue(result["traceCount"]) ?? 0
+        templates = (result["templates"] as? [[String: Any]] ?? responseResult["templates"] as? [[String: Any]] ?? [])
+            .map(LearningTemplateSummary.init)
         lastLearnedAt = result["lastLearnedAt"] as? String
         message = nil
     }
@@ -1076,6 +1201,8 @@ private struct LearningState {
             pendingTrainingSamples: 0,
             persistedSamples: 0,
             totalTemplates: 0,
+            traceCount: 0,
+            templates: [],
             lastLearnedAt: nil,
             message: message
         )
@@ -1090,6 +1217,8 @@ private struct LearningState {
         pendingTrainingSamples: Int,
         persistedSamples: Int,
         totalTemplates: Int,
+        traceCount: Int,
+        templates: [LearningTemplateSummary],
         lastLearnedAt: String?,
         message: String?
     ) {
@@ -1101,8 +1230,52 @@ private struct LearningState {
         self.pendingTrainingSamples = pendingTrainingSamples
         self.persistedSamples = persistedSamples
         self.totalTemplates = totalTemplates
+        self.traceCount = traceCount
+        self.templates = templates
         self.lastLearnedAt = lastLearnedAt
         self.message = message
+    }
+}
+
+private struct LearningTemplateSummary {
+    let host: String
+    let actionType: String
+    let sampleSize: Int
+    let confidence: Double
+
+    init(_ object: [String: Any]) {
+        host = object["host"] as? String ?? "unknown"
+        actionType = object["actionType"] as? String ?? object["action_type"] as? String ?? "action"
+        sampleSize = intValue(object["sampleSize"] ?? object["sample_size"]) ?? 0
+        if let double = object["confidence"] as? Double {
+            confidence = double
+        } else if let int = object["confidence"] as? Int {
+            confidence = Double(int)
+        } else if let string = object["confidence"] as? String, let parsed = Double(string) {
+            confidence = parsed
+        } else {
+            confidence = 0
+        }
+    }
+}
+
+private struct LearningDemoResult {
+    let statusText: String
+
+    init(response: [String: Any]) {
+        let result = response["result"] as? [String: Any] ?? response
+        guard result["ok"] as? Bool == true else {
+            statusText = "演示失败：runtime 未返回通过状态。"
+            return
+        }
+        let template = result["template"] as? [String: Any] ?? [:]
+        let actions = result["actions"] as? [[String: Any]] ?? []
+        let counts = actions.compactMap { intValue($0["mouseMoveCount"]) }
+        let templateId = [template["host"] as? String, template["elementSig"] as? String, template["actionType"] as? String]
+            .compactMap { $0 }
+            .joined(separator: " / ")
+        let countsText = counts.map(String.init).joined(separator: ", ")
+        statusText = "演示通过：模板 \(templateId)，\(actions.count) 个 learned action 已命中 profile，轨迹点 \(countsText)。HUD 数据来自 VirtualHID events。"
     }
 }
 

@@ -267,6 +267,47 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(box.finished?.events.count, events.count)
     }
 
+    func testLearningStateIncludesTemplateSummaries() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+        _ = service.handleLine(
+            #"{"id":"apply-summary","method":"profiles.apply","params":{"host":"example.com","elementSig":"sig-summary","taskId":"task","actionType":"click","sampleSize":12,"confidence":0.75,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":12,"motion":{"pointCount":{"min":10,"max":14}}}}}"#
+        )
+
+        let payload = try decode(service.handleLine(#"{"id":"learning-state","method":"learning.state","params":{}}"#))
+        let result = payload["result"] as? [String: Any]
+        let templates = result?["templates"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["totalTemplates"] as? Int, 1)
+        XCTAssertEqual(templates?.first?["host"] as? String, "example.com")
+        XCTAssertEqual(templates?.first?["elementSig"] as? String, "sig-summary")
+        XCTAssertEqual(templates?.first?["actionType"] as? String, "click")
+        XCTAssertEqual(templates?.first?["sampleSize"] as? Int, 12)
+    }
+
+    func testLearningDemoRunSeedsTemplateAndReturnsActionEvidence() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"learning-demo","method":"learning.demo.run","params":{"seedDemoTemplate":true,"actionCount":2,"stepDelayMs":0}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let baseline = result?["baseline"] as? [String: Any]
+        let actions = result?["actions"] as? [[String: Any]] ?? []
+        let template = result?["template"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["ok"] as? Bool, true)
+        XCTAssertEqual(result?["source"] as? String, "virtualhid-action-events")
+        XCTAssertEqual(result?["seededDemoTemplate"] as? Bool, true)
+        XCTAssertEqual(template?["host"] as? String, "virtualhid-management-demo.local")
+        XCTAssertEqual(baseline?["profileApplied"] as? Bool, false)
+        XCTAssertEqual(actions.count, 2)
+        XCTAssertEqual(actions.allSatisfy { $0["profileApplied"] as? Bool == true }, true)
+        XCTAssertEqual(actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }, true)
+    }
+
     func testTypeFallsBackToPasteTextForChinese() throws {
         let service = try makeService()
         let response = service.handleLine(
