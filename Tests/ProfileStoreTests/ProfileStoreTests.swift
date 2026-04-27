@@ -123,6 +123,113 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertTrue(abs((typeLearned.motion.interKeyMsMean ?? 0) - 134) < 0.01)
     }
 
+    func testRebuildExposesRawHIDDistributionsForScrollKeyboardAndDoubleClick() throws {
+        let store = try ProfileStore(path: ":memory:")
+
+        for index in 0..<5 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_010_000 + index),
+                    source: "user",
+                    host: "example.com",
+                    elementSig: "sig-scroll",
+                    taskId: "task-scroll",
+                    stage: "stage",
+                    actionType: "scroll",
+                    payload: TracePayload(
+                        eventId: "scroll-\(index)",
+                        type: "scrollWheel",
+                        point: TracePoint(x: 100, y: 120),
+                        durationMs: 180 + Double(index * 20),
+                        scrollDeltas: [
+                            TraceScrollDelta(dx: 0, dy: -120 - Double(index * 4)),
+                            TraceScrollDelta(dx: 0, dy: -76 - Double(index * 3))
+                        ],
+                        scrollIntervalsMs: [42 + Double(index * 5)],
+                        eventTimeline: ["scrollWheel", "scrollWheel"]
+                    )
+                )
+            )
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_011_000 + index),
+                    source: "user",
+                    host: "example.com",
+                    elementSig: "sig-click",
+                    taskId: "task-click",
+                    stage: "stage",
+                    actionType: "click",
+                    payload: TracePayload(
+                        eventId: "double-\(index)",
+                        type: "leftMouseUp",
+                        point: TracePoint(x: 140, y: 160),
+                        clickHoldMs: [54 + Double(index * 3)],
+                        doubleClickIntervalMs: [180 + Double(index * 12)],
+                        eventTimeline: ["leftMouseDown", "leftMouseUp", "leftMouseDown", "leftMouseUp"]
+                    )
+                )
+            )
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_012_000 + index),
+                    source: "user",
+                    host: "example.com",
+                    elementSig: "sig-type",
+                    taskId: "task-type",
+                    stage: "stage",
+                    actionType: "type",
+                    payload: TracePayload(
+                        eventId: "key-\(index)",
+                        type: "keyUp",
+                        keyCode: 12,
+                        dwellMs: [70 + Double(index * 4)],
+                        interKeyMs: [96 + Double(index * 8)],
+                        modifierFlags: [1],
+                        flagsChangedKeyCodes: [56],
+                        comboKeyCodes: [56, 12],
+                        repeatCount: index.isMultiple(of: 2) ? 1 : 0,
+                        eventTimeline: ["flagsChanged", "keyDown", "keyUp"]
+                    )
+                )
+            )
+        }
+
+        _ = try store.rebuild(host: "example.com")
+        let scroll = try store.lookupTemplate(host: "example.com", sig: "sig-scroll", taskId: "task-scroll", actionType: "scroll")
+        let click = try store.lookupTemplate(host: "example.com", sig: "sig-click", taskId: "task-click", actionType: "click")
+        let type = try store.lookupTemplate(host: "example.com", sig: "sig-type", taskId: "task-type", actionType: "type")
+
+        let scrollLearned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(scroll.paramsJSON.utf8))
+        XCTAssertNotNil(scrollLearned.motion.scrollDeltaY)
+        XCTAssertNotNil(scrollLearned.motion.scrollStepCount)
+        XCTAssertNotNil(scrollLearned.motion.scrollStepDelayMs)
+
+        let scrollJSON = try JSONSerialization.jsonObject(with: Data(scroll.paramsJSON.utf8)) as? [String: Any]
+        let scrollRaw = scrollJSON?["rawHID"] as? [String: Any]
+        XCTAssertNotNil(scrollRaw?["scrollDeltaY"])
+        XCTAssertNotNil(scrollRaw?["scrollIntervalsMs"])
+        XCTAssertNotNil(scrollRaw?["scrollEventCount"])
+
+        let clickLearned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(click.paramsJSON.utf8))
+        XCTAssertNotNil(clickLearned.motion.doubleClickInterClickMs)
+
+        let clickJSON = try JSONSerialization.jsonObject(with: Data(click.paramsJSON.utf8)) as? [String: Any]
+        let clickRaw = clickJSON?["rawHID"] as? [String: Any]
+        XCTAssertNotNil(clickRaw?["doubleClickIntervalMs"])
+        XCTAssertTrue((clickRaw?["eventTimeline"] as? [String] ?? []).contains("leftMouseDown"))
+
+        let typeLearned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(type.paramsJSON.utf8))
+        XCTAssertNotNil(typeLearned.motion.dwellMs)
+        XCTAssertNotNil(typeLearned.motion.interKeyMs)
+
+        let typeJSON = try JSONSerialization.jsonObject(with: Data(type.paramsJSON.utf8)) as? [String: Any]
+        let typeRaw = typeJSON?["rawHID"] as? [String: Any]
+        XCTAssertNotNil(typeRaw?["dwellMs"])
+        XCTAssertNotNil(typeRaw?["interKeyMs"])
+        XCTAssertEqual(typeRaw?["modifierFlags"] as? [Int], [1])
+        XCTAssertEqual(typeRaw?["flagsChangedKeyCodes"] as? [Int], [56])
+    }
+
     func testRetentionDropsExpiredAndOverflowTraces() throws {
         let retention = TraceRetentionPolicy(
             maxAgeMs: 1_000,

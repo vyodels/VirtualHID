@@ -107,7 +107,7 @@ public enum ActionPrimitive {
     case move(to: CGPoint, via: TrajectoryStyle, durationMs: Int?, profile: PrimitiveProfile?)
     case click(at: CGPoint, button: MouseButton, holdMs: Int?, count: Int, profile: PrimitiveProfile?)
     case drag(from: CGPoint, to: CGPoint, button: MouseButton, via: TrajectoryStyle, profile: PrimitiveProfile?)
-    case scroll(at: CGPoint, dx: Double, dy: Double, style: ScrollStyle)
+    case scroll(at: CGPoint, dx: Double, dy: Double, style: ScrollStyle, profile: PrimitiveProfile?)
     case type(text: String, layout: KeyboardLayout, profile: PrimitiveProfile?)
     case pasteText(text: String, restoreClipboard: Bool, profile: PrimitiveProfile?)
     case key(chord: KeyChord, holdMs: Int?, profile: PrimitiveProfile?)
@@ -442,14 +442,21 @@ public final class ActionExecutor {
                 ))
             }
             let clickCount = max(count, 1)
+            let secondClickOffset = clickCount > 1 ? motionProfile?.resolvedDoubleClickSecondOffset(rng: &rng).cgPoint ?? .zero : .zero
             for index in 0..<clickCount {
                 try deadline.assertNotExpired()
-                let perClickHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
-                emitted.append(try postMouse(type: button.downEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
+                let perClickHoldMs = clickCount > 1
+                    ? motionProfile?.resolvedDoubleClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
+                    : motionProfile?.resolvedClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
+                let perClickPoint = index == 1 ? CGPoint(x: clickPoint.x + secondClickOffset.x, y: clickPoint.y + secondClickOffset.y) : clickPoint
+                emitted.append(try postMouse(type: button.downEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
                 try sleep(milliseconds: perClickHoldMs, dryRun: dryRun, deadline: deadline)
-                emitted.append(try postMouse(type: button.upEventType, location: clickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
+                emitted.append(try postMouse(type: button.upEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
                 if index < clickCount - 1 {
-                    try sleep(milliseconds: interClickMs, dryRun: dryRun, deadline: deadline)
+                    let interval = clickCount == 2
+                        ? motionProfile?.resolvedDoubleClickInterClickMs(defaultValue: interClickMs, rng: &rng) ?? interClickMs
+                        : interClickMs
+                    try sleep(milliseconds: interval, dryRun: dryRun, deadline: deadline)
                 }
             }
             let settleMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 72
@@ -494,17 +501,8 @@ public final class ActionExecutor {
             try sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? 92, dryRun: dryRun, deadline: deadline)
             return emitted
 
-        case .scroll(let at, let dx, let dy, _):
-            if dryRun {
-                return [record(type: "scrollWheel", location: at)]
-            }
-            guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy.rounded()), wheel2: Int32(dx.rounded()), wheel3: 0) else {
-                throw ActionExecutionError.eventCreationFailed("scroll")
-            }
-            event.location = at
-            try ensureFrontmostForPost(type: .scrollWheel, poster: poster, dryRun: dryRun)
-            _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
-            return [record(type: "scrollWheel", location: at)]
+        case .scroll(let at, let dx, let dy, _, let profile):
+            return try emitScroll(at: at, dx: dx, dy: dy, motionProfile: profile?.motionProfile, poster: poster, dryRun: dryRun, deadline: deadline, rng: &rng)
 
         case .type(let text, _, let profile):
             var emitted = [InjectedEvent]()
@@ -536,7 +534,7 @@ public final class ActionExecutor {
         case .key(let chord, let holdMs, let profile):
             var emitted = [InjectedEvent]()
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-            let keyHold = profile?.motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
+            let keyHold = profile?.motionProfile?.resolvedDwellMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
             try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
             return emitted
@@ -573,6 +571,52 @@ public final class ActionExecutor {
             pasteboard.clearContents()
             if let oldClipboard {
                 pasteboard.setString(oldClipboard, forType: .string)
+            }
+        }
+        return emitted
+    }
+
+    private func emitScroll(
+        at point: CGPoint,
+        dx: Double,
+        dy: Double,
+        motionProfile: MotionProfile?,
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline,
+        rng: inout SystemRandomNumberGenerator
+    ) throws -> [InjectedEvent] {
+        let stepCount = motionProfile?.resolvedScrollStepCount(fallback: 1, rng: &rng) ?? 1
+        let baseDelta = motionProfile?.resolvedScrollDelta(requestedDx: dx, requestedDy: dy, rng: &rng)
+            ?? HumanPoint(x: dx, y: dy)
+        let decay = motionProfile?.resolvedScrollInertiaDecay(rng: &rng) ?? 1
+        let delay = motionProfile?.resolvedScrollDelayMs(fallback: 0, rng: &rng) ?? 0
+        var emitted = [InjectedEvent]()
+        for index in 0..<stepCount {
+            try deadline.assertNotExpired()
+            let factor = pow(decay, Double(index))
+            let stepDx = baseDelta.x * factor
+            let stepDy = baseDelta.y * factor
+            if dryRun {
+                emitted.append(record(type: "scrollWheel", location: point))
+            } else {
+                guard let event = CGEvent(
+                    scrollWheelEvent2Source: nil,
+                    units: .pixel,
+                    wheelCount: 2,
+                    wheel1: Int32(stepDy.rounded()),
+                    wheel2: Int32(stepDx.rounded()),
+                    wheel3: 0
+                ) else {
+                    throw ActionExecutionError.eventCreationFailed("scroll")
+                }
+                event.location = point
+                try ensureFrontmostForPost(type: .scrollWheel, poster: poster, dryRun: dryRun)
+                _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
+                emitted.append(record(type: "scrollWheel", location: point))
+            }
+            if index < stepCount - 1, delay > 0 {
+                try sleep(milliseconds: delay, dryRun: dryRun, deadline: deadline)
             }
         }
         return emitted
@@ -733,6 +777,9 @@ public final class ActionExecutor {
         rng: inout SystemRandomNumberGenerator
     ) -> [CGPoint] {
         let count = max(pointCount, 1)
+        if let learned = learnedSkeletonPath(from: start, to: end, count: count, motionProfile: motionProfile, rng: &rng) {
+            return learned
+        }
         if let waypoint = detourWaypoint(from: start, to: end, motionProfile: motionProfile, rng: &rng), count >= 6 {
             let firstCount = max(3, count / 2)
             let secondCount = max(3, count - firstCount + 1)
@@ -805,6 +852,58 @@ public final class ActionExecutor {
         }
     }
 
+    private func learnedSkeletonPath(
+        from start: CGPoint,
+        to end: CGPoint,
+        count: Int,
+        motionProfile: MotionProfile?,
+        rng: inout SystemRandomNumberGenerator
+    ) -> [CGPoint]? {
+        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 2, count >= 2 else {
+            return nil
+        }
+        let sourceStart = skeleton[0].cgPoint
+        let sourceEnd = skeleton[skeleton.count - 1].cgPoint
+        let sourceDx = sourceEnd.x - sourceStart.x
+        let sourceDy = sourceEnd.y - sourceStart.y
+        let sourceDistance = max(hypot(sourceDx, sourceDy), 1)
+        let targetDx = end.x - start.x
+        let targetDy = end.y - start.y
+        let targetDistance = hypot(targetDx, targetDy)
+        guard targetDistance > 4 else {
+            return nil
+        }
+
+        let sourceUnit = CGPoint(x: sourceDx / sourceDistance, y: sourceDy / sourceDistance)
+        let sourceNormal = CGPoint(x: -sourceUnit.y, y: sourceUnit.x)
+        let targetUnit = CGPoint(x: targetDx / targetDistance, y: targetDy / targetDistance)
+        let targetNormal = CGPoint(x: -targetUnit.y, y: targetUnit.x)
+        let sideScale = min(max(targetDistance / sourceDistance, 0.35), 2.8)
+        let jitterLimit = min(max(targetDistance * 0.018, 0.8), 7.0)
+
+        var mapped = skeleton.enumerated().map { index, point -> CGPoint in
+            if index == 0 {
+                return start
+            }
+            if index == skeleton.count - 1 {
+                return end
+            }
+            let original = point.cgPoint
+            let rel = CGPoint(x: original.x - sourceStart.x, y: original.y - sourceStart.y)
+            let progress = min(max((rel.x * sourceUnit.x + rel.y * sourceUnit.y) / sourceDistance, 0), 1)
+            let side = (rel.x * sourceNormal.x + rel.y * sourceNormal.y) * sideScale
+            let jitter = rng.nextDouble(in: -jitterLimit..<jitterLimit)
+            return CGPoint(
+                x: start.x + targetDx * progress + targetNormal.x * (side + jitter),
+                y: start.y + targetDy * progress + targetNormal.y * (side + jitter)
+            )
+        }
+        mapped = resample(points: mapped, count: count)
+        mapped[0] = start
+        mapped[mapped.count - 1] = end
+        return mapped
+    }
+
     private func movePointCount(style: TrajectoryStyle, durationMs: Int?, motionProfile: MotionProfile?, rng: inout SystemRandomNumberGenerator) -> Int {
         switch style {
         case .linear:
@@ -852,6 +951,42 @@ public final class ActionExecutor {
             return fallback
         }
         return max(1, Int((Double(durationMs) / 28.0).rounded()))
+    }
+
+    private func resample(points: [CGPoint], count: Int) -> [CGPoint] {
+        guard count > 0 else {
+            return []
+        }
+        guard count > 1, points.count > 1 else {
+            return [points.last ?? .zero]
+        }
+        var distances = [Double](repeating: 0, count: points.count)
+        for index in 1..<points.count {
+            distances[index] = distances[index - 1] + hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y)
+        }
+        guard let totalDistance = distances.last, totalDistance > 0 else {
+            return Array(repeating: points.last ?? .zero, count: count)
+        }
+        return (0..<count).map { outputIndex in
+            let targetDistance = totalDistance * Double(outputIndex) / Double(count - 1)
+            var segmentIndex = 1
+            while segmentIndex < distances.count && distances[segmentIndex] < targetDistance {
+                segmentIndex += 1
+            }
+            if segmentIndex >= points.count {
+                return points[points.count - 1]
+            }
+            let previousDistance = distances[segmentIndex - 1]
+            let nextDistance = distances[segmentIndex]
+            let span = max(nextDistance - previousDistance, Double.ulpOfOne)
+            let progress = (targetDistance - previousDistance) / span
+            let start = points[segmentIndex - 1]
+            let end = points[segmentIndex]
+            return CGPoint(
+                x: start.x + (end.x - start.x) * progress,
+                y: start.y + (end.y - start.y) * progress
+            )
+        }
     }
 
     private func currentMouseLocation(fallback: CGPoint) -> CGPoint {
@@ -942,12 +1077,20 @@ public final class ActionExecutor {
         }
 
         var params = humanizationProfile.keyRhythmParams
-        if let dwellMsMean = motionProfile.dwellMsMean {
+        if let dwellMs = motionProfile.dwellMs {
+            params.dwellMsRange = max(12, dwellMs.min)...max(12, dwellMs.max)
+        } else if let dwellMsMean = motionProfile.dwellMsMean {
             let lower = max(24, Int((dwellMsMean * 0.68).rounded()))
             let upper = max(lower + 8, Int((dwellMsMean * 1.36).rounded()))
             params.dwellMsRange = lower...upper
         }
-        if let interKeyMsMean = motionProfile.interKeyMsMean {
+        if let interKeyMs = motionProfile.interKeyMs {
+            let intra = max(16, Double((interKeyMs.min + interKeyMs.max) / 2))
+            params.intraWordMu = log(intra)
+            params.interWordMu = log(max(intra * 1.45, intra + 24))
+            params.intraWordSigma = 0.16
+            params.interWordSigma = 0.20
+        } else if let interKeyMsMean = motionProfile.interKeyMsMean {
             let intra = max(26, interKeyMsMean)
             params.intraWordMu = log(intra)
             params.interWordMu = log(max(intra * 1.45, intra + 32))
@@ -1049,6 +1192,12 @@ private extension CGPoint {
 }
 
 private extension HumanPoint {
+    var cgPoint: CGPoint {
+        CGPoint(x: x, y: y)
+    }
+}
+
+private extension LearnedPathPoint {
     var cgPoint: CGPoint {
         CGPoint(x: x, y: y)
     }

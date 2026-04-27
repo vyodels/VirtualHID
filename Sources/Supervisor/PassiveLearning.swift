@@ -81,6 +81,14 @@ public struct PassiveGestureSample: Codable, Equatable {
     public let interClickMs: [Double]
     public let dwellMs: [Double]
     public let interKeyMs: [Double]
+    public let scrollDeltas: [ObservedScrollDelta]
+    public let scrollIntervalsMs: [Double]
+    public let doubleClickIntervalMs: [Double]
+    public let modifierFlags: [UInt64]
+    public let flagsChangedKeyCodes: [UInt16]
+    public let comboKeyCodes: [UInt16]
+    public let repeatCount: Int
+    public let eventTimeline: [String]
     public let pathLengthPx: Double?
     public let speedPxS: Double?
     public let straightness: Double?
@@ -109,6 +117,14 @@ public struct PassiveGestureSample: Codable, Equatable {
         interClickMs: [Double],
         dwellMs: [Double] = [],
         interKeyMs: [Double] = [],
+        scrollDeltas: [ObservedScrollDelta] = [],
+        scrollIntervalsMs: [Double] = [],
+        doubleClickIntervalMs: [Double] = [],
+        modifierFlags: [UInt64] = [],
+        flagsChangedKeyCodes: [UInt16] = [],
+        comboKeyCodes: [UInt16] = [],
+        repeatCount: Int = 0,
+        eventTimeline: [String] = [],
         pathLengthPx: Double?,
         speedPxS: Double?,
         straightness: Double?,
@@ -136,11 +152,29 @@ public struct PassiveGestureSample: Codable, Equatable {
         self.interClickMs = interClickMs
         self.dwellMs = dwellMs
         self.interKeyMs = interKeyMs
+        self.scrollDeltas = scrollDeltas
+        self.scrollIntervalsMs = scrollIntervalsMs
+        self.doubleClickIntervalMs = doubleClickIntervalMs
+        self.modifierFlags = modifierFlags
+        self.flagsChangedKeyCodes = flagsChangedKeyCodes
+        self.comboKeyCodes = comboKeyCodes
+        self.repeatCount = max(0, repeatCount)
+        self.eventTimeline = eventTimeline
         self.pathLengthPx = pathLengthPx
         self.speedPxS = speedPxS
         self.straightness = straightness
         self.turnJitter = turnJitter
         self.quality = quality
+    }
+}
+
+public struct ObservedScrollDelta: Codable, Equatable {
+    public let dx: Double
+    public let dy: Double
+
+    public init(dx: Double, dy: Double) {
+        self.dx = dx
+        self.dy = dy
     }
 }
 
@@ -197,6 +231,20 @@ final class PassiveLearningRecorder {
     private struct KeyDown {
         let keyCode: UInt16
         let ts: Int64
+        let modifierFlags: UInt64?
+        var repeatCount: Int
+    }
+
+    private struct ClickUp {
+        let type: String
+        let point: ObservedPoint?
+        let ts: Int64
+    }
+
+    private struct ScrollBurstEvent {
+        let ts: Int64
+        let point: ObservedPoint
+        let delta: ObservedScrollDelta
     }
 
     private static let globalHost = "__global__"
@@ -206,9 +254,10 @@ final class PassiveLearningRecorder {
     private var pendingTrainingSamples = [PassiveGestureSample]()
     private var moveBuffer = [PassiveLearningTimedPoint]()
     private var dragBuffer = [PassiveLearningTimedPoint]()
+    private var scrollBurst = [ScrollBurstEvent]()
     private var buttonDown: ButtonDown?
     private var keyDowns = [UInt16: KeyDown]()
-    private var lastClickUpAt: Int64?
+    private var lastClickUp: ClickUp?
     private var lastKeyUpAt: Int64?
     private var producedSamples = 0
     private var recentSamples = [PassiveGestureSample]()
@@ -312,10 +361,24 @@ final class PassiveLearningRecorder {
             }
         case "keyDown":
             if let keyCode = event.keyCode {
-                keyDowns[UInt16(keyCode)] = KeyDown(keyCode: UInt16(keyCode), ts: event.ts)
+                let normalized = UInt16(keyCode)
+                if keyDowns[normalized] != nil {
+                    keyDowns[normalized]?.repeatCount += 1
+                } else {
+                    keyDowns[normalized] = KeyDown(
+                        keyCode: normalized,
+                        ts: event.ts,
+                        modifierFlags: event.modifierFlags,
+                        repeatCount: event.isRepeat ? 1 : 0
+                    )
+                }
             }
         case "keyUp":
             if let sample = keySample(event: event, host: host, taskId: taskId) {
+                samples.append(sample)
+            }
+        case "flagsChanged":
+            if let sample = flagsChangedSample(event: event, host: host, taskId: taskId) {
                 samples.append(sample)
             }
         default:
@@ -347,15 +410,16 @@ final class PassiveLearningRecorder {
                 + upPoint
         )
         let clickHold = max(0, Double(event.ts - down.ts))
-        let interClick: [Double]
-        if actionType == "click", let lastClickUpAt {
-            interClick = [max(0, Double(event.ts - lastClickUpAt))]
-        } else {
-            interClick = []
-        }
+        let interClick = clickIntervalSinceLast(upEvent: event, actionType: actionType)
+        let doubleClickInterval = doubleClickIntervalSinceLast(upEvent: event, actionType: actionType)
         if actionType == "click" {
-            lastClickUpAt = event.ts
+            lastClickUp = ClickUp(type: event.type, point: event.point, ts: event.ts)
+        } else {
+            lastClickUp = nil
         }
+        let timeline = isDrag
+            ? ["movePrelude", down.type, "drag", event.type]
+            : [down.type, event.type]
         return makeSample(
             ts: event.ts,
             source: sampleSource,
@@ -369,13 +433,44 @@ final class PassiveLearningRecorder {
             clickHoldMs: [clickHold],
             interClickMs: interClick,
             dwellMs: [],
-            interKeyMs: []
+            interKeyMs: [],
+            doubleClickIntervalMs: doubleClickInterval,
+            eventTimeline: timeline
         )
+    }
+
+    private func clickIntervalSinceLast(upEvent event: ObservedEvent, actionType: String) -> [Double] {
+        guard actionType == "click", let lastClickUp else {
+            return []
+        }
+        return [max(0, Double(event.ts - lastClickUp.ts))]
+    }
+
+    private func doubleClickIntervalSinceLast(upEvent event: ObservedEvent, actionType: String) -> [Double] {
+        guard actionType == "click", let lastClickUp, lastClickUp.type == event.type else {
+            return []
+        }
+        let interval = max(0, Double(event.ts - lastClickUp.ts))
+        guard interval <= 500 else {
+            return []
+        }
+        if let previous = lastClickUp.point, let current = event.point, distance(previous, current) > 8 {
+            return []
+        }
+        return [interval]
     }
 
     private func scrollSample(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
         guard let point = event.point else {
             return nil
+        }
+        if let last = scrollBurst.last, event.ts - last.ts > 180 {
+            scrollBurst.removeAll()
+        }
+        let delta = ObservedScrollDelta(dx: event.scrollDeltaX ?? 0, dy: event.scrollDeltaY ?? 0)
+        scrollBurst.append(ScrollBurstEvent(ts: event.ts, point: point, delta: delta))
+        if scrollBurst.count > 32 {
+            scrollBurst.removeFirst(scrollBurst.count - 32)
         }
         return makeSample(
             ts: event.ts,
@@ -386,12 +481,24 @@ final class PassiveLearningRecorder {
             actionType: "scroll",
             eventType: event.type,
             point: point,
-            path: [PassiveLearningTimedPoint(point: point, ts: event.ts)],
+            path: scrollBurst.map { PassiveLearningTimedPoint(point: $0.point, ts: $0.ts) },
             clickHoldMs: [],
             interClickMs: [],
             dwellMs: [],
-            interKeyMs: []
+            interKeyMs: [],
+            scrollDeltas: scrollBurst.map(\.delta),
+            scrollIntervalsMs: adjacentScrollIntervals(scrollBurst),
+            eventTimeline: Array(repeating: "scrollWheel", count: scrollBurst.count)
         )
+    }
+
+    private func adjacentScrollIntervals(_ events: [ScrollBurstEvent]) -> [Double] {
+        guard events.count > 1 else {
+            return []
+        }
+        return zip(events.dropFirst(), events).map { next, previous in
+            max(0, Double(next.ts - previous.ts))
+        }
     }
 
     private func keySample(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
@@ -422,8 +529,44 @@ final class PassiveLearningRecorder {
             clickHoldMs: [],
             interClickMs: [],
             dwellMs: dwell.map { [$0] } ?? [],
-            interKeyMs: interKey
+            interKeyMs: interKey,
+            modifierFlags: [down?.modifierFlags, event.modifierFlags].compactMap { $0 },
+            comboKeyCodes: activeComboKeys(including: normalizedKeyCode),
+            repeatCount: down?.repeatCount ?? (event.isRepeat ? 1 : 0),
+            eventTimeline: ["keyDown", event.type]
         )
+    }
+
+    private func flagsChangedSample(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
+        let keyCode = event.keyCode.map { UInt16($0) }
+        return makeSample(
+            ts: event.ts,
+            source: sampleSource,
+            host: resolvedHost(host),
+            taskId: nil,
+            stage: taskId,
+            actionType: "key",
+            eventType: event.type,
+            point: nil,
+            keyCode: keyCode,
+            path: [],
+            clickHoldMs: [],
+            interClickMs: [],
+            dwellMs: [],
+            interKeyMs: [],
+            modifierFlags: event.modifierFlags.map { [$0] } ?? [],
+            flagsChangedKeyCodes: keyCode.map { [$0] } ?? [],
+            comboKeyCodes: activeComboKeys(including: keyCode),
+            eventTimeline: [event.type]
+        )
+    }
+
+    private func activeComboKeys(including keyCode: UInt16?) -> [UInt16] {
+        var keys = Set(keyDowns.keys)
+        if let keyCode {
+            keys.insert(keyCode)
+        }
+        return keys.sorted()
     }
 
     private var sampleSource: String {
@@ -461,10 +604,18 @@ final class PassiveLearningRecorder {
         clickHoldMs: [Double],
         interClickMs: [Double],
         dwellMs: [Double],
-        interKeyMs: [Double]
+        interKeyMs: [Double],
+        scrollDeltas: [ObservedScrollDelta] = [],
+        scrollIntervalsMs: [Double] = [],
+        doubleClickIntervalMs: [Double] = [],
+        modifierFlags: [UInt64] = [],
+        flagsChangedKeyCodes: [UInt16] = [],
+        comboKeyCodes: [UInt16] = [],
+        repeatCount: Int = 0,
+        eventTimeline: [String] = []
     ) -> PassiveGestureSample? {
         let compact = compactPath(path)
-        guard compact.count >= settings.minGesturePoints || actionType == "click" || actionType == "scroll" || actionType == "type" else {
+        guard compact.count >= settings.minGesturePoints || actionType == "click" || actionType == "scroll" || actionType == "type" || actionType == "key" else {
             return nil
         }
         let skeleton = downsample(compact, limit: settings.maxSkeletonPoints)
@@ -499,6 +650,14 @@ final class PassiveLearningRecorder {
             interClickMs: interClickMs.filter { $0 > 0 },
             dwellMs: dwellMs.filter { $0 > 0 },
             interKeyMs: interKeyMs.filter { $0 > 0 },
+            scrollDeltas: scrollDeltas.filter { $0.dx != 0 || $0.dy != 0 },
+            scrollIntervalsMs: scrollIntervalsMs.filter { $0 > 0 },
+            doubleClickIntervalMs: doubleClickIntervalMs.filter { $0 > 0 },
+            modifierFlags: Array(Set(modifierFlags)).sorted(),
+            flagsChangedKeyCodes: Array(Set(flagsChangedKeyCodes)).sorted(),
+            comboKeyCodes: Array(Set(comboKeyCodes)).sorted(),
+            repeatCount: repeatCount,
+            eventTimeline: compactTimeline(eventTimeline),
             pathLengthPx: pathLength > 0 ? pathLength : nil,
             speedPxS: speed,
             straightness: computeStraightness(compact.map(\.point)),
@@ -537,9 +696,10 @@ final class PassiveLearningRecorder {
     private func resetGestureBuffers() {
         moveBuffer.removeAll()
         dragBuffer.removeAll()
+        scrollBurst.removeAll()
         buttonDown = nil
         keyDowns.removeAll()
-        lastClickUpAt = nil
+        lastClickUp = nil
         lastKeyUpAt = nil
     }
 
@@ -607,6 +767,19 @@ private func hesitationDurations(_ segmentMs: [Double]) -> [Double] {
     let sorted = segmentMs.sorted()
     let median = sorted[sorted.count / 2]
     return segmentMs.filter { $0 >= max(80, median * 2.2) }
+}
+
+private func compactTimeline(_ timeline: [String], limit: Int = 32) -> [String] {
+    guard timeline.count > limit else {
+        return timeline
+    }
+    guard limit > 1 else {
+        return timeline.last.map { [$0] } ?? []
+    }
+    return (0..<limit).compactMap { index in
+        let raw = Double(index) * Double(timeline.count - 1) / Double(limit - 1)
+        return timeline[Int(raw.rounded())]
+    }
 }
 
 private func computePathLength(_ points: [ObservedPoint]) -> Double {

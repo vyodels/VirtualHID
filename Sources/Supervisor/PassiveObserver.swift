@@ -19,13 +19,31 @@ public struct ObservedEvent: Codable, Equatable {
     public let type: String
     public let point: ObservedPoint?
     public let keyCode: CGKeyCode?
+    public let scrollDeltaX: Double?
+    public let scrollDeltaY: Double?
+    public let modifierFlags: UInt64?
+    public let isRepeat: Bool
 
-    public init(id: String, ts: Int64, type: String, point: ObservedPoint?, keyCode: CGKeyCode?) {
+    public init(
+        id: String,
+        ts: Int64,
+        type: String,
+        point: ObservedPoint?,
+        keyCode: CGKeyCode?,
+        scrollDeltaX: Double? = nil,
+        scrollDeltaY: Double? = nil,
+        modifierFlags: UInt64? = nil,
+        isRepeat: Bool = false
+    ) {
         self.id = id
         self.ts = ts
         self.type = type
         self.point = point
         self.keyCode = keyCode
+        self.scrollDeltaX = scrollDeltaX
+        self.scrollDeltaY = scrollDeltaY
+        self.modifierFlags = modifierFlags
+        self.isRepeat = isRepeat
     }
 }
 
@@ -133,7 +151,16 @@ public final class PassiveObserver {
         publishLearningSamples(samples)
     }
 
-    public func appendSynthetic(type: String, point: ObservedPoint? = nil, keyCode: CGKeyCode? = nil, ts: Int64? = nil) -> ObservedEvent {
+    public func appendSynthetic(
+        type: String,
+        point: ObservedPoint? = nil,
+        keyCode: CGKeyCode? = nil,
+        ts: Int64? = nil,
+        scrollDeltaX: Double? = nil,
+        scrollDeltaY: Double? = nil,
+        modifierFlags: UInt64? = nil,
+        isRepeat: Bool = false
+    ) -> ObservedEvent {
         let nowMs = ts ?? currentTimeMs()
         let result = lock.withLock {
             counter += 1
@@ -142,7 +169,11 @@ public final class PassiveObserver {
                 ts: nowMs,
                 type: type,
                 point: point,
-                keyCode: keyCode
+                keyCode: keyCode,
+                scrollDeltaX: scrollDeltaX,
+                scrollDeltaY: scrollDeltaY,
+                modifierFlags: modifierFlags,
+                isRepeat: isRepeat
             )
             buffer.append(event)
             trimLocked(nowMs: nowMs)
@@ -202,7 +233,11 @@ public final class PassiveObserver {
                 ts: ts,
                 type: eventType ?? "unknown",
                 point: point,
-                keyCode: keyCode
+                keyCode: keyCode,
+                scrollDeltaX: type == .scrollWheel ? Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)) : nil,
+                scrollDeltaY: type == .scrollWheel ? Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)) : nil,
+                modifierFlags: (type == .keyDown || type == .keyUp || type == .flagsChanged) ? event.flags.rawValue : nil,
+                isRepeat: type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             )
         }
     }

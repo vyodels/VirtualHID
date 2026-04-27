@@ -35,6 +35,65 @@ public struct TracePoint: Codable, Equatable {
     }
 }
 
+public struct TraceScrollDelta: Codable, Equatable {
+    public let dx: Double
+    public let dy: Double
+
+    public init(dx: Double, dy: Double) {
+        self.dx = dx
+        self.dy = dy
+    }
+}
+
+public struct RawHIDLearningProfile: Codable, Equatable {
+    public let scrollDeltaX: DoubleRange?
+    public let scrollDeltaY: DoubleRange?
+    public let scrollIntervalsMs: IntRange?
+    public let scrollEventCount: IntRange?
+    public let doubleClickIntervalMs: IntRange?
+    public let dwellMs: IntRange?
+    public let interKeyMs: IntRange?
+    public let repeatCount: IntRange?
+    public let modifierFlags: [UInt64]
+    public let flagsChangedKeyCodes: [UInt16]
+    public let comboKeyCodes: [[UInt16]]
+    public let pathSkeleton: [TracePoint]
+    public let segmentMs: [Double]
+    public let eventTimeline: [String]
+
+    public init(
+        scrollDeltaX: DoubleRange? = nil,
+        scrollDeltaY: DoubleRange? = nil,
+        scrollIntervalsMs: IntRange? = nil,
+        scrollEventCount: IntRange? = nil,
+        doubleClickIntervalMs: IntRange? = nil,
+        dwellMs: IntRange? = nil,
+        interKeyMs: IntRange? = nil,
+        repeatCount: IntRange? = nil,
+        modifierFlags: [UInt64] = [],
+        flagsChangedKeyCodes: [UInt16] = [],
+        comboKeyCodes: [[UInt16]] = [],
+        pathSkeleton: [TracePoint] = [],
+        segmentMs: [Double] = [],
+        eventTimeline: [String] = []
+    ) {
+        self.scrollDeltaX = scrollDeltaX
+        self.scrollDeltaY = scrollDeltaY
+        self.scrollIntervalsMs = scrollIntervalsMs
+        self.scrollEventCount = scrollEventCount
+        self.doubleClickIntervalMs = doubleClickIntervalMs
+        self.dwellMs = dwellMs
+        self.interKeyMs = interKeyMs
+        self.repeatCount = repeatCount
+        self.modifierFlags = modifierFlags
+        self.flagsChangedKeyCodes = flagsChangedKeyCodes
+        self.comboKeyCodes = comboKeyCodes
+        self.pathSkeleton = pathSkeleton
+        self.segmentMs = segmentMs
+        self.eventTimeline = eventTimeline
+    }
+}
+
 public struct TraceRetentionPolicy: Equatable {
     public let maxAgeMs: Int64
     public let maxTracesPerGroup: Int
@@ -68,6 +127,14 @@ public struct TracePayload: Codable, Equatable {
     public let interClickMs: [Double]
     public let dwellMs: [Double]
     public let interKeyMs: [Double]
+    public let scrollDeltas: [TraceScrollDelta]
+    public let scrollIntervalsMs: [Double]
+    public let doubleClickIntervalMs: [Double]
+    public let modifierFlags: [UInt64]
+    public let flagsChangedKeyCodes: [UInt16]
+    public let comboKeyCodes: [UInt16]
+    public let repeatCount: Int
+    public let eventTimeline: [String]
     public let behaviorMode: HumanBehaviorMode?
     public let flavor: MotionFlavor?
     public let straightness: Double?
@@ -92,6 +159,14 @@ public struct TracePayload: Codable, Equatable {
         interClickMs: [Double] = [],
         dwellMs: [Double] = [],
         interKeyMs: [Double] = [],
+        scrollDeltas: [TraceScrollDelta] = [],
+        scrollIntervalsMs: [Double] = [],
+        doubleClickIntervalMs: [Double] = [],
+        modifierFlags: [UInt64] = [],
+        flagsChangedKeyCodes: [UInt16] = [],
+        comboKeyCodes: [UInt16] = [],
+        repeatCount: Int = 0,
+        eventTimeline: [String] = [],
         behaviorMode: HumanBehaviorMode? = nil,
         flavor: MotionFlavor? = nil,
         straightness: Double? = nil,
@@ -115,6 +190,14 @@ public struct TracePayload: Codable, Equatable {
         self.interClickMs = interClickMs
         self.dwellMs = dwellMs
         self.interKeyMs = interKeyMs
+        self.scrollDeltas = scrollDeltas
+        self.scrollIntervalsMs = scrollIntervalsMs
+        self.doubleClickIntervalMs = doubleClickIntervalMs
+        self.modifierFlags = modifierFlags
+        self.flagsChangedKeyCodes = flagsChangedKeyCodes
+        self.comboKeyCodes = comboKeyCodes
+        self.repeatCount = max(0, repeatCount)
+        self.eventTimeline = eventTimeline
         self.behaviorMode = behaviorMode
         self.flavor = flavor
         self.straightness = straightness
@@ -140,6 +223,14 @@ public struct TracePayload: Codable, Equatable {
         case interClickMs
         case dwellMs
         case interKeyMs
+        case scrollDeltas
+        case scrollIntervalsMs
+        case doubleClickIntervalMs
+        case modifierFlags
+        case flagsChangedKeyCodes
+        case comboKeyCodes
+        case repeatCount
+        case eventTimeline
         case behaviorMode
         case flavor
         case straightness
@@ -166,6 +257,14 @@ public struct TracePayload: Codable, Equatable {
         interClickMs = try container.decodeIfPresent([Double].self, forKey: .interClickMs) ?? []
         dwellMs = try container.decodeIfPresent([Double].self, forKey: .dwellMs) ?? []
         interKeyMs = try container.decodeIfPresent([Double].self, forKey: .interKeyMs) ?? []
+        scrollDeltas = try container.decodeIfPresent([TraceScrollDelta].self, forKey: .scrollDeltas) ?? []
+        scrollIntervalsMs = try container.decodeIfPresent([Double].self, forKey: .scrollIntervalsMs) ?? []
+        doubleClickIntervalMs = try container.decodeIfPresent([Double].self, forKey: .doubleClickIntervalMs) ?? []
+        modifierFlags = try container.decodeIfPresent([UInt64].self, forKey: .modifierFlags) ?? []
+        flagsChangedKeyCodes = try container.decodeIfPresent([UInt16].self, forKey: .flagsChangedKeyCodes) ?? []
+        comboKeyCodes = try container.decodeIfPresent([UInt16].self, forKey: .comboKeyCodes) ?? []
+        repeatCount = try container.decodeIfPresent(Int.self, forKey: .repeatCount) ?? 0
+        eventTimeline = try container.decodeIfPresent([String].self, forKey: .eventTimeline) ?? []
         behaviorMode = try container.decodeIfPresent(HumanBehaviorMode.self, forKey: .behaviorMode)
         flavor = try container.decodeIfPresent(MotionFlavor.self, forKey: .flavor)
         straightness = try container.decodeIfPresent(Double.self, forKey: .straightness)
@@ -192,6 +291,14 @@ public struct TracePayload: Codable, Equatable {
         try container.encode(interClickMs, forKey: .interClickMs)
         try container.encode(dwellMs, forKey: .dwellMs)
         try container.encode(interKeyMs, forKey: .interKeyMs)
+        try container.encode(scrollDeltas, forKey: .scrollDeltas)
+        try container.encode(scrollIntervalsMs, forKey: .scrollIntervalsMs)
+        try container.encode(doubleClickIntervalMs, forKey: .doubleClickIntervalMs)
+        try container.encode(modifierFlags, forKey: .modifierFlags)
+        try container.encode(flagsChangedKeyCodes, forKey: .flagsChangedKeyCodes)
+        try container.encode(comboKeyCodes, forKey: .comboKeyCodes)
+        try container.encode(repeatCount, forKey: .repeatCount)
+        try container.encode(eventTimeline, forKey: .eventTimeline)
         try container.encodeIfPresent(behaviorMode, forKey: .behaviorMode)
         try container.encodeIfPresent(flavor, forKey: .flavor)
         try container.encodeIfPresent(straightness, forKey: .straightness)
@@ -944,17 +1051,33 @@ public final class ProfileStore {
             detourProbability: boundedProbability(averageOrNil(samples.compactMap(\.detourSignal))),
             clickHoldMs: stochasticIntRange(values: samples.flatMap(\.clickHoldMs), minimumSpan: 12, floor: 18, ceil: 320),
             interClickMs: stochasticIntRange(values: samples.flatMap(\.interClickMs), minimumSpan: 18, floor: 36, ceil: 520),
+            doubleClickHoldMs: stochasticIntRange(values: samples.flatMap(\.clickHoldMs), minimumSpan: 10, floor: 18, ceil: 320),
+            doubleClickInterClickMs: stochasticIntRange(values: samples.flatMap(\.doubleClickIntervalMs), minimumSpan: 12, floor: 40, ceil: 520),
+            doubleClickSecondOffsetPx: deriveDoubleClickSecondOffsetRange(from: samples),
+            scrollDeltaX: signedDoubleRange(values: samples.flatMap(\.scrollDeltas).map(\.dx), floor: -3000, ceil: 3000, absoluteMinimumSpan: 1),
+            scrollDeltaY: signedDoubleRange(values: samples.flatMap(\.scrollDeltas).map(\.dy), floor: -3000, ceil: 3000, absoluteMinimumSpan: 1),
+            scrollStepCount: stochasticIntRange(values: samples.map { Double($0.scrollDeltas.count) }.filter { $0 > 0 }, minimumSpan: 1, floor: 1, ceil: 64),
+            scrollStepDelayMs: stochasticIntRange(values: samples.flatMap(\.scrollIntervalsMs), minimumSpan: 6, floor: 1, ceil: 600),
+            scrollInertiaDecay: deriveScrollInertiaDecayRange(from: samples),
+            dwellMs: stochasticIntRange(values: samples.flatMap(\.dwellMs), minimumSpan: 8, floor: 12, ceil: 600),
+            interKeyMs: stochasticIntRange(values: samples.flatMap(\.interKeyMs), minimumSpan: 10, floor: 12, ceil: 900),
+            modifierHoldMs: stochasticIntRange(values: samples.flatMap(\.dwellMs), minimumSpan: 8, floor: 12, ceil: 900),
+            keyRepeatDelayMs: stochasticIntRange(values: samples.map(\.repeatCount).filter { $0 > 0 }.map { Double($0) * 90 }, minimumSpan: 20, floor: 80, ceil: 1200),
+            keyRepeatIntervalMs: stochasticIntRange(values: samples.map(\.repeatCount).filter { $0 > 0 }.map { Double($0) * 35 }, minimumSpan: 10, floor: 24, ceil: 320),
+            pathSkeleton: learnedPathSkeleton(from: samples),
+            segmentMs: learnedSegmentRanges(from: samples),
             dwellMsMean: averageOrNil(samples.flatMap(\.dwellMs)),
             interKeyMsMean: averageOrNil(samples.flatMap(\.interKeyMs)),
             straightnessMean: averageOrNil(samples.compactMap(\.straightness)),
             turnJitterMean: averageOrNil(samples.compactMap(\.turnJitter))
         )
-        let template = LearnedMotionTemplate(
+        let template = LearnedRawHIDTemplate(
             version: 2,
             strategy: "profile",
             actionType: group.actionType,
             sampleSize: group.sampleSize,
-            motion: motion
+            motion: motion,
+            rawHID: rawHIDProfile(for: samples)
         )
 
         let data = try templateEncoder.encode(template)
@@ -1138,7 +1261,14 @@ public final class ProfileStore {
             || !payload.clickHoldMs.isEmpty
             || !payload.interClickMs.isEmpty
             || !payload.dwellMs.isEmpty
-            || !payload.interKeyMs.isEmpty else {
+            || !payload.interKeyMs.isEmpty
+            || !payload.scrollDeltas.isEmpty
+            || !payload.scrollIntervalsMs.isEmpty
+            || !payload.doubleClickIntervalMs.isEmpty
+            || !payload.modifierFlags.isEmpty
+            || !payload.flagsChangedKeyCodes.isEmpty
+            || !payload.comboKeyCodes.isEmpty
+            || payload.repeatCount > 0 else {
             return nil
         }
 
@@ -1159,6 +1289,8 @@ public final class ProfileStore {
         )
 
         return TraceSample(
+            pathSkeleton: path,
+            segmentMs: payload.segmentMs.filter { $0 > 0 },
             pointCount: max(1, pointCount),
             speedPxS: speedPxS,
             hesitationMs: payload.hesitationMs.filter { $0 > 0 },
@@ -1166,6 +1298,14 @@ public final class ProfileStore {
             interClickMs: payload.interClickMs.filter { $0 > 0 },
             dwellMs: payload.dwellMs.filter { $0 > 0 },
             interKeyMs: payload.interKeyMs.filter { $0 > 0 },
+            scrollDeltas: payload.scrollDeltas.filter { $0.dx != 0 || $0.dy != 0 },
+            scrollIntervalsMs: payload.scrollIntervalsMs.filter { $0 > 0 },
+            doubleClickIntervalMs: payload.doubleClickIntervalMs.filter { $0 > 0 },
+            modifierFlags: payload.modifierFlags,
+            flagsChangedKeyCodes: payload.flagsChangedKeyCodes,
+            comboKeyCodes: payload.comboKeyCodes,
+            repeatCount: payload.repeatCount,
+            eventTimeline: payload.eventTimeline,
             straightness: straightness,
             turnJitter: turnJitter,
             targetSpreadPx: targetSpreadPx,
@@ -1374,6 +1514,109 @@ public final class ProfileStore {
         return stochasticIntRange(values: settleValues, minimumSpan: 16, floor: 20, ceil: 260)
     }
 
+    private func deriveDoubleClickSecondOffsetRange(from samples: [TraceSample]) -> DoubleRange? {
+        let values = samples
+            .filter { !$0.doubleClickIntervalMs.isEmpty }
+            .compactMap(\.targetSpreadPx)
+        guard !values.isEmpty else {
+            return nil
+        }
+        return stochasticDoubleRange(values: values, floor: 0, ceil: 16, minimumFractionalSpan: 0.24, absoluteMinimumSpan: 1.5)
+    }
+
+    private func deriveScrollInertiaDecayRange(from samples: [TraceSample]) -> DoubleRange? {
+        let ratios = samples.flatMap { sample -> [Double] in
+            let magnitudes = sample.scrollDeltas
+                .map { hypot($0.dx, $0.dy) }
+                .filter { $0 > 0.01 }
+            guard magnitudes.count > 1 else {
+                return []
+            }
+            return zip(magnitudes.dropFirst(), magnitudes).compactMap { current, previous in
+                guard previous > 0 else {
+                    return nil
+                }
+                return clamp(current / previous, min: 0.2, max: 0.98)
+            }
+        }
+        return stochasticDoubleRange(values: ratios, floor: 0.2, ceil: 0.98, minimumFractionalSpan: 0.12, absoluteMinimumSpan: 0.06)
+    }
+
+    private func learnedPathSkeleton(from samples: [TraceSample]) -> [LearnedPathPoint]? {
+        let representative = representativePathSkeleton(from: samples)
+        guard representative.count >= 2 else {
+            return nil
+        }
+        return representative.map { LearnedPathPoint(x: $0.x, y: $0.y) }
+    }
+
+    private func learnedSegmentRanges(from samples: [TraceSample]) -> [IntRange]? {
+        let segments = samples.map(\.segmentMs).filter { !$0.isEmpty }
+        guard let targetCount = segments.max(by: { $0.count < $1.count })?.count, targetCount > 0 else {
+            return nil
+        }
+        let ranges = (0..<targetCount).compactMap { index -> IntRange? in
+            let values = segments.compactMap { segment -> Double? in
+                guard segment.indices.contains(index) else {
+                    return nil
+                }
+                return segment[index]
+            }
+            return stochasticIntRange(values: values, minimumSpan: 8, floor: 1, ceil: 1_200)
+        }
+        return ranges.isEmpty ? nil : ranges
+    }
+
+    private func rawHIDProfile(for samples: [TraceSample]) -> RawHIDLearningProfile? {
+        let scrollDeltas = samples.flatMap(\.scrollDeltas)
+        let scrollIntervals = samples.flatMap(\.scrollIntervalsMs)
+        let doubleClickIntervals = samples.flatMap(\.doubleClickIntervalMs)
+        let dwell = samples.flatMap(\.dwellMs)
+        let interKey = samples.flatMap(\.interKeyMs)
+        let repeatCounts = samples.map(\.repeatCount)
+        let modifierFlags = sortedUnique(samples.flatMap(\.modifierFlags))
+        let flagsChanged = sortedUnique(samples.flatMap(\.flagsChangedKeyCodes))
+        let comboKeys = sortedUniqueCombos(samples.map(\.comboKeyCodes).filter { !$0.isEmpty })
+        let representative = representativePathSkeleton(from: samples)
+        let representativeSegments = representativeSegmentMs(from: samples)
+        let timeline = representativeTimeline(from: samples)
+
+        let profile = RawHIDLearningProfile(
+            scrollDeltaX: signedDoubleRange(values: scrollDeltas.map(\.dx), floor: -3000, ceil: 3000, absoluteMinimumSpan: 1),
+            scrollDeltaY: signedDoubleRange(values: scrollDeltas.map(\.dy), floor: -3000, ceil: 3000, absoluteMinimumSpan: 1),
+            scrollIntervalsMs: stochasticIntRange(values: scrollIntervals, minimumSpan: 6, floor: 1, ceil: 600),
+            scrollEventCount: stochasticIntRange(values: samples.map { Double($0.scrollDeltas.count) }.filter { $0 > 0 }, minimumSpan: 1, floor: 1, ceil: 64),
+            doubleClickIntervalMs: stochasticIntRange(values: doubleClickIntervals, minimumSpan: 12, floor: 40, ceil: 520),
+            dwellMs: stochasticIntRange(values: dwell, minimumSpan: 8, floor: 12, ceil: 600),
+            interKeyMs: stochasticIntRange(values: interKey, minimumSpan: 10, floor: 12, ceil: 900),
+            repeatCount: stochasticIntRange(values: repeatCounts.map(Double.init).filter { $0 > 0 }, minimumSpan: 1, floor: 1, ceil: 32),
+            modifierFlags: modifierFlags,
+            flagsChangedKeyCodes: flagsChanged,
+            comboKeyCodes: comboKeys,
+            pathSkeleton: representative,
+            segmentMs: representativeSegments,
+            eventTimeline: timeline
+        )
+
+        if profile.scrollDeltaX == nil,
+           profile.scrollDeltaY == nil,
+           profile.scrollIntervalsMs == nil,
+           profile.scrollEventCount == nil,
+           profile.doubleClickIntervalMs == nil,
+           profile.dwellMs == nil,
+           profile.interKeyMs == nil,
+           profile.repeatCount == nil,
+           profile.modifierFlags.isEmpty,
+           profile.flagsChangedKeyCodes.isEmpty,
+           profile.comboKeyCodes.isEmpty,
+           profile.pathSkeleton.isEmpty,
+           profile.segmentMs.isEmpty,
+           profile.eventTimeline.isEmpty {
+            return nil
+        }
+        return profile
+    }
+
     private func classifyBehavior(
         speedPxS: Double?,
         hesitationMs: [Double],
@@ -1452,6 +1695,68 @@ public final class ProfileStore {
             maxValue = min(upperBound, minValue + minimumSpan)
         }
         return DoubleRange(min: minValue, max: maxValue)
+    }
+
+    private func signedDoubleRange(
+        values: [Double],
+        floor lowerBound: Double,
+        ceil upperBound: Double,
+        absoluteMinimumSpan: Double
+    ) -> DoubleRange? {
+        let filtered = values.filter { $0.isFinite && $0 != 0 }.sorted()
+        guard !filtered.isEmpty else {
+            return nil
+        }
+        let low = percentile(of: filtered, at: 0.18)
+        let high = percentile(of: filtered, at: 0.86)
+        let center = mean(filtered)
+        let minimumSpan = max(absoluteMinimumSpan, abs(center) * 0.12)
+        var minValue = max(lowerBound, min(low, center - minimumSpan / 2))
+        var maxValue = min(upperBound, max(high, center + minimumSpan / 2))
+        if maxValue - minValue < minimumSpan {
+            let midpoint = clamp(center, min: lowerBound + minimumSpan / 2, max: upperBound - minimumSpan / 2)
+            minValue = max(lowerBound, midpoint - minimumSpan / 2)
+            maxValue = min(upperBound, midpoint + minimumSpan / 2)
+        }
+        return DoubleRange(min: minValue, max: maxValue)
+    }
+
+    private func representativePathSkeleton(from samples: [TraceSample]) -> [TracePoint] {
+        samples
+            .filter { $0.pathSkeleton.count >= 2 }
+            .max { lhs, rhs in lhs.pathSkeleton.count < rhs.pathSkeleton.count }?
+            .pathSkeleton ?? []
+    }
+
+    private func representativeSegmentMs(from samples: [TraceSample]) -> [Double] {
+        samples
+            .filter { !$0.segmentMs.isEmpty }
+            .max { lhs, rhs in lhs.segmentMs.count < rhs.segmentMs.count }?
+            .segmentMs ?? []
+    }
+
+    private func representativeTimeline(from samples: [TraceSample]) -> [String] {
+        samples
+            .filter { !$0.eventTimeline.isEmpty }
+            .max { lhs, rhs in lhs.eventTimeline.count < rhs.eventTimeline.count }?
+            .eventTimeline ?? []
+    }
+
+    private func sortedUnique<T: Comparable & Hashable>(_ values: [T]) -> [T] {
+        Array(Set(values)).sorted()
+    }
+
+    private func sortedUniqueCombos(_ combos: [[UInt16]]) -> [[UInt16]] {
+        let normalized = combos.map { Array(Set($0)).sorted() }.filter { !$0.isEmpty }
+        var seen = Set<String>()
+        var result = [[UInt16]]()
+        for combo in normalized {
+            let key = combo.map(String.init).joined(separator: "+")
+            if seen.insert(key).inserted {
+                result.append(combo)
+            }
+        }
+        return result.sorted { $0.lexicographicallyPrecedes($1) }
     }
 
     private func percentile(of sortedValues: [Double], at percentile: Double) -> Double {
@@ -1663,7 +1968,18 @@ private struct TemplateGroup {
     let sampleSize: Int
 }
 
+private struct LearnedRawHIDTemplate: Codable, Equatable {
+    let version: Int
+    let strategy: String
+    let actionType: String
+    let sampleSize: Int
+    let motion: MotionProfile
+    let rawHID: RawHIDLearningProfile?
+}
+
 private struct TraceSample {
+    let pathSkeleton: [TracePoint]
+    let segmentMs: [Double]
     let pointCount: Int
     let speedPxS: Double?
     let hesitationMs: [Double]
@@ -1671,6 +1987,14 @@ private struct TraceSample {
     let interClickMs: [Double]
     let dwellMs: [Double]
     let interKeyMs: [Double]
+    let scrollDeltas: [TraceScrollDelta]
+    let scrollIntervalsMs: [Double]
+    let doubleClickIntervalMs: [Double]
+    let modifierFlags: [UInt64]
+    let flagsChangedKeyCodes: [UInt16]
+    let comboKeyCodes: [UInt16]
+    let repeatCount: Int
+    let eventTimeline: [String]
     let straightness: Double?
     let turnJitter: Double?
     let targetSpreadPx: Double?

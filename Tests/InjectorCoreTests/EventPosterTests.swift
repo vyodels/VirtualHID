@@ -194,6 +194,169 @@ final class EventPosterTests: XCTestCase {
             XCTAssertTrue(abs(finalLocation.y - Double(landingCenter.y)) <= 5)
         }
     }
+
+    func testLearnedPathSkeletonAndSegmentsAffectDryRunMoveShapeAndTiming() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            pointCount: IntRange(min: 5, max: 5),
+            hesitationProbability: 0,
+            pathSkeleton: [
+                LearnedPathPoint(x: 0, y: 0),
+                LearnedPathPoint(x: 50, y: 80),
+                LearnedPathPoint(x: 100, y: 0)
+            ],
+            segmentMs: [
+                IntRange(min: 20, max: 20),
+                IntRange(min: 180, max: 180),
+                IntRange(min: 20, max: 20),
+                IntRange(min: 180, max: 180)
+            ]
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-path",
+                primitives: [
+                    .move(
+                        to: CGPoint(x: 220, y: 20),
+                        via: .profile(TemplateReference(id: "learned-path", motionProfile: profile)),
+                        durationMs: 520,
+                        profile: PrimitiveProfile(origin: CGPoint(x: 20, y: 20))
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let points = result.events.compactMap { $0.location }
+        let yValues = points.map { $0.y }
+        let deltas = timestampDeltas(result.events)
+
+        XCTAssertEqual(result.events.count, 5)
+        XCTAssertEqual(points.first?.x, 20)
+        XCTAssertEqual(points.last?.x, 220)
+        XCTAssertGreaterThan(yValues.max() ?? 0, 70)
+        XCTAssertGreaterThan(deltas.max() ?? 0, 100)
+        XCTAssertLessThan(deltas.min() ?? 0, 100)
+    }
+
+    func testLearnedDoubleClickProfileControlsDryRunDownUpIntervals() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            clickHoldMs: IntRange(min: 30, max: 30),
+            doubleClickHoldMs: IntRange(min: 64, max: 64),
+            doubleClickInterClickMs: IntRange(min: 310, max: 310),
+            doubleClickSecondOffsetPx: DoubleRange(min: 2, max: 4)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-dblclick",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 180, y: 140),
+                        button: .left,
+                        holdMs: 30,
+                        count: 2,
+                        profile: PrimitiveProfile(origin: CGPoint(x: 180, y: 140), motionProfile: profile)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        XCTAssertEqual(result.events.map(\.type), ["leftMouseDown", "leftMouseUp", "leftMouseDown", "leftMouseUp"])
+        let deltas = timestampDeltas(result.events)
+        XCTAssertEqual(deltas[0], 64, accuracy: 1)
+        XCTAssertEqual(deltas[1], 310, accuracy: 1)
+        XCTAssertEqual(deltas[2], 64, accuracy: 1)
+        let firstClick = result.events[0].location
+        let secondClick = result.events[2].location
+        XCTAssertNotEqual(firstClick, secondClick)
+    }
+
+    func testLearnedKeyboardRangesAffectTypeDryRunTiming() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            dwellMs: IntRange(min: 210, max: 210),
+            interKeyMs: IntRange(min: 260, max: 320)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-type",
+                primitives: [
+                    .type(
+                        text: "ab",
+                        layout: .us,
+                        profile: PrimitiveProfile(motionProfile: profile)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-type", role: "textbox")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        XCTAssertEqual(result.events.map(\.type), ["keyDown", "keyUp", "keyDown", "keyUp"])
+        let deltas = timestampDeltas(result.events)
+        XCTAssertEqual(deltas[0], 210, accuracy: 1)
+        XCTAssertGreaterThan(deltas[1], 180)
+        XCTAssertEqual(deltas[2], 210, accuracy: 1)
+    }
+
+    func testLearnedScrollProfileControlsDryRunBurstTiming() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            scrollDeltaY: DoubleRange(min: 90, max: 90),
+            scrollStepCount: IntRange(min: 4, max: 4),
+            scrollStepDelayMs: IntRange(min: 75, max: 75),
+            scrollInertiaDecay: DoubleRange(min: 0.6, max: 0.6)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-scroll",
+                primitives: [
+                    .scroll(
+                        at: CGPoint(x: 100, y: 120),
+                        dx: 0,
+                        dy: -120,
+                        style: .wheel,
+                        profile: PrimitiveProfile(motionProfile: profile)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-scroll", role: "list")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        XCTAssertEqual(result.events.map(\.type), ["scrollWheel", "scrollWheel", "scrollWheel", "scrollWheel"])
+        for delta in timestampDeltas(result.events) {
+            XCTAssertEqual(delta, 75, accuracy: 1)
+        }
+    }
+}
+
+private func testTarget() -> BrowserTarget {
+    let app = NSRunningApplication.current
+    return BrowserTarget(
+        app: app,
+        pid: app.processIdentifier,
+        bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.tests",
+        windowTitle: nil,
+        frame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+    )
+}
+
+private func timestampDeltas(_ events: [InjectedEvent]) -> [Double] {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let dates = events.compactMap { formatter.date(from: $0.timestamp) }
+    return zip(dates.dropFirst(), dates).map { next, previous in
+        next.timeIntervalSince(previous) * 1000
+    }
 }
 
 private final class RecordingBackend: EventPostingBackend {

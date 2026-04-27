@@ -368,6 +368,38 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertTrue(activeFields?.contains("clickHoldMs") == true)
     }
 
+    func testLearningDemoStepIsManualRepeatableAndActionScoped() throws {
+        let service = try makeService()
+        for action in ["move", "click", "dblclick", "drag", "scroll", "keyboard"] {
+            let response = service.handleLine(
+                #"{"id":"demo-step-\#(action)","method":"learning.demo.step","params":{"action":"\#(action)","seedDemoTemplate":true}}"#
+            )
+            let payload = try decode(response)
+            let result = payload["result"] as? [String: Any]
+            let manual = result?["manualControl"] as? [String: Any]
+            let safety = result?["safety"] as? [String: Any]
+            let actions = result?["actions"] as? [[String: Any]] ?? []
+            let firstAction = actions.first
+            let steps = firstAction?["steps"] as? [[String: Any]] ?? []
+
+            XCTAssertEqual(payload["ok"] as? Bool, true)
+            XCTAssertEqual(result?["ok"] as? Bool, true)
+            XCTAssertEqual(result?["mode"] as? String, "manual-safe-dry-run-preview")
+            XCTAssertEqual(result?["demoAction"] as? String, action)
+            XCTAssertEqual(manual?["maxActiveDemo"] as? Int, 1)
+            XCTAssertEqual(manual?["autoAdvance"] as? Bool, false)
+            XCTAssertEqual(manual?["repeatable"] as? Bool, true)
+            XCTAssertEqual(safety?["dryRun"] as? Bool, true)
+            XCTAssertEqual(safety?["realClickPosted"] as? Bool, false)
+            XCTAssertEqual(actions.count, 1)
+            XCTAssertEqual(firstAction?["demoAction"] as? String, action)
+            XCTAssertTrue(steps.contains { $0["phase"] as? String == "prepareMove" } || action == "scroll")
+        }
+
+        let stopPayload = try decode(service.handleLine(#"{"id":"demo-stop","method":"learning.demo.stop","params":{}}"#))
+        XCTAssertEqual(stopPayload["ok"] as? Bool, true)
+    }
+
     func testLearningInspectReturnsObservableLearningData() throws {
         let service = try makeService()
         _ = service.handleLine(

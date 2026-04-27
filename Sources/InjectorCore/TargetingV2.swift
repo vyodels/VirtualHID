@@ -302,9 +302,9 @@ public enum ViewportMapper {
             let mappedFrom = map(point: from, coordinateSpace: geometry.coordSpace, geometry: geometry)
             let mappedTo = map(point: to, coordinateSpace: geometry.coordSpace, geometry: geometry)
             return (.drag(from: mappedFrom.screenPoint, to: mappedTo.screenPoint, button: button, via: via, profile: mapProfile(profile, geometry: geometry)), mappedTo.alreadyVisible ? nil : mappedTo.scrollDelta)
-        case .scroll(let at, let dx, let dy, let style):
+        case .scroll(let at, let dx, let dy, let style, let profile):
             let mapped = map(point: at, coordinateSpace: geometry.coordSpace, geometry: geometry)
-            return (.scroll(at: mapped.screenPoint, dx: dx, dy: dy, style: style), nil)
+            return (.scroll(at: mapped.screenPoint, dx: dx, dy: dy, style: style, profile: mapProfile(profile, geometry: geometry)), nil)
         case .type, .pasteText, .key:
             return (primitive, nil)
         }

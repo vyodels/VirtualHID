@@ -117,6 +117,56 @@ final class HumanizationKitTests: XCTestCase {
         XCTAssertTrue(hypot(sampledOffset.x, sampledOffset.y) <= 6.01)
     }
 
+    func testMotionProfileAdditiveDistributionFieldsRoundTripAndMerge() throws {
+        let base = MotionProfile(
+            pathSkeleton: [LearnedPathPoint(x: 0, y: 0), LearnedPathPoint(x: 10, y: 5)],
+            dwellMsMean: 84
+        )
+        let override = MotionProfile(
+            doubleClickInterClickMs: IntRange(min: 180, max: 240),
+            scrollDeltaY: DoubleRange(min: 42, max: 96),
+            scrollStepCount: IntRange(min: 3, max: 5),
+            dwellMs: IntRange(min: 72, max: 118),
+            interKeyMs: IntRange(min: 90, max: 160),
+            segmentMs: [IntRange(min: 20, max: 30), IntRange(min: 120, max: 160)]
+        )
+
+        let merged = base.merging(override)
+        let data = try JSONEncoder().encode(merged)
+        let decoded = try JSONDecoder().decode(MotionProfile.self, from: data)
+
+        XCTAssertEqual(decoded.dwellMsMean, 84)
+        XCTAssertEqual(decoded.doubleClickInterClickMs, IntRange(min: 180, max: 240))
+        XCTAssertEqual(decoded.scrollDeltaY, DoubleRange(min: 42, max: 96))
+        XCTAssertEqual(decoded.scrollStepCount, IntRange(min: 3, max: 5))
+        XCTAssertEqual(decoded.dwellMs, IntRange(min: 72, max: 118))
+        XCTAssertEqual(decoded.interKeyMs, IntRange(min: 90, max: 160))
+        XCTAssertEqual(decoded.pathSkeleton?.count, 2)
+        XCTAssertEqual(decoded.segmentMs?.count, 2)
+    }
+
+    func testHumanTimingCurveBlendsLearnedSegmentRanges() {
+        var rng = SeededRandomNumberGenerator(seed: 123)
+        let path = (0..<5).map { HumanPoint(x: Double($0 * 50), y: 0) }
+        let profile = MotionProfile(
+            moveSpeedPxS: DoubleRange(min: 300, max: 300),
+            hesitationProbability: 0,
+            segmentMs: [
+                IntRange(min: 18, max: 18),
+                IntRange(min: 220, max: 220),
+                IntRange(min: 18, max: 18),
+                IntRange(min: 220, max: 220)
+            ]
+        )
+
+        let plan = HumanTimingCurve.plan(path: path, requestedDurationMs: 640, profile: profile, rng: &rng)
+
+        XCTAssertEqual(plan.totalDurationMs, 640)
+        XCTAssertEqual(plan.delaysMs.count, 5)
+        XCTAssertGreaterThan(plan.delaysMs[1], plan.delaysMs[0] * 2)
+        XCTAssertGreaterThan(plan.delaysMs[3], plan.delaysMs[2] * 2)
+    }
+
     private func average(_ values: [Double]) -> Double {
         guard values.isEmpty == false else {
             return 0

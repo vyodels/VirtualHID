@@ -105,7 +105,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningDemoStatusLabel: NSTextField?
     private var learningEnabledCheckbox: NSButton?
     private var trainingHostField: NSTextField?
-    private var lastLearningDemoStatus = "尚未演示。点击“演示学习效果”后，HUD 会显示 VirtualHID 生成的轨迹、落点和点击事件。"
+    private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -328,6 +328,44 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     @objc private func runLearningDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "click", title: "完整点击演示")
+    }
+
+    @objc private func runMoveDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "move", title: "移动轨迹演示")
+    }
+
+    @objc private func runClickDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "click", title: "完整点击演示")
+    }
+
+    @objc private func runDoubleClickDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "dblclick", title: "双击演示")
+    }
+
+    @objc private func runDragDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "drag", title: "拖拽演示")
+    }
+
+    @objc private func runScrollDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "scroll", title: "滚轮演示")
+    }
+
+    @objc private func runKeyboardDemoAction(_ sender: Any?) {
+        runLearningDemoStep(action: "keyboard", title: "键盘事件演示")
+    }
+
+    @objc private func stopLearningDemoAction(_ sender: Any?) {
+        do {
+            _ = try call(method: "learning.demo.stop", params: [:])
+            lastLearningDemoStatus = "已停止当前学习效果演示。"
+        } catch {
+            lastLearningDemoStatus = "停止演示失败：\(localizedErrorMessage(error))"
+        }
+        updateControls()
+    }
+
+    private func runLearningDemoStep(action: String, title: String) {
         let runtime: VirtualHIDRuntimeHost
         do {
             if self.runtime == nil {
@@ -337,7 +375,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
             }
             runtime = activeRuntime
-            lastLearningDemoStatus = "安全预览中：HUD 会分步显示未使用习惯模板和使用习惯模板的轨迹、落点、按下/抬起事件；不会实际点击页面。"
+            lastLearningDemoStatus = "\(title) 准备中：HUD 只显示 VirtualHID 规划事件，不会真实点击或输入；本动作完成后会保留轨迹供观察。"
             updateControls()
         } catch {
             lastLearningDemoStatus = "演示失败：\(localizedErrorMessage(error))"
@@ -361,10 +399,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                         "persistent": true
                     ]
                 ])
-                let demoResponse = try runtime.call(method: "learning.demo.run", params: [
+                let demoResponse = try runtime.call(method: "learning.demo.step", params: [
+                    "action": action,
                     "seedDemoTemplate": true,
-                    "actionCount": 4,
-                    "stepDelayMs": 1_250
+                    "demoId": "management-center-\(action)"
                 ])
                 let learningResponse = try runtime.call(method: "learning.inspect", params: ["limit": 20])
                 DispatchQueue.main.async {
@@ -373,7 +411,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                     }
                     self.lastState = HUDState(response: hudResponse)
                     self.lastLearningState = LearningState(response: learningResponse)
-                    self.lastLearningDemoStatus = LearningDemoResult(response: demoResponse).statusText
+                    self.lastLearningDemoStatus = LearningDemoResult(response: demoResponse, fallbackTitle: title).statusText
                     self.updateControls()
                 }
             } catch {
@@ -992,9 +1030,21 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        buttons.addArrangedSubview(actionButton("演示学习效果", action: #selector(runLearningDemoAction(_:))))
-        buttons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
+        buttons.addArrangedSubview(actionButton("移动轨迹", action: #selector(runMoveDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("完整点击", action: #selector(runClickDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("双击", action: #selector(runDoubleClickDemoAction(_:))))
+        buttons.addArrangedSubview(actionButton("拖拽", action: #selector(runDragDemoAction(_:))))
         cardContent.addArrangedSubview(buttons)
+
+        let moreButtons = NSStackView()
+        moreButtons.orientation = .horizontal
+        moreButtons.spacing = 8
+        moreButtons.addArrangedSubview(actionButton("滚轮", action: #selector(runScrollDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("键盘事件", action: #selector(runKeyboardDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("停止当前演示", action: #selector(stopLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
+        cardContent.addArrangedSubview(moreButtons)
+
         card.addContent(cardContent)
         stack.addArrangedSubview(card)
         return stack
@@ -1628,6 +1678,26 @@ private struct LearningTemplateSummary {
            let max = intValue(clickHold["max"]) {
             parts.append("按压 \(min)-\(max)ms")
         }
+        if let doubleClick = motion["doubleClickInterClickMs"] as? [String: Any],
+           let min = intValue(doubleClick["min"]),
+           let max = intValue(doubleClick["max"]) {
+            parts.append("双击间隔 \(min)-\(max)ms")
+        }
+        if let scrollDelta = motion["scrollDeltaY"] as? [String: Any],
+           let min = doubleValue(scrollDelta["min"]),
+           let max = doubleValue(scrollDelta["max"]) {
+            parts.append("滚轮 \(Int(min))-\(Int(max))px")
+        }
+        if let scrollSteps = motion["scrollStepCount"] as? [String: Any],
+           let min = intValue(scrollSteps["min"]),
+           let max = intValue(scrollSteps["max"]) {
+            parts.append("滚轮段数 \(min)-\(max)")
+        }
+        if let scrollDelay = motion["scrollStepDelayMs"] as? [String: Any],
+           let min = intValue(scrollDelay["min"]),
+           let max = intValue(scrollDelay["max"]) {
+            parts.append("滚轮间隔 \(min)-\(max)ms")
+        }
         if let moveSpeed = motion["moveSpeedPxS"] as? [String: Any],
            let min = doubleValue(moveSpeed["min"]),
            let max = doubleValue(moveSpeed["max"]) {
@@ -1641,8 +1711,24 @@ private struct LearningTemplateSummary {
         if let dwell = doubleValue(motion["dwellMsMean"]) {
             parts.append("键停留均值 \(formatMs(dwell))")
         }
+        if let dwellRange = motion["dwellMs"] as? [String: Any],
+           let min = intValue(dwellRange["min"]),
+           let max = intValue(dwellRange["max"]) {
+            parts.append("键停留 \(min)-\(max)ms")
+        }
         if let interKey = doubleValue(motion["interKeyMsMean"]) {
             parts.append("键间隔均值 \(formatMs(interKey))")
+        }
+        if let interKeyRange = motion["interKeyMs"] as? [String: Any],
+           let min = intValue(interKeyRange["min"]),
+           let max = intValue(interKeyRange["max"]) {
+            parts.append("键间隔 \(min)-\(max)ms")
+        }
+        if let skeleton = motion["pathSkeleton"] as? [[String: Any]], !skeleton.isEmpty {
+            parts.append("骨架 \(skeleton.count)点")
+        }
+        if let segments = motion["segmentMs"] as? [[String: Any]], !segments.isEmpty {
+            parts.append("节奏 \(segments.count)段")
         }
         if let straightness = doubleValue(motion["straightnessMean"]) {
             parts.append("直线度 \(String(format: "%.2f", straightness))")
@@ -1657,7 +1743,7 @@ private struct LearningTemplateSummary {
 private struct LearningDemoResult {
     let statusText: String
 
-    init(response: [String: Any]) {
+    init(response: [String: Any], fallbackTitle: String = "学习效果演示") {
         let result = response["result"] as? [String: Any] ?? response
         let assertions = result["assertions"] as? [String: Any] ?? [:]
         guard result["ok"] as? Bool == true else {
@@ -1670,12 +1756,19 @@ private struct LearningDemoResult {
         let actions = result["actions"] as? [[String: Any]] ?? []
         let baseline = result["baseline"] as? [String: Any]
         let effect = result["learningEffect"] as? [String: Any] ?? [:]
-        let templateId = "\(displayActionType(template["actionType"] as? String ?? "click"))习惯 · \(displayScope(template["host"] as? String ?? "__global__"))"
+        let demoAction = result["demoAction"] as? String
+        let templateId = "\(displayActionType(template["actionType"] as? String ?? demoAction ?? "click"))习惯 · \(displayScope(template["host"] as? String ?? "__global__"))"
         let activeFields = (effect["activeFields"] as? [String] ?? []).prefix(8).joined(separator: ", ")
+        let title = result["title"] as? String ?? fallbackTitle
         var lines = [
-            "安全预览完成：已使用 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
+            "\(title) 完成：已使用 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
             "学习生效字段：\(activeFields.isEmpty ? "暂无" : activeFields)。"
         ]
+        if let manual = result["manualControl"] as? [String: Any] {
+            let repeatable = manual["repeatable"] as? Bool == true ? "可重复播放" : "不可重复"
+            let autoAdvance = manual["autoAdvance"] as? Bool == true ? "自动推进" : "不自动推进"
+            lines.append("演示控制：\(repeatable)，\(autoAdvance)，同一时间最多一个演示。")
+        }
         if let baseline {
             lines.append("对照：\(Self.actionSummaryLine(baseline))")
         }
@@ -1767,6 +1860,10 @@ private func doubleValue(_ value: Any?) -> Double? {
 
 private func displayActionType(_ value: String) -> String {
     switch value {
+    case "dblclick":
+        return "双击"
+    case "keyboard":
+        return "键盘"
     case "click":
         return "单击"
     case "drag":

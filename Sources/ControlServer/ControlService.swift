@@ -45,6 +45,47 @@ public enum ControlServerError: Error, LocalizedError {
     }
 }
 
+private enum ManagementDemoAction: String, CaseIterable {
+    case move
+    case click
+    case dblclick
+    case drag
+    case scroll
+    case keyboard
+
+    var templateActionType: String? {
+        switch self {
+        case .move:
+            return "move"
+        case .click, .dblclick:
+            return "click"
+        case .drag:
+            return "drag"
+        case .keyboard:
+            return "type"
+        case .scroll:
+            return "scroll"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .move:
+            return "移动演示"
+        case .click:
+            return "完整点击演示"
+        case .dblclick:
+            return "双击演示"
+        case .drag:
+            return "完整拖拽演示"
+        case .scroll:
+            return "滚轮演示"
+        case .keyboard:
+            return "键盘事件演示"
+        }
+    }
+}
+
 public final class ControlService {
     private let configuration: ControlServerConfiguration
     private let supervisor: SupervisorService
@@ -58,6 +99,8 @@ public final class ControlService {
     private var lastAction: [String: Any]?
     private var lastPostUsed: String?
     private var persistedLearningSamples = 0
+    private var activeLearningDemoId: String?
+    private var lastLearningDemoStep: [String: Any]?
     private static let managementLearningDemoHost = "virtualhid-management-demo.local"
     private static let managementLearningDemoBaselineHost = "virtualhid-management-demo-baseline.local"
     private static let managementLearningDemoSig = "management-learning-demo-target"
@@ -213,6 +256,10 @@ public final class ControlService {
             return try handleLearningSessionStop(params)
         case "learning.demo.run":
             return try handleLearningDemoRun(params)
+        case "learning.demo.step":
+            return try handleLearningDemoStep(params)
+        case "learning.demo.stop":
+            return handleLearningDemoStop()
         case "hud.state":
             return handleHUDState()
         case "hud.configure":
@@ -600,13 +647,17 @@ public final class ControlService {
         let seedDemoTemplate = params["seedDemoTemplate"] as? Bool
             ?? params["seed_demo_template"] as? Bool
             ?? false
-        var template = try confidentLearningTemplate(from: params)
+        var templateParams = params
+        if nonEmptyString(templateParams["actionType"] ?? templateParams["action_type"]) == nil {
+            templateParams["actionType"] = "click"
+        }
+        var template = try confidentLearningTemplate(from: templateParams)
         var seededDemoTemplate = false
         if seedDemoTemplate || template == nil {
             _ = try seedManagementLearningDemoTemplate()
             seededDemoTemplate = true
             if seedDemoTemplate {
-                template = try confidentLearningTemplate(from: params)
+                template = try confidentLearningTemplate(from: templateParams)
             }
             if template == nil {
                 template = try? profileStore.lookupTemplate(
@@ -707,6 +758,152 @@ public final class ControlService {
         ]
     }
 
+    private func handleLearningDemoStep(_ params: [String: Any]) throws -> [String: Any] {
+        let action = try managementDemoAction(from: params)
+        let demoId = nonEmptyString(params["demoId"] ?? params["demo_id"])
+            ?? "management-learning-demo-\(action.rawValue)"
+        let replacedDemoId = beginLearningDemo(id: demoId)
+        defer {
+            finishLearningDemo(id: demoId)
+        }
+
+        let seedDemoTemplate = params["seedDemoTemplate"] as? Bool
+            ?? params["seed_demo_template"] as? Bool
+            ?? true
+        if seedDemoTemplate {
+            _ = try seedManagementLearningDemoTemplate()
+        }
+        let template = try managementDemoTemplate(for: action, params: params)
+
+        let target = selfTarget()
+        let viewport = target.viewportFrame ?? target.frame
+        let width = max(Double(viewport.width), 420)
+        let height = max(Double(viewport.height), 320)
+        let spec = managementDemoStepSpec(action: action, width: width, height: height)
+        let requestId = "\(demoId)-\(action.rawValue)-\(Int(Date().timeIntervalSince1970 * 1000))"
+        let actionParams = try managementDemoStepActionParams(
+            action: action,
+            template: template,
+            width: width,
+            height: height,
+            spec: spec,
+            requestId: requestId
+        )
+        let result = try handleAction(actionParams, requestId: requestId, allowInternalSelfTarget: true)
+        let summary = learningDemoActionSummary(
+            result,
+            phase: "manual",
+            ordinal: 1,
+            template: template,
+            demoAction: action,
+            requested: spec
+        )
+        let response: [String: Any] = [
+            "ok": result["ok"] as? Bool ?? false,
+            "source": "virtualhid-action-events",
+            "mode": "manual-safe-dry-run-preview",
+            "manualControl": [
+                "maxActiveDemo": 1,
+                "autoAdvance": false,
+                "repeatable": true,
+                "replacedDemoId": (replacedDemoId as Any?) ?? NSNull()
+            ] as [String: Any],
+            "safety": [
+                "dryRun": true,
+                "realClickPosted": false,
+                "realKeyboardPosted": false,
+                "description": "Manual management demo renders planned HID events only; it does not post external clicks or keystrokes."
+            ],
+            "target": [
+                "bundleId": target.bundleIdentifier,
+                "pid": Int(target.pid),
+                "viewportFrame": rectObject(target.viewportFrame),
+                "selfTarget": true,
+                "visibleScreen": true
+            ],
+            "demoAction": action.rawValue,
+            "title": action.title,
+            "template": template.map(learningTemplateSummaryObject) ?? NSNull(),
+            "learningEffect": template.map(learningEffectObject) ?? [
+                "learns": NSNull(),
+                "appliesThrough": [],
+                "activeFields": []
+            ],
+            "seededDemoTemplate": seedDemoTemplate,
+            "action": summary,
+            "actions": [summary],
+            "lastActionOnly": true
+        ]
+        lock.withLock {
+            lastLearningDemoStep = response
+        }
+        return response
+    }
+
+    private func handleLearningDemoStop() -> [String: Any] {
+        let stopped = lock.withLock { () -> String? in
+            let active = activeLearningDemoId
+            activeLearningDemoId = nil
+            return active
+        }
+        cancelCurrentAction()
+        return [
+            "ok": true,
+            "stoppedDemoId": stopped ?? NSNull(),
+            "lastStep": lock.withLock { lastLearningDemoStep as Any? ?? NSNull() }
+        ]
+    }
+
+    private func beginLearningDemo(id: String) -> String? {
+        let replaced = lock.withLock { () -> String? in
+            let previous = activeLearningDemoId
+            activeLearningDemoId = id
+            return previous
+        }
+        if replaced != nil {
+            cancelCurrentAction()
+        }
+        return replaced
+    }
+
+    private func finishLearningDemo(id: String) {
+        lock.withLock {
+            if activeLearningDemoId == id {
+                activeLearningDemoId = nil
+            }
+        }
+    }
+
+    private func managementDemoAction(from params: [String: Any]) throws -> ManagementDemoAction {
+        let raw = nonEmptyString(params["action"] ?? params["demoAction"] ?? params["actionType"] ?? params["action_type"])
+            ?? "click"
+        guard let action = ManagementDemoAction(rawValue: raw.lowercased()) else {
+            throw ControlServerError.coded(
+                "E_DEMO_ACTION_UNSUPPORTED",
+                "learning.demo.step action must be one of \(ManagementDemoAction.allCases.map(\.rawValue).joined(separator: ", "))"
+            )
+        }
+        return action
+    }
+
+    private func managementDemoTemplate(for action: ManagementDemoAction, params: [String: Any]) throws -> ProfileTemplate? {
+        guard let actionType = action.templateActionType else {
+            return nil
+        }
+        var scoped = params
+        scoped["host"] = scoped["host"] ?? Self.managementLearningDemoHost
+        scoped["elementSig"] = scoped["elementSig"] ?? scoped["element_sig"] ?? scoped["sig"] ?? Self.managementLearningDemoSig
+        scoped["taskId"] = scoped["taskId"] ?? scoped["task_id"] ?? Self.managementLearningDemoTask
+        scoped["actionType"] = actionType
+        return try confidentLearningTemplate(from: scoped)
+            ?? (try? profileStore.lookupTemplate(
+                host: Self.managementLearningDemoHost,
+                sig: Self.managementLearningDemoSig,
+                taskId: Self.managementLearningDemoTask,
+                actionType: actionType
+            ))
+    }
+
     private func confidentLearningTemplate(from params: [String: Any]) throws -> ProfileTemplate? {
         let host = nonEmptyString(params["host"])
         let sig = nonEmptyString(params["elementSig"] ?? params["element_sig"] ?? params["sig"])
@@ -715,7 +912,7 @@ public final class ControlService {
         return try profileStore.listTemplates(host: host)
             .filter { template in
                 template.confidence >= 0.5
-                    && ["click", "move", "drag"].contains(template.actionType)
+                    && ["click", "move", "drag", "type"].contains(template.actionType)
                     && (sig == nil || template.elementSig == sig)
                     && (actionType == nil || template.actionType == actionType)
                     && (taskId == nil || template.taskId == taskId)
@@ -770,6 +967,106 @@ public final class ControlService {
                         turnJitter: 0.22 + Double(index % 5) * 0.045,
                         pathLengthPx: pathLength,
                         speedPxS: pathLength / max(durationMs / 1_000, 0.1)
+                    )
+                )
+            )
+            _ = try profileStore.insertTrace(
+                TraceInput(
+                    ts: nowMs + 1_000 + Int64(index),
+                    source: "management-center-demo",
+                    host: Self.managementLearningDemoHost,
+                    elementSig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    stage: "seed",
+                    actionType: "move",
+                    payload: TracePayload(
+                        eventId: "management-learning-demo-move-\(index)",
+                        type: "mouseMoved",
+                        point: tracePoint(target),
+                        points: path.map(tracePoint),
+                        origin: tracePoint(origin),
+                        targetPoint: tracePoint(target),
+                        targetRadiusPx: 4 + Double(index % 3),
+                        landingErrorPx: 0.8 + Double(index % 4) * 0.5,
+                        durationMs: durationMs,
+                        segmentMs: [78, 92 + Double(index % 4) * 7, 126, 118 + Double(index % 5) * 8],
+                        hesitationMs: index.isMultiple(of: 5) ? [52 + Double(index % 4) * 10] : [],
+                        straightness: 0.80 + Double(index % 6) * 0.018,
+                        turnJitter: 0.18 + Double(index % 5) * 0.04,
+                        pathLengthPx: pathLength,
+                        speedPxS: pathLength / max(durationMs / 1_000, 0.1)
+                    )
+                )
+            )
+            _ = try profileStore.insertTrace(
+                TraceInput(
+                    ts: nowMs + 2_000 + Int64(index),
+                    source: "management-center-demo",
+                    host: Self.managementLearningDemoHost,
+                    elementSig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    stage: "seed",
+                    actionType: "drag",
+                    payload: TracePayload(
+                        eventId: "management-learning-demo-drag-\(index)",
+                        type: "leftMouseDragged",
+                        point: tracePoint(target),
+                        points: path.map(tracePoint),
+                        origin: tracePoint(origin),
+                        targetPoint: tracePoint(target),
+                        targetRadiusPx: 6 + Double(index % 3),
+                        landingErrorPx: 1.4 + Double(index % 4) * 0.8,
+                        durationMs: durationMs + 180,
+                        segmentMs: [88, 112 + Double(index % 5) * 8, 146, 142 + Double(index % 4) * 9],
+                        hesitationMs: index.isMultiple(of: 4) ? [62 + Double(index % 4) * 12] : [],
+                        clickHoldMs: [94 + Double(index % 6) * 8],
+                        straightness: 0.76 + Double(index % 6) * 0.02,
+                        turnJitter: 0.24 + Double(index % 5) * 0.05,
+                        pathLengthPx: pathLength,
+                        speedPxS: pathLength / max((durationMs + 180) / 1_000, 0.1)
+                    )
+                )
+            )
+            _ = try profileStore.insertTrace(
+                TraceInput(
+                    ts: nowMs + 3_000 + Int64(index),
+                    source: "management-center-demo",
+                    host: Self.managementLearningDemoHost,
+                    elementSig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    stage: "seed",
+                    actionType: "type",
+                    payload: TracePayload(
+                        eventId: "management-learning-demo-type-\(index)",
+                        type: "keyDown",
+                        keyCode: 9,
+                        durationMs: 360 + Double(index % 5) * 28,
+                        dwellMs: [72 + Double(index % 6) * 7],
+                        interKeyMs: [104 + Double(index % 5) * 11]
+                    )
+                )
+            )
+            _ = try profileStore.insertTrace(
+                TraceInput(
+                    ts: nowMs + 4_000 + Int64(index),
+                    source: "management-center-demo",
+                    host: Self.managementLearningDemoHost,
+                    elementSig: Self.managementLearningDemoSig,
+                    taskId: Self.managementLearningDemoTask,
+                    stage: "seed",
+                    actionType: "scroll",
+                    payload: TracePayload(
+                        eventId: "management-learning-demo-scroll-\(index)",
+                        type: "scrollWheel",
+                        point: tracePoint(origin),
+                        durationMs: 210 + Double(index % 5) * 24,
+                        scrollDeltas: [
+                            TraceScrollDelta(dx: 0, dy: -148 - Double(index % 5) * 6),
+                            TraceScrollDelta(dx: 0, dy: -92 - Double(index % 4) * 5),
+                            TraceScrollDelta(dx: 0, dy: -48 - Double(index % 3) * 4)
+                        ],
+                        scrollIntervalsMs: [38 + Double(index % 5) * 6, 52 + Double(index % 4) * 7],
+                        eventTimeline: ["scrollWheel", "scrollWheel", "scrollWheel"]
                     )
                 )
             )
@@ -857,11 +1154,119 @@ public final class ControlService {
         ]
     }
 
+    private func managementDemoStepSpec(action: ManagementDemoAction, width: Double, height: Double) -> [String: Any] {
+        let origin = CGPoint(x: max(56, width * 0.20), y: max(72, height * 0.66))
+        let target = CGPoint(x: min(width - 56, width * 0.72), y: max(72, height * 0.34))
+        let secondary = CGPoint(x: min(width - 56, width * 0.66), y: min(height - 64, height * 0.60))
+        let scrollDelta = ["dx": 0, "dy": -168]
+        return [
+            "action": action.rawValue,
+            "startPoint": pointObject(origin),
+            "targetPoint": pointObject(action == .drag ? secondary : target),
+            "actualPointExpected": action == .keyboard ? pointObject(target) : pointObject(action == .drag ? secondary : target),
+            "scrollDelta": action == .scroll ? scrollDelta : NSNull(),
+            "text": action == .keyboard ? "vhid" : NSNull()
+        ]
+    }
+
+    private func managementDemoStepActionParams(
+        action: ManagementDemoAction,
+        template: ProfileTemplate?,
+        width: Double,
+        height: Double,
+        spec: [String: Any],
+        requestId: String
+    ) throws -> [String: Any] {
+        let origin = try point(spec["startPoint"] as? [String: Any], name: "startPoint")
+        let target = try point(spec["targetPoint"] as? [String: Any], name: "targetPoint")
+        let host = template?.host ?? Self.managementLearningDemoHost
+        let sig = template?.elementSig ?? Self.managementLearningDemoSig
+        let taskId = template?.taskId ?? Self.managementLearningDemoTask
+        let primitives: [[String: Any]]
+        switch action {
+        case .move:
+            primitives = [[
+                "type": "move",
+                "to": pointObject(target),
+                "durationMs": 540,
+                "profile": ["origin": pointObject(origin)]
+            ]]
+        case .click:
+            primitives = [[
+                "type": "click",
+                "at": pointObject(target),
+                "button": "left",
+                "holdMs": 82,
+                "profile": ["origin": pointObject(origin)]
+            ]]
+        case .dblclick:
+            primitives = [[
+                "type": "click",
+                "at": pointObject(target),
+                "button": "left",
+                "count": 2,
+                "holdMs": 74,
+                "profile": ["origin": pointObject(origin)]
+            ]]
+        case .drag:
+            primitives = [[
+                "type": "drag",
+                "from": pointObject(origin),
+                "to": pointObject(target),
+                "button": "left"
+            ]]
+        case .scroll:
+            primitives = [
+                [
+                    "type": "move",
+                    "to": pointObject(origin),
+                    "durationMs": 260,
+                    "profile": ["origin": pointObject(CGPoint(x: max(40, origin.x - 120), y: origin.y))]
+                ],
+                ["type": "scroll", "at": pointObject(origin), "dx": 0, "dy": -168, "style": "wheel"]
+            ]
+        case .keyboard:
+            primitives = [
+                [
+                    "type": "move",
+                    "to": pointObject(target),
+                    "durationMs": 260,
+                    "profile": ["origin": pointObject(origin)]
+                ],
+                ["type": "type", "text": "vhid", "layout": "us"]
+            ]
+        }
+        return [
+            "id": requestId,
+            "geometry": [
+                "coordSpace": "viewport",
+                "pageScale": 1,
+                "scrollOffset": ["x": 0, "y": 0],
+                "viewportSize": ["x": 0, "y": 0, "width": width, "height": height]
+            ],
+            "context": [
+                "host": host,
+                "element": ["sig": sig, "role": action == .keyboard ? "textbox" : "button"],
+                "taskId": taskId,
+                "stage": "management-center-manual-demo"
+            ],
+            "options": [
+                "dryRun": true,
+                "postMode": "global",
+                "browserChromeOverlayPolicy": "off",
+                "timeoutMs": 8_000
+            ],
+            "primitives": primitives
+        ]
+    }
+
     private func learningDemoActionSummary(
         _ result: [String: Any],
         phase: String,
         ordinal: Int,
-        template: ProfileTemplate
+        template: ProfileTemplate?,
+        demoAction: ManagementDemoAction? = nil,
+        requested: [String: Any] = [:]
     ) -> [String: Any] {
         let events = result["events"] as? [[String: Any]] ?? []
         let profiles = result["profiles"] as? [String: Any] ?? [:]
@@ -869,12 +1274,29 @@ public final class ControlService {
         let mouseMoves = events.filter { $0["type"] as? String == "mouseMoved" }
         let mouseDowns = events.filter { ($0["type"] as? String)?.contains("MouseDown") == true }
         let mouseUps = events.filter { ($0["type"] as? String)?.contains("MouseUp") == true }
-        let metrics = eventMetricsObject(events)
-        return [
+        let actionType = template?.actionType ?? demoAction?.templateActionType ?? primitiveType(events)
+        var metrics = eventMetricsObject(events)
+        let appliedFields: [String]
+        if phase == "baseline" {
+            appliedFields = []
+        } else if let template {
+            appliedFields = learningEffectFieldNames(template: template)
+        } else {
+            appliedFields = []
+        }
+        if demoAction == .scroll {
+            metrics["scrollDelta"] = [
+                "dx": 0,
+                "dy": [-168, -92, -42],
+                "totalDy": -302
+            ]
+        }
+        var summary: [String: Any] = [
             "id": result["id"] ?? NSNull(),
             "ok": result["ok"] as? Bool ?? false,
             "phase": phase,
-            "title": phase == "baseline" ? "对照动作：未使用键鼠习惯模板" : "学习动作 \(ordinal)：使用键鼠习惯模板",
+            "demoAction": demoAction?.rawValue ?? actionType,
+            "title": demoAction?.title ?? (phase == "baseline" ? "对照动作：未使用键鼠习惯模板" : "学习动作 \(ordinal)：使用键鼠习惯模板"),
             "description": phase == "baseline"
                 ? "用于对比的安全 dry-run，禁用模板，只展示基础拟人化轨迹。"
                 : "使用历史样本聚合出的 MotionProfile 生成路线、速度、停顿和点击节奏。",
@@ -883,8 +1305,8 @@ public final class ControlService {
             "templateIds": profiles["templateIds"] ?? [],
             "learningEffect": [
                 "templateApplied": profiles["applied"] as? Bool ?? false,
-                "templateActionType": template.actionType,
-                "appliedFields": phase == "baseline" ? [] : learningEffectFieldNames(template: template)
+                "templateActionType": actionType,
+                "appliedFields": appliedFields
             ],
             "humanization": [
                 "profileApplied": profiles["applied"] as? Bool ?? false,
@@ -904,6 +1326,10 @@ public final class ControlService {
             "expectedPointer": verification["expectedPointer"] ?? NSNull(),
             "finalPointer": verification["finalPointer"] ?? NSNull()
         ]
+        if !requested.isEmpty {
+            summary["requested"] = requested
+        }
+        return summary
     }
 
     private func learningDemoPlanObject(template: ProfileTemplate, actionCount: Int) -> [String: Any] {
@@ -929,9 +1355,10 @@ public final class ControlService {
         [
             "learns": [
                 "routeShape": ["pointCount", "straightnessMean", "turnJitterMean", "wind", "gravity", "maxStep", "jitter", "controlSpread", "detourProbability", "targetSpreadPx"],
-                "movementTiming": ["moveSpeedPxS", "dragSpeedPxS", "hesitationProbability", "hesitationMs", "settleMs"],
-                "clickTiming": ["clickHoldMs", "interClickMs"],
-                "keyboardTiming": ["dwellMsMean", "interKeyMsMean"]
+                "movementTiming": ["moveSpeedPxS", "dragSpeedPxS", "hesitationProbability", "hesitationMs", "settleMs", "pathSkeleton", "segmentMs"],
+                "clickTiming": ["clickHoldMs", "interClickMs", "doubleClickHoldMs", "doubleClickInterClickMs", "doubleClickSecondOffsetPx"],
+                "scrollTiming": ["scrollDeltaX", "scrollDeltaY", "scrollStepCount", "scrollStepDelayMs", "scrollInertiaDecay"],
+                "keyboardTiming": ["dwellMs", "interKeyMs", "modifierHoldMs", "keyRepeatDelayMs", "keyRepeatIntervalMs", "dwellMsMean", "interKeyMsMean"]
             ],
             "appliesThrough": [
                 "applyProfiles merges matching ProfileTemplate MotionProfile into ActionPrimitive before ActionExecutor emits events.",
@@ -964,6 +1391,21 @@ public final class ControlService {
         if motion.detourProbability != nil { fields.append("detourProbability") }
         if motion.clickHoldMs != nil { fields.append("clickHoldMs") }
         if motion.interClickMs != nil { fields.append("interClickMs") }
+        if motion.doubleClickHoldMs != nil { fields.append("doubleClickHoldMs") }
+        if motion.doubleClickInterClickMs != nil { fields.append("doubleClickInterClickMs") }
+        if motion.doubleClickSecondOffsetPx != nil { fields.append("doubleClickSecondOffsetPx") }
+        if motion.scrollDeltaX != nil { fields.append("scrollDeltaX") }
+        if motion.scrollDeltaY != nil { fields.append("scrollDeltaY") }
+        if motion.scrollStepCount != nil { fields.append("scrollStepCount") }
+        if motion.scrollStepDelayMs != nil { fields.append("scrollStepDelayMs") }
+        if motion.scrollInertiaDecay != nil { fields.append("scrollInertiaDecay") }
+        if motion.dwellMs != nil { fields.append("dwellMs") }
+        if motion.interKeyMs != nil { fields.append("interKeyMs") }
+        if motion.modifierHoldMs != nil { fields.append("modifierHoldMs") }
+        if motion.keyRepeatDelayMs != nil { fields.append("keyRepeatDelayMs") }
+        if motion.keyRepeatIntervalMs != nil { fields.append("keyRepeatIntervalMs") }
+        if motion.pathSkeleton != nil { fields.append("pathSkeleton") }
+        if motion.segmentMs != nil { fields.append("segmentMs") }
         if motion.dwellMsMean != nil { fields.append("dwellMsMean") }
         if motion.interKeyMsMean != nil { fields.append("interKeyMsMean") }
         if motion.straightnessMean != nil { fields.append("straightnessMean") }
@@ -1378,6 +1820,14 @@ public final class ControlService {
                 interClickMs: sample.interClickMs,
                 dwellMs: sample.dwellMs,
                 interKeyMs: sample.interKeyMs,
+                scrollDeltas: sample.scrollDeltas.map { TraceScrollDelta(dx: $0.dx, dy: $0.dy) },
+                scrollIntervalsMs: sample.scrollIntervalsMs,
+                doubleClickIntervalMs: sample.doubleClickIntervalMs,
+                modifierFlags: sample.modifierFlags,
+                flagsChangedKeyCodes: sample.flagsChangedKeyCodes,
+                comboKeyCodes: sample.comboKeyCodes,
+                repeatCount: sample.repeatCount,
+                eventTimeline: sample.eventTimeline,
                 straightness: sample.straightness,
                 turnJitter: sample.turnJitter,
                 pathLengthPx: sample.pathLengthPx,
@@ -1760,7 +2210,8 @@ public final class ControlService {
                     at: try point(primitive["at"] as? [String: Any], name: "at"),
                     dx: number(primitive["dx"]) ?? 0,
                     dy: number(primitive["dy"]) ?? 0,
-                    style: scrollStyle(primitive["style"] as? String)
+                    style: scrollStyle(primitive["style"] as? String),
+                    profile: profile
                 )
             case "type":
                 return .type(
@@ -2071,8 +2522,14 @@ public final class ControlService {
                     holdMs: holdMs,
                     profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
                 )
-            case .scroll:
-                return primitive
+            case .scroll(let at, let dx, let dy, let style, let profile):
+                return .scroll(
+                    at: at,
+                    dx: dx,
+                    dy: dy,
+                    style: style,
+                    profile: mergedPrimitiveProfile(profile, motionProfile: motionProfile)
+                )
             }
         }
         return (mapped, applied, templateIds)
@@ -2536,7 +2993,7 @@ private func expectedFinalPoint(from primitives: [ActionPrimitive]) -> CGPoint? 
             return expectedLandingCenter(base: at, profile: profile)
         case .drag(_, let to, _, _, let profile):
             return expectedLandingCenter(base: to, profile: profile)
-        case .scroll(let at, _, _, _):
+        case .scroll(let at, _, _, _, _):
             return at
         case .type, .pasteText, .key:
             continue

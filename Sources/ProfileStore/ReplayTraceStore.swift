@@ -28,6 +28,14 @@ public struct ReplayTraceFingerprint: Codable, Equatable {
     public let interClickMs: [Double]
     public let dwellMs: [Double]
     public let interKeyMs: [Double]
+    public let scrollDeltas: [TraceScrollDelta]
+    public let scrollIntervalsMs: [Double]
+    public let doubleClickIntervalMs: [Double]
+    public let modifierFlags: [UInt64]
+    public let flagsChangedKeyCodes: [UInt16]
+    public let comboKeyCodes: [UInt16]
+    public let repeatCount: Int
+    public let eventTimeline: [String]
     public let behaviorMode: HumanBehaviorMode?
     public let flavor: MotionFlavor?
     public let landingErrorPx: Double?
@@ -45,6 +53,14 @@ public struct ReplayTraceFingerprint: Codable, Equatable {
         interClickMs: [Double],
         dwellMs: [Double],
         interKeyMs: [Double],
+        scrollDeltas: [TraceScrollDelta] = [],
+        scrollIntervalsMs: [Double] = [],
+        doubleClickIntervalMs: [Double] = [],
+        modifierFlags: [UInt64] = [],
+        flagsChangedKeyCodes: [UInt16] = [],
+        comboKeyCodes: [UInt16] = [],
+        repeatCount: Int = 0,
+        eventTimeline: [String] = [],
         behaviorMode: HumanBehaviorMode?,
         flavor: MotionFlavor?,
         landingErrorPx: Double?,
@@ -61,11 +77,72 @@ public struct ReplayTraceFingerprint: Codable, Equatable {
         self.interClickMs = interClickMs
         self.dwellMs = dwellMs
         self.interKeyMs = interKeyMs
+        self.scrollDeltas = scrollDeltas
+        self.scrollIntervalsMs = scrollIntervalsMs
+        self.doubleClickIntervalMs = doubleClickIntervalMs
+        self.modifierFlags = modifierFlags
+        self.flagsChangedKeyCodes = flagsChangedKeyCodes
+        self.comboKeyCodes = comboKeyCodes
+        self.repeatCount = max(0, repeatCount)
+        self.eventTimeline = eventTimeline
         self.behaviorMode = behaviorMode
         self.flavor = flavor
         self.landingErrorPx = landingErrorPx
         self.durationMs = durationMs
         self.quality = quality
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case ts
+        case source
+        case pathSkeleton
+        case segmentMs
+        case hesitationMs
+        case clickHoldMs
+        case interClickMs
+        case dwellMs
+        case interKeyMs
+        case scrollDeltas
+        case scrollIntervalsMs
+        case doubleClickIntervalMs
+        case modifierFlags
+        case flagsChangedKeyCodes
+        case comboKeyCodes
+        case repeatCount
+        case eventTimeline
+        case behaviorMode
+        case flavor
+        case landingErrorPx
+        case durationMs
+        case quality
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(ReplayTraceKey.self, forKey: .key)
+        ts = try container.decode(Int64.self, forKey: .ts)
+        source = try container.decode(String.self, forKey: .source)
+        pathSkeleton = try container.decodeIfPresent([TracePoint].self, forKey: .pathSkeleton) ?? []
+        segmentMs = try container.decodeIfPresent([Double].self, forKey: .segmentMs) ?? []
+        hesitationMs = try container.decodeIfPresent([Double].self, forKey: .hesitationMs) ?? []
+        clickHoldMs = try container.decodeIfPresent([Double].self, forKey: .clickHoldMs) ?? []
+        interClickMs = try container.decodeIfPresent([Double].self, forKey: .interClickMs) ?? []
+        dwellMs = try container.decodeIfPresent([Double].self, forKey: .dwellMs) ?? []
+        interKeyMs = try container.decodeIfPresent([Double].self, forKey: .interKeyMs) ?? []
+        scrollDeltas = try container.decodeIfPresent([TraceScrollDelta].self, forKey: .scrollDeltas) ?? []
+        scrollIntervalsMs = try container.decodeIfPresent([Double].self, forKey: .scrollIntervalsMs) ?? []
+        doubleClickIntervalMs = try container.decodeIfPresent([Double].self, forKey: .doubleClickIntervalMs) ?? []
+        modifierFlags = try container.decodeIfPresent([UInt64].self, forKey: .modifierFlags) ?? []
+        flagsChangedKeyCodes = try container.decodeIfPresent([UInt16].self, forKey: .flagsChangedKeyCodes) ?? []
+        comboKeyCodes = try container.decodeIfPresent([UInt16].self, forKey: .comboKeyCodes) ?? []
+        repeatCount = try container.decodeIfPresent(Int.self, forKey: .repeatCount) ?? 0
+        eventTimeline = try container.decodeIfPresent([String].self, forKey: .eventTimeline) ?? []
+        behaviorMode = try container.decodeIfPresent(HumanBehaviorMode.self, forKey: .behaviorMode)
+        flavor = try container.decodeIfPresent(MotionFlavor.self, forKey: .flavor)
+        landingErrorPx = try container.decodeIfPresent(Double.self, forKey: .landingErrorPx)
+        durationMs = try container.decodeIfPresent(Double.self, forKey: .durationMs)
+        quality = try container.decode(Double.self, forKey: .quality)
     }
 }
 
@@ -175,6 +252,14 @@ public final class ReplayTraceStore {
             interClickMs: compact(input.payload.interClickMs),
             dwellMs: compact(input.payload.dwellMs),
             interKeyMs: compact(input.payload.interKeyMs),
+            scrollDeltas: compactDeltas(input.payload.scrollDeltas),
+            scrollIntervalsMs: compact(input.payload.scrollIntervalsMs),
+            doubleClickIntervalMs: compact(input.payload.doubleClickIntervalMs),
+            modifierFlags: sortedUnique(input.payload.modifierFlags),
+            flagsChangedKeyCodes: sortedUnique(input.payload.flagsChangedKeyCodes),
+            comboKeyCodes: sortedUnique(input.payload.comboKeyCodes),
+            repeatCount: input.payload.repeatCount,
+            eventTimeline: compactTimeline(input.payload.eventTimeline),
             behaviorMode: input.payload.behaviorMode,
             flavor: input.payload.flavor,
             landingErrorPx: input.payload.landingErrorPx,
@@ -217,10 +302,37 @@ private func qualityScore(payload: TracePayload, skeleton: [TracePoint]) -> Doub
     if skeleton.count >= 4 { score += 0.25 }
     if payload.durationMs != nil { score += 0.12 }
     if !payload.segmentMs.isEmpty { score += 0.12 }
+    if !payload.scrollDeltas.isEmpty || !payload.doubleClickIntervalMs.isEmpty || payload.repeatCount > 0 { score += 0.08 }
+    if !payload.modifierFlags.isEmpty || !payload.flagsChangedKeyCodes.isEmpty || !payload.comboKeyCodes.isEmpty { score += 0.06 }
     if payload.landingErrorPx != nil { score += 0.10 }
     if payload.behaviorMode != nil { score += 0.08 }
     if payload.flavor != nil { score += 0.08 }
     return min(1, score)
+}
+
+private func compactDeltas(_ values: [TraceScrollDelta], limit: Int = 32) -> [TraceScrollDelta] {
+    downsample(values.enumerated().map { index, value in TracePoint(x: Double(index), y: 0) }, limit: limit)
+        .compactMap { point in
+            let index = Int(point.x)
+            return values.indices.contains(index) ? values[index] : nil
+        }
+}
+
+private func compactTimeline(_ values: [String], limit: Int = 32) -> [String] {
+    guard values.count > limit else {
+        return values
+    }
+    guard limit > 1 else {
+        return values.last.map { [$0] } ?? []
+    }
+    return (0..<limit).compactMap { index in
+        let raw = Double(index) * Double(values.count - 1) / Double(limit - 1)
+        return values[Int(raw.rounded())]
+    }
+}
+
+private func sortedUnique<T: Comparable & Hashable>(_ values: [T]) -> [T] {
+    Array(Set(values)).sorted()
 }
 
 private func behaviorBlend(_ items: [ReplayTraceFingerprint]) -> BehaviorBlend {

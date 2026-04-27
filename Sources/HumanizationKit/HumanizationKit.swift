@@ -106,6 +106,16 @@ public struct DoubleRange: Codable, Hashable {
     }
 }
 
+public struct LearnedPathPoint: Codable, Hashable {
+    public let x: Double
+    public let y: Double
+
+    public init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
+}
+
 public struct MotionProfile: Codable, Hashable {
     public var flavor: MotionFlavor?
     public var behaviorBlend: BehaviorBlend?
@@ -125,6 +135,21 @@ public struct MotionProfile: Codable, Hashable {
     public var detourProbability: Double?
     public var clickHoldMs: IntRange?
     public var interClickMs: IntRange?
+    public var doubleClickHoldMs: IntRange?
+    public var doubleClickInterClickMs: IntRange?
+    public var doubleClickSecondOffsetPx: DoubleRange?
+    public var scrollDeltaX: DoubleRange?
+    public var scrollDeltaY: DoubleRange?
+    public var scrollStepCount: IntRange?
+    public var scrollStepDelayMs: IntRange?
+    public var scrollInertiaDecay: DoubleRange?
+    public var dwellMs: IntRange?
+    public var interKeyMs: IntRange?
+    public var modifierHoldMs: IntRange?
+    public var keyRepeatDelayMs: IntRange?
+    public var keyRepeatIntervalMs: IntRange?
+    public var pathSkeleton: [LearnedPathPoint]?
+    public var segmentMs: [IntRange]?
     public var dwellMsMean: Double?
     public var interKeyMsMean: Double?
     public var straightnessMean: Double?
@@ -149,6 +174,21 @@ public struct MotionProfile: Codable, Hashable {
         detourProbability: Double? = nil,
         clickHoldMs: IntRange? = nil,
         interClickMs: IntRange? = nil,
+        doubleClickHoldMs: IntRange? = nil,
+        doubleClickInterClickMs: IntRange? = nil,
+        doubleClickSecondOffsetPx: DoubleRange? = nil,
+        scrollDeltaX: DoubleRange? = nil,
+        scrollDeltaY: DoubleRange? = nil,
+        scrollStepCount: IntRange? = nil,
+        scrollStepDelayMs: IntRange? = nil,
+        scrollInertiaDecay: DoubleRange? = nil,
+        dwellMs: IntRange? = nil,
+        interKeyMs: IntRange? = nil,
+        modifierHoldMs: IntRange? = nil,
+        keyRepeatDelayMs: IntRange? = nil,
+        keyRepeatIntervalMs: IntRange? = nil,
+        pathSkeleton: [LearnedPathPoint]? = nil,
+        segmentMs: [IntRange]? = nil,
         dwellMsMean: Double? = nil,
         interKeyMsMean: Double? = nil,
         straightnessMean: Double? = nil,
@@ -172,6 +212,21 @@ public struct MotionProfile: Codable, Hashable {
         self.detourProbability = detourProbability
         self.clickHoldMs = clickHoldMs
         self.interClickMs = interClickMs
+        self.doubleClickHoldMs = doubleClickHoldMs
+        self.doubleClickInterClickMs = doubleClickInterClickMs
+        self.doubleClickSecondOffsetPx = doubleClickSecondOffsetPx
+        self.scrollDeltaX = scrollDeltaX
+        self.scrollDeltaY = scrollDeltaY
+        self.scrollStepCount = scrollStepCount
+        self.scrollStepDelayMs = scrollStepDelayMs
+        self.scrollInertiaDecay = scrollInertiaDecay
+        self.dwellMs = dwellMs
+        self.interKeyMs = interKeyMs
+        self.modifierHoldMs = modifierHoldMs
+        self.keyRepeatDelayMs = keyRepeatDelayMs
+        self.keyRepeatIntervalMs = keyRepeatIntervalMs
+        self.pathSkeleton = pathSkeleton
+        self.segmentMs = segmentMs
         self.dwellMsMean = dwellMsMean
         self.interKeyMsMean = interKeyMsMean
         self.straightnessMean = straightnessMean
@@ -258,6 +313,15 @@ public enum HumanTimingCurve {
             weights[extraIndex] += Double(hesitation)
         }
 
+        if let learnedSegmentMs = profile?.segmentMs, learnedSegmentMs.isEmpty == false {
+            let learnedWeights = sampledSegmentWeights(learnedSegmentMs, count: segmentLengths.count, rng: &rng)
+            if learnedWeights.count == weights.count {
+                weights = zip(weights, learnedWeights).map { generated, learned in
+                    max(0.001, generated * 0.35 + learned * 0.65)
+                }
+            }
+        }
+
         let weightSum = max(weights.reduce(0, +), 1)
         var delays = [Int](repeating: 0, count: path.count)
         var allocated = 0
@@ -268,6 +332,30 @@ public enum HumanTimingCurve {
             allocated += delay
         }
         return HumanTimingPlan(delaysMs: delays, totalDurationMs: totalDurationMs, behaviorMode: behaviorMode)
+    }
+
+    private static func sampledSegmentWeights<R: RandomNumberGenerator>(
+        _ ranges: [IntRange],
+        count: Int,
+        rng: inout R
+    ) -> [Double] {
+        guard count > 0, ranges.isEmpty == false else {
+            return []
+        }
+        let sampled = ranges.map { max(1, $0.sample(rng: &rng)) }
+        guard sampled.count != count else {
+            return sampled.map(Double.init)
+        }
+        guard sampled.count > 1 else {
+            return Array(repeating: Double(sampled[0]), count: count)
+        }
+        return (0..<count).map { outputIndex in
+            let raw = Double(outputIndex) * Double(sampled.count - 1) / Double(max(count - 1, 1))
+            let lower = Int(floor(raw))
+            let upper = min(sampled.count - 1, lower + 1)
+            let progress = raw - Double(lower)
+            return Double(sampled[lower]) * (1 - progress) + Double(sampled[upper]) * progress
+        }
     }
 
     private static func turnMagnitudes(_ path: [HumanPoint]) -> [Double] {
@@ -923,6 +1011,21 @@ public extension MotionProfile {
             detourProbability: override.detourProbability ?? detourProbability,
             clickHoldMs: override.clickHoldMs ?? clickHoldMs,
             interClickMs: override.interClickMs ?? interClickMs,
+            doubleClickHoldMs: override.doubleClickHoldMs ?? doubleClickHoldMs,
+            doubleClickInterClickMs: override.doubleClickInterClickMs ?? doubleClickInterClickMs,
+            doubleClickSecondOffsetPx: override.doubleClickSecondOffsetPx ?? doubleClickSecondOffsetPx,
+            scrollDeltaX: override.scrollDeltaX ?? scrollDeltaX,
+            scrollDeltaY: override.scrollDeltaY ?? scrollDeltaY,
+            scrollStepCount: override.scrollStepCount ?? scrollStepCount,
+            scrollStepDelayMs: override.scrollStepDelayMs ?? scrollStepDelayMs,
+            scrollInertiaDecay: override.scrollInertiaDecay ?? scrollInertiaDecay,
+            dwellMs: override.dwellMs ?? dwellMs,
+            interKeyMs: override.interKeyMs ?? interKeyMs,
+            modifierHoldMs: override.modifierHoldMs ?? modifierHoldMs,
+            keyRepeatDelayMs: override.keyRepeatDelayMs ?? keyRepeatDelayMs,
+            keyRepeatIntervalMs: override.keyRepeatIntervalMs ?? keyRepeatIntervalMs,
+            pathSkeleton: override.pathSkeleton ?? pathSkeleton,
+            segmentMs: override.segmentMs ?? segmentMs,
             dwellMsMean: override.dwellMsMean ?? dwellMsMean,
             interKeyMsMean: override.interKeyMsMean ?? interKeyMsMean,
             straightnessMean: override.straightnessMean ?? straightnessMean,
@@ -1010,6 +1113,68 @@ public extension MotionProfile {
         max(24, interClickMs?.sample(rng: &rng) ?? defaultValue)
     }
 
+    func resolvedDoubleClickHoldMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        max(12, doubleClickHoldMs?.sample(rng: &rng) ?? clickHoldMs?.sample(rng: &rng) ?? defaultValue)
+    }
+
+    func resolvedDoubleClickInterClickMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        max(24, doubleClickInterClickMs?.sample(rng: &rng) ?? interClickMs?.sample(rng: &rng) ?? defaultValue)
+    }
+
+    func resolvedDoubleClickSecondOffset<R: RandomNumberGenerator>(rng: inout R) -> HumanPoint {
+        guard let range = doubleClickSecondOffsetPx else {
+            return HumanPoint(x: 0, y: 0)
+        }
+        let radius = max(0, range.sample(rng: &rng))
+        guard radius > 0 else {
+            return HumanPoint(x: 0, y: 0)
+        }
+        let angle = rng.nextDouble(in: 0..<(Double.pi * 2))
+        return HumanPoint(x: cos(angle) * radius, y: sin(angle) * radius)
+    }
+
+    func resolvedScrollStepCount<R: RandomNumberGenerator>(fallback: Int, rng: inout R) -> Int {
+        max(1, scrollStepCount?.sample(rng: &rng) ?? fallback)
+    }
+
+    func resolvedScrollDelayMs<R: RandomNumberGenerator>(fallback: Int, rng: inout R) -> Int {
+        max(0, scrollStepDelayMs?.sample(rng: &rng) ?? fallback)
+    }
+
+    func resolvedScrollInertiaDecay<R: RandomNumberGenerator>(rng: inout R) -> Double {
+        min(0.98, max(0.20, scrollInertiaDecay?.sample(rng: &rng) ?? 0.72))
+    }
+
+    func resolvedScrollDelta<R: RandomNumberGenerator>(requestedDx: Double, requestedDy: Double, rng: inout R) -> HumanPoint {
+        let dx = signedSample(range: scrollDeltaX, requested: requestedDx, rng: &rng)
+        let dy = signedSample(range: scrollDeltaY, requested: requestedDy, rng: &rng)
+        return HumanPoint(x: dx, y: dy)
+    }
+
+    func resolvedDwellMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        if let dwellMs {
+            return max(12, dwellMs.sample(rng: &rng))
+        }
+        if let dwellMsMean {
+            let lower = max(24, Int((dwellMsMean * 0.68).rounded()))
+            let upper = max(lower + 8, Int((dwellMsMean * 1.36).rounded()))
+            return IntRange(min: lower, max: upper).sample(rng: &rng)
+        }
+        return max(12, defaultValue)
+    }
+
+    func resolvedInterKeyMs<R: RandomNumberGenerator>(defaultValue: Int, rng: inout R) -> Int {
+        if let interKeyMs {
+            return max(0, interKeyMs.sample(rng: &rng))
+        }
+        if let interKeyMsMean {
+            let lower = max(16, Int((interKeyMsMean * 0.65).rounded()))
+            let upper = max(lower + 8, Int((interKeyMsMean * 1.45).rounded()))
+            return IntRange(min: lower, max: upper).sample(rng: &rng)
+        }
+        return max(0, defaultValue)
+    }
+
     func resolvedTargetOffset<R: RandomNumberGenerator>(rng: inout R) -> HumanPoint {
         let spread = max(targetSpreadPx ?? 0, 0)
         guard spread > 0 else {
@@ -1021,6 +1186,20 @@ public extension MotionProfile {
             x: cos(angle) * radius,
             y: sin(angle) * radius
         )
+    }
+
+    private func signedSample<R: RandomNumberGenerator>(range: DoubleRange?, requested: Double, rng: inout R) -> Double {
+        guard let range else {
+            return requested
+        }
+        let magnitude = max(0, abs(range.sample(rng: &rng)))
+        if requested < 0 {
+            return -magnitude
+        }
+        if requested > 0 {
+            return magnitude
+        }
+        return rng.nextDouble(in: 0..<1) < 0.5 ? -magnitude : magnitude
     }
 }
 
