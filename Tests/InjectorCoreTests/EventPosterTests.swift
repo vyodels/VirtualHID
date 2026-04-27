@@ -195,7 +195,7 @@ final class EventPosterTests: XCTestCase {
         }
     }
 
-    func testLearnedPathSkeletonAndSegmentsAffectDryRunMoveShapeAndTiming() throws {
+    func testLearnedPathSkeletonAndSegmentsProduceDenseSmoothNonUniformDryRunMove() throws {
         let executor = ActionExecutor(target: testTarget())
         let profile = MotionProfile(
             pointCount: IntRange(min: 5, max: 5),
@@ -233,12 +233,58 @@ final class EventPosterTests: XCTestCase {
         let yValues = points.map { $0.y }
         let deltas = timestampDeltas(result.events)
 
-        XCTAssertEqual(result.events.count, 5)
+        XCTAssertGreaterThanOrEqual(result.events.count, 18)
         XCTAssertEqual(points.first?.x, 20)
         XCTAssertEqual(points.last?.x, 220)
         XCTAssertGreaterThan(yValues.max() ?? 0, 70)
-        XCTAssertGreaterThan(deltas.max() ?? 0, 100)
-        XCTAssertLessThan(deltas.min() ?? 0, 100)
+        XCTAssertLessThan(maxTurnRadians(points), 1.25)
+        let maxDelta = deltas.max() ?? 0
+        let minDelta = deltas.min() ?? 0
+        XCTAssertGreaterThan(maxDelta, 20)
+        XCTAssertGreaterThan(maxDelta, minDelta * 1.5)
+    }
+
+    func testLearnedPathSkeletonConstrainsShapeWithoutDeterministicReplay() throws {
+        let profile = MotionProfile(
+            pointCount: IntRange(min: 24, max: 24),
+            hesitationProbability: 0,
+            pathSkeleton: [
+                LearnedPathPoint(x: 0, y: 0),
+                LearnedPathPoint(x: 45, y: 72),
+                LearnedPathPoint(x: 100, y: 0)
+            ]
+        )
+        let primitive = ActionPrimitive.move(
+            to: CGPoint(x: 260, y: 40),
+            via: .profile(TemplateReference(id: "shape", motionProfile: profile)),
+            durationMs: 520,
+            profile: PrimitiveProfile(origin: CGPoint(x: 30, y: 40))
+        )
+        let first = try ActionExecutor(target: testTarget()).execute(
+            ActionRequest(
+                id: "shape-a",
+                primitives: [primitive],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+        let second = try ActionExecutor(target: testTarget()).execute(
+            ActionRequest(
+                id: "shape-b",
+                primitives: [primitive],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let firstPoints = first.events.compactMap { $0.location }
+        let secondPoints = second.events.compactMap { $0.location }
+
+        XCTAssertEqual(firstPoints.count, secondPoints.count)
+        XCTAssertGreaterThan(firstPoints.map(\.y).max() ?? 0, 95)
+        XCTAssertGreaterThan(secondPoints.map(\.y).max() ?? 0, 95)
+        XCTAssertNotEqual(firstPoints, secondPoints)
+        XCTAssertLessThan(averagePointDistance(firstPoints, secondPoints), 10)
     }
 
     func testLearnedDoubleClickProfileControlsDryRunDownUpIntervals() throws {
@@ -357,6 +403,35 @@ private func timestampDeltas(_ events: [InjectedEvent]) -> [Double] {
     return zip(dates.dropFirst(), dates).map { next, previous in
         next.timeIntervalSince(previous) * 1000
     }
+}
+
+private func maxTurnRadians(_ points: [CodablePoint]) -> Double {
+    guard points.count > 2 else {
+        return 0
+    }
+    return (1..<(points.count - 1)).map { index in
+        let previous = points[index - 1]
+        let current = points[index]
+        let next = points[index + 1]
+        let a1 = atan2(current.y - previous.y, current.x - previous.x)
+        let a2 = atan2(next.y - current.y, next.x - current.x)
+        var delta = abs(a2 - a1)
+        while delta > Double.pi {
+            delta = abs(delta - Double.pi * 2)
+        }
+        return delta
+    }.max() ?? 0
+}
+
+private func averagePointDistance(_ left: [CodablePoint], _ right: [CodablePoint]) -> Double {
+    let pairs = zip(left, right)
+    var total = 0.0
+    var count = 0
+    for pair in pairs {
+        total += hypot(pair.0.x - pair.1.x, pair.0.y - pair.1.y)
+        count += 1
+    }
+    return count == 0 ? 0 : total / Double(count)
 }
 
 private final class RecordingBackend: EventPostingBackend {

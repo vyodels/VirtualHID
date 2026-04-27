@@ -28,8 +28,8 @@ assert data["initial"]["result"]["settings"]["enabled"] is False, data
 assert data["passiveState"]["ok"], data
 assert data["passiveState"]["result"]["settings"]["enabled"] is True, data
 assert data["passiveState"]["result"]["settings"]["mode"] == "passive", data
-assert data["traceCountGlobal"] == 5, data
-assert data["traceCountTraining"] == 5, data
+assert data["traceCountGlobal"] == 10, data
+assert data["traceCountTraining"] == 10, data
 assert data["passiveTemplate"]["sampleSize"] == 5, data
 assert data["trainingTemplate"]["sampleSize"] == 5, data
 assert data["trainingStop"]["ok"], data

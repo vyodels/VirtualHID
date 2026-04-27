@@ -776,7 +776,7 @@ public final class ActionExecutor {
         motionProfile: MotionProfile?,
         rng: inout SystemRandomNumberGenerator
     ) -> [CGPoint] {
-        let count = max(pointCount, 1)
+        let count = effectivePointCount(from: start, to: end, requested: pointCount, motionProfile: motionProfile)
         if let learned = learnedSkeletonPath(from: start, to: end, count: count, motionProfile: motionProfile, rng: &rng) {
             return learned
         }
@@ -802,6 +802,17 @@ public final class ActionExecutor {
             return Array(firstLeg.dropLast()) + secondLeg
         }
         return baseTrajectoryPath(from: start, to: end, style: style, pointCount: count, motionProfile: motionProfile, rng: &rng)
+    }
+
+    private func effectivePointCount(from start: CGPoint, to end: CGPoint, requested: Int, motionProfile: MotionProfile?) -> Int {
+        let requested = max(requested, 1)
+        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 2 else {
+            return requested
+        }
+        let distance = hypot(end.x - start.x, end.y - start.y)
+        let densityCount = Int((distance / 10.0).rounded(.up))
+        let skeletonCount = skeleton.count * 6
+        return min(max(requested, densityCount, skeletonCount, 18), 96)
     }
 
     private func baseTrajectoryPath(
@@ -881,7 +892,7 @@ public final class ActionExecutor {
         let sideScale = min(max(targetDistance / sourceDistance, 0.35), 2.8)
         let jitterLimit = min(max(targetDistance * 0.018, 0.8), 7.0)
 
-        var mapped = skeleton.enumerated().map { index, point -> CGPoint in
+        let mapped = skeleton.enumerated().map { index, point -> CGPoint in
             if index == 0 {
                 return start
             }
@@ -893,15 +904,17 @@ public final class ActionExecutor {
             let progress = min(max((rel.x * sourceUnit.x + rel.y * sourceUnit.y) / sourceDistance, 0), 1)
             let side = (rel.x * sourceNormal.x + rel.y * sourceNormal.y) * sideScale
             let jitter = rng.nextDouble(in: -jitterLimit..<jitterLimit)
+            let longitudinalJitter = rng.nextDouble(in: -jitterLimit * 0.35..<jitterLimit * 0.35)
             return CGPoint(
-                x: start.x + targetDx * progress + targetNormal.x * (side + jitter),
-                y: start.y + targetDy * progress + targetNormal.y * (side + jitter)
+                x: start.x + targetDx * progress + targetUnit.x * longitudinalJitter + targetNormal.x * (side + jitter),
+                y: start.y + targetDy * progress + targetUnit.y * longitudinalJitter + targetNormal.y * (side + jitter)
             )
         }
-        mapped = resample(points: mapped, count: count)
-        mapped[0] = start
-        mapped[mapped.count - 1] = end
-        return mapped
+        var smoothed = catmullRomPath(points: mapped, count: count)
+        smoothed = lightSmooth(points: smoothed, passes: 2)
+        smoothed[0] = start
+        smoothed[smoothed.count - 1] = end
+        return smoothed
     }
 
     private func movePointCount(style: TrajectoryStyle, durationMs: Int?, motionProfile: MotionProfile?, rng: inout SystemRandomNumberGenerator) -> Int {
@@ -987,6 +1000,63 @@ public final class ActionExecutor {
                 y: start.y + (end.y - start.y) * progress
             )
         }
+    }
+
+    private func catmullRomPath(points: [CGPoint], count: Int) -> [CGPoint] {
+        guard count > 1, points.count > 1 else {
+            return points
+        }
+        let samplesPerSegment = max(3, Int(ceil(Double(count - 1) / Double(points.count - 1))))
+        var output = [CGPoint]()
+        output.reserveCapacity((points.count - 1) * samplesPerSegment + 1)
+        for segment in 0..<(points.count - 1) {
+            let p0 = points[max(0, segment - 1)]
+            let p1 = points[segment]
+            let p2 = points[segment + 1]
+            let p3 = points[min(points.count - 1, segment + 2)]
+            for step in 0..<samplesPerSegment {
+                if segment > 0 || step > 0 {
+                    let t = CGFloat(step) / CGFloat(samplesPerSegment)
+                    output.append(catmullRom(p0: p0, p1: p1, p2: p2, p3: p3, t: t))
+                } else {
+                    output.append(p1)
+                }
+            }
+        }
+        output.append(points[points.count - 1])
+        return resample(points: output, count: count)
+    }
+
+    private func catmullRom(p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint, t: CGFloat) -> CGPoint {
+        let t2 = t * t
+        let t3 = t2 * t
+        let x0 = 2 * p1.x
+        let x1 = (-p0.x + p2.x) * t
+        let x2 = (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2
+        let x3 = (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3
+        let y0 = 2 * p1.y
+        let y1 = (-p0.y + p2.y) * t
+        let y2 = (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2
+        let y3 = (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3
+        return CGPoint(x: 0.5 * (x0 + x1 + x2 + x3), y: 0.5 * (y0 + y1 + y2 + y3))
+    }
+
+    private func lightSmooth(points: [CGPoint], passes: Int) -> [CGPoint] {
+        guard points.count > 4, passes > 0 else {
+            return points
+        }
+        var current = points
+        for _ in 0..<passes {
+            var next = current
+            for index in 1..<(current.count - 1) {
+                next[index] = CGPoint(
+                    x: current[index].x * 0.50 + (current[index - 1].x + current[index + 1].x) * 0.25,
+                    y: current[index].y * 0.50 + (current[index - 1].y + current[index + 1].y) * 0.25
+                )
+            }
+            current = next
+        }
+        return current
     }
 
     private func currentMouseLocation(fallback: CGPoint) -> CGPoint {

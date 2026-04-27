@@ -228,6 +228,7 @@ public final class PassiveObserver {
 
         return lock.withLock {
             counter += 1
+            let modifierFlags = event.flags.rawValue
             return ObservedEvent(
                 id: "evt-\(ts)-\(counter)",
                 ts: ts,
@@ -236,7 +237,7 @@ public final class PassiveObserver {
                 keyCode: keyCode,
                 scrollDeltaX: type == .scrollWheel ? Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)) : nil,
                 scrollDeltaY: type == .scrollWheel ? Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)) : nil,
-                modifierFlags: (type == .keyDown || type == .keyUp || type == .flagsChanged) ? event.flags.rawValue : nil,
+                modifierFlags: modifierFlags == 0 ? nil : modifierFlags,
                 isRepeat: type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             )
         }

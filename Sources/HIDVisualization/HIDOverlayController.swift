@@ -65,6 +65,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     private var workspaceTerminationObserver: NSObjectProtocol?
     private var clearToken = 0
     private var playbackToken = 0
+    private var lastReplayableSummary: HIDActionVisualSummary?
     private let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -131,6 +132,11 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         if let requestedEnabled = boolValue(params["enabled"]) {
             setEnabled(requestedEnabled)
         }
+        let shouldClear = boolValue(params["clear"]) ?? boolValue(params["close"]) ?? false
+        let shouldReplay = boolValue(params["replayLast"])
+            ?? boolValue(params["replay"])
+            ?? boolValue(params["replay_last"])
+            ?? false
 
         var next = currentSettings
         if let clearDelay = doubleValue(params["clearDelaySeconds"]), clearDelay.isFinite, clearDelay > 0 {
@@ -146,6 +152,15 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             applySettingsObject(settingsObject, settings: &next)
         }
         updateSettings(next)
+        if shouldClear {
+            DispatchQueue.main.async { [weak self] in
+                self?.closeOverlay()
+            }
+        } else if shouldReplay {
+            DispatchQueue.main.async { [weak self] in
+                self?.replayLastSummary()
+            }
+        }
         return hidVisualizationState()
     }
 
@@ -218,6 +233,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                 return
             }
             self.ensureOverlay(for: summary.context)
+            if summary.context.dryRun {
+                self.lastReplayableSummary = summary
+            }
             if summary.context.dryRun, summary.events.count > 1 {
                 self.playback(summary)
             } else {
@@ -228,8 +246,8 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                         expected: summary.verification.expectedPointer,
                         actual: summary.verification.finalPointer,
                         errorCode: nil,
-                        stepTitle: self.playbackStep(for: summary.events).title,
-                        stepDetail: self.playbackStep(for: summary.events).detail
+                        stepTitle: self.playbackStep(for: summary.events, context: summary.context).title,
+                        stepDetail: self.playbackStep(for: summary.events, context: summary.context).detail
                     )
                 )
                 self.scheduleClear()
@@ -251,6 +269,8 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         playbackToken += 1
         let token = playbackToken
         let delays = playbackDelays(for: summary.events)
+        let demoTitle = controllerDemoActionTitle(for: summary.context)
+        let retainAtEnd = shouldRetainPlayback(for: summary.context)
         overlayView?.render(
             HIDOverlayFrame(
                 context: summary.context,
@@ -258,7 +278,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                 expected: summary.verification.expectedPointer,
                 actual: nil,
                 errorCode: nil,
-                stepTitle: "准备移动",
+                stepTitle: "\(demoTitle) 准备播放",
                 stepDetail: "显示预期目标落点，等待轨迹事件"
             )
         )
@@ -269,68 +289,161 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
                     return
                 }
                 let visibleEvents = Array(summary.events.prefix(index + 1))
+                let step = self.playbackStep(for: visibleEvents, context: summary.context)
+                let finalFrame = index == summary.events.count - 1
+                let displayStep: HIDPlaybackStep
+                if finalFrame && retainAtEnd {
+                    displayStep = self.retainedPlaybackStep(title: demoTitle, finalStep: step, events: visibleEvents)
+                } else {
+                    displayStep = step
+                }
                 self.overlayView?.render(
                     HIDOverlayFrame(
                         context: summary.context,
                         events: visibleEvents,
                         expected: summary.verification.expectedPointer,
-                        actual: index == summary.events.count - 1 ? summary.verification.finalPointer : nil,
+                        actual: finalFrame ? summary.verification.finalPointer : nil,
                         errorCode: nil,
-                        stepTitle: self.playbackStep(for: visibleEvents).title,
-                        stepDetail: self.playbackStep(for: visibleEvents).detail
+                        stepTitle: displayStep.title,
+                        stepDetail: displayStep.detail
                     )
                 )
-                if index == summary.events.count - 1 {
+                if finalFrame && !retainAtEnd {
                     self.scheduleClear()
                 }
             }
         }
     }
 
-    private func playbackStep(for events: [InjectedEvent]) -> HIDPlaybackStep {
+    private func replayLastSummary() {
+        guard isEnabled, let summary = lastReplayableSummary else {
+            return
+        }
+        ensureOverlay(for: summary.context)
+        playback(summary)
+    }
+
+    private func shouldRetainPlayback(for context: HIDActionVisualContext) -> Bool {
+        context.dryRun && currentSettings.persistent
+    }
+
+    private func controllerDemoActionTitle(for context: HIDActionVisualContext) -> String {
+        let actionId = context.actionId.lowercased()
+        let types = Set(context.actionTypes.map { $0.lowercased() })
+        if actionId.contains("dblclick") {
+            return "双击演示"
+        }
+        if types.contains("drag") {
+            return "拖拽演示"
+        }
+        if types.contains("scroll") {
+            return "滚轮演示"
+        }
+        if types.contains("type") || types.contains("key") || types.contains("pastetext") {
+            return "键盘事件演示"
+        }
+        if types.contains("move"), !types.contains("click") {
+            return "移动轨迹演示"
+        }
+        if types.contains("click") {
+            return "完整点击演示"
+        }
+        return context.actionTypes.joined(separator: "+")
+    }
+
+    private func retainedPlaybackStep(title: String, finalStep: HIDPlaybackStep, events: [InjectedEvent]) -> HIDPlaybackStep {
+        let detail = "\(finalStep.title)：\(finalStep.detail)。完整事件链 \(events.count) 个已保留；可在管理中心重放或关闭。"
+        return HIDPlaybackStep(title: "\(title) 结果已保留", detail: detail)
+    }
+
+    private func playbackStep(for events: [InjectedEvent], context: HIDActionVisualContext? = nil) -> HIDPlaybackStep {
         guard let last = events.last else {
             return HIDPlaybackStep(title: "准备移动", detail: "等待 VirtualHID 生成轨迹")
         }
+        let focus = playbackFocus(for: context)
         let points = events.compactMap(\.location)
         if last.type == "mouseMoved" || last.type.contains("Dragged") {
             let start = points.first.map(shortPoint) ?? "?"
             let end = points.last.map(shortPoint) ?? "?"
+            if last.type == "mouseMoved", context != nil, !focus.primaryTypes.contains("move") {
+                return HIDPlaybackStep(
+                    title: "\(focus.title)前置定位移动",
+                    detail: "这一段只是把指针移动到目标附近，不是本次演示重点；起点 \(start) -> 当前 \(end)，轨迹点 \(points.count)。"
+                )
+            }
             return HIDPlaybackStep(
-                title: last.type.contains("Dragged") ? "拖拽移动" : "滑动轨迹",
-                detail: "起点 \(start) -> 当前 \(end)，轨迹点 \(points.count)"
+                title: last.type.contains("Dragged") ? "拖拽移动（本次重点）" : "滑动轨迹（本次重点）",
+                detail: "起点 \(start) -> 当前 \(end)，轨迹点 \(points.count)。"
             )
         }
         if last.type.contains("MouseDown") {
+            let clickOrdinal = events.filter { $0.type.contains("MouseDown") }.count
             return HIDPlaybackStep(
-                title: "开始下压",
-                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")"
+                title: focus.primaryTypes.contains("click") ? "\(focus.title)第 \(clickOrdinal) 次下压" : "开始下压",
+                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")。"
             )
         }
         if last.type.contains("MouseUp") {
             let hold = holdDurationMs(in: events, upEvent: last).map { "\(Int($0.rounded()))ms" } ?? "未知"
+            let clickOrdinal = events.filter { $0.type.contains("MouseUp") }.count
             return HIDPlaybackStep(
-                title: "松开",
-                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")，按压 \(hold)"
+                title: focus.primaryTypes.contains("click") ? "\(focus.title)第 \(clickOrdinal) 次松开" : "松开",
+                detail: "\(last.type) @ \(last.location.map(shortPoint) ?? "?")，按压 \(hold)。"
             )
         }
         if last.type == "scrollWheel" {
-            return HIDPlaybackStep(title: "滚动", detail: "scrollWheel @ \(last.location.map(shortPoint) ?? "?")")
+            let count = events.filter { $0.type == "scrollWheel" }.count
+            return HIDPlaybackStep(title: "滚轮事件（本次重点）", detail: "第 \(count) 个 scrollWheel @ \(last.location.map(shortPoint) ?? "?")。")
         }
         if last.type == "keyDown" {
-            return HIDPlaybackStep(title: "键盘下压", detail: "keyDown \(last.key ?? "")")
+            return HIDPlaybackStep(title: "键盘下压（本次重点）", detail: "keyDown \(last.key ?? "")。")
         }
         if last.type == "keyUp" {
-            return HIDPlaybackStep(title: "键盘松开", detail: "keyUp \(last.key ?? "")")
+            let dwell = keyDwellDurationMs(in: events, upEvent: last).map { "\(Int($0.rounded()))ms" } ?? "未知"
+            return HIDPlaybackStep(title: "键盘松开（本次重点）", detail: "keyUp \(last.key ?? "")，按键驻留 \(dwell)。")
         }
         if last.type == "pasteText" {
-            return HIDPlaybackStep(title: "粘贴文本", detail: "安全预览粘贴事件")
+            return HIDPlaybackStep(title: "粘贴文本（本次重点）", detail: "安全预览粘贴事件。")
         }
         return HIDPlaybackStep(title: "执行事件", detail: last.type)
+    }
+
+    private func playbackFocus(for context: HIDActionVisualContext?) -> (title: String, primaryTypes: Set<String>) {
+        let actionId = context?.actionId.lowercased() ?? ""
+        let types = Set(context?.actionTypes.map { $0.lowercased() } ?? [])
+        if actionId.contains("dblclick") {
+            return ("双击", ["click"])
+        }
+        if types.contains("drag") {
+            return ("拖拽", ["drag", "click"])
+        }
+        if types.contains("scroll") {
+            return ("滚轮", ["scroll"])
+        }
+        if types.contains("type") || types.contains("key") || types.contains("pastetext") {
+            return ("键盘", ["type", "key", "pastetext"])
+        }
+        if types.contains("move"), !types.contains("click") {
+            return ("移动", ["move"])
+        }
+        if types.contains("click") {
+            return ("点击", ["move", "click"])
+        }
+        return ("动作", types)
     }
 
     private func holdDurationMs(in events: [InjectedEvent], upEvent: InjectedEvent) -> Double? {
         guard let upDate = isoFormatter.date(from: upEvent.timestamp),
               let down = events.reversed().first(where: { $0.type.contains("MouseDown") }),
+              let downDate = isoFormatter.date(from: down.timestamp) else {
+            return nil
+        }
+        return max(0, upDate.timeIntervalSince(downDate) * 1000)
+    }
+
+    private func keyDwellDurationMs(in events: [InjectedEvent], upEvent: InjectedEvent) -> Double? {
+        guard let upDate = isoFormatter.date(from: upEvent.timestamp),
+              let down = events.reversed().first(where: { $0.type == "keyDown" && $0.virtualKey == upEvent.virtualKey }),
               let downDate = isoFormatter.date(from: down.timestamp) else {
             return nil
         }
@@ -354,7 +467,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             } else {
                 rawDelta = 0.07
             }
-            let boundedDelta = min(max(rawDelta, 0.045), 0.18)
+            let boundedDelta = min(max(rawDelta, 0.075), 0.55)
             delays.append(delays[index - 1] + boundedDelta)
         }
         return delays
@@ -496,6 +609,7 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
     }
 
     private func closeOverlay() {
+        playbackToken += 1
         clearToken += 1
         trackedTarget = nil
         stopTrackingTimer()
@@ -1379,7 +1493,34 @@ private final class HIDOverlayView: NSView {
 
     private func statusText(_ context: HIDActionVisualContext) -> String {
         let mode = context.dryRun ? "dry-run" : context.postMode
+        if context.dryRun && settings.persistent {
+            return "HID \(mode) \(demoActionTitle(for: context)) retained"
+        }
         return "HID \(mode) \(context.actionTypes.joined(separator: "+")) \(context.bundleIdentifier)"
+    }
+
+    private func demoActionTitle(for context: HIDActionVisualContext) -> String {
+        let actionId = context.actionId.lowercased()
+        let types = Set(context.actionTypes.map { $0.lowercased() })
+        if actionId.contains("dblclick") {
+            return "双击演示"
+        }
+        if types.contains("drag") {
+            return "拖拽演示"
+        }
+        if types.contains("scroll") {
+            return "滚轮演示"
+        }
+        if types.contains("type") || types.contains("key") || types.contains("pastetext") {
+            return "键盘事件演示"
+        }
+        if types.contains("move"), !types.contains("click") {
+            return "移动轨迹演示"
+        }
+        if types.contains("click") {
+            return "完整点击演示"
+        }
+        return context.actionTypes.joined(separator: "+")
     }
 
     private func drawClickCountBadges(_ events: [InjectedEvent]) {

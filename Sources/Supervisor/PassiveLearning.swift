@@ -226,6 +226,7 @@ final class PassiveLearningRecorder {
         let point: ObservedPoint?
         let ts: Int64
         let prelude: [PassiveLearningTimedPoint]
+        let modifierFlags: UInt64?
     }
 
     private struct KeyDown {
@@ -245,9 +246,14 @@ final class PassiveLearningRecorder {
         let ts: Int64
         let point: ObservedPoint
         let delta: ObservedScrollDelta
+        let modifierFlags: UInt64?
     }
 
     private static let globalHost = "__global__"
+    private static let moveSampleMinDurationMs: Int64 = 120
+    private static let moveSampleMinDistancePx: Double = 8
+    private static let moveSampleMinIntervalMs: Int64 = 120
+    private static let moveSampleContinuityPoints = 2
 
     private var settings = PassiveLearningSettings()
     private var activeSession: PassiveLearningSession?
@@ -259,6 +265,7 @@ final class PassiveLearningRecorder {
     private var keyDowns = [UInt16: KeyDown]()
     private var lastClickUp: ClickUp?
     private var lastKeyUpAt: Int64?
+    private var lastMoveSampleAt: Int64?
     private var producedSamples = 0
     private var recentSamples = [PassiveGestureSample]()
     private var lastSampleAt: Int64?
@@ -345,8 +352,17 @@ final class PassiveLearningRecorder {
         switch event.type {
         case "mouseMoved":
             appendMovePoint(event)
+            if let sample = standaloneMoveSample(event: event, host: host, taskId: taskId) {
+                samples.append(sample)
+            }
         case "leftMouseDown", "rightMouseDown", "otherMouseDown":
-            buttonDown = ButtonDown(type: event.type, point: event.point, ts: event.ts, prelude: moveBuffer)
+            buttonDown = ButtonDown(
+                type: event.type,
+                point: event.point,
+                ts: event.ts,
+                prelude: moveBuffer,
+                modifierFlags: event.modifierFlags
+            )
             dragBuffer.removeAll()
             appendMovePoint(event)
         case "leftMouseDragged", "rightMouseDragged", "otherMouseDragged":
@@ -386,6 +402,51 @@ final class PassiveLearningRecorder {
         }
 
         return publish(samples)
+    }
+
+    private func standaloneMoveSample(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
+        guard buttonDown == nil, dragBuffer.isEmpty else {
+            return nil
+        }
+        let compact = compactPath(moveBuffer)
+        guard compact.count >= settings.minGesturePoints,
+              let first = compact.first,
+              let last = compact.last else {
+            return nil
+        }
+        let duration = last.ts - first.ts
+        let pathLength = computePathLength(compact.map(\.point))
+        guard duration >= Self.moveSampleMinDurationMs,
+              pathLength >= Self.moveSampleMinDistancePx else {
+            return nil
+        }
+        if let lastMoveSampleAt,
+           event.ts - lastMoveSampleAt < Self.moveSampleMinIntervalMs {
+            return nil
+        }
+
+        let sample = makeSample(
+            ts: event.ts,
+            source: sampleSource,
+            host: resolvedHost(host),
+            taskId: nil,
+            stage: taskId,
+            actionType: "move",
+            eventType: event.type,
+            point: event.point,
+            path: compact,
+            clickHoldMs: [],
+            interClickMs: [],
+            dwellMs: [],
+            interKeyMs: [],
+            modifierFlags: event.modifierFlags.map { [$0] } ?? [],
+            eventTimeline: Array(repeating: event.type, count: compact.count)
+        )
+        if sample != nil {
+            lastMoveSampleAt = event.ts
+            moveBuffer = Array(compact.suffix(Self.moveSampleContinuityPoints))
+        }
+        return sample
     }
 
     private func completeButtonGesture(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
@@ -435,6 +496,7 @@ final class PassiveLearningRecorder {
             dwellMs: [],
             interKeyMs: [],
             doubleClickIntervalMs: doubleClickInterval,
+            modifierFlags: [down.modifierFlags, event.modifierFlags].compactMap { $0 },
             eventTimeline: timeline
         )
     }
@@ -468,7 +530,7 @@ final class PassiveLearningRecorder {
             scrollBurst.removeAll()
         }
         let delta = ObservedScrollDelta(dx: event.scrollDeltaX ?? 0, dy: event.scrollDeltaY ?? 0)
-        scrollBurst.append(ScrollBurstEvent(ts: event.ts, point: point, delta: delta))
+        scrollBurst.append(ScrollBurstEvent(ts: event.ts, point: point, delta: delta, modifierFlags: event.modifierFlags))
         if scrollBurst.count > 32 {
             scrollBurst.removeFirst(scrollBurst.count - 32)
         }
@@ -488,6 +550,7 @@ final class PassiveLearningRecorder {
             interKeyMs: [],
             scrollDeltas: scrollBurst.map(\.delta),
             scrollIntervalsMs: adjacentScrollIntervals(scrollBurst),
+            modifierFlags: scrollBurst.compactMap(\.modifierFlags),
             eventTimeline: Array(repeating: "scrollWheel", count: scrollBurst.count)
         )
     }
@@ -521,7 +584,7 @@ final class PassiveLearningRecorder {
             host: resolvedHost(host),
             taskId: nil,
             stage: taskId,
-            actionType: activeSession?.targetAction ?? "type",
+            actionType: "type",
             eventType: event.type,
             point: nil,
             keyCode: normalizedKeyCode,
@@ -637,7 +700,7 @@ final class PassiveLearningRecorder {
             stage: stage,
             sessionId: activeSession?.id,
             sessionLabel: activeSession?.label,
-            actionType: activeSession?.targetAction ?? actionType,
+            actionType: actionType,
             eventType: eventType,
             point: point ?? compact.last?.point,
             keyCode: keyCode,
@@ -701,6 +764,7 @@ final class PassiveLearningRecorder {
         keyDowns.removeAll()
         lastClickUp = nil
         lastKeyUpAt = nil
+        lastMoveSampleAt = nil
     }
 
     private func resolvedHost(_ host: String?) -> String {

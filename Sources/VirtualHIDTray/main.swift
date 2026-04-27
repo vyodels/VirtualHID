@@ -106,6 +106,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningEnabledCheckbox: NSButton?
     private var trainingHostField: NSTextField?
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
+    private var lastLearningDemoAction: (action: String, title: String)?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -253,8 +254,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     @objc private func clearTrailAction(_ sender: Any?) {
         do {
-            _ = try call(method: "hud.configure", params: ["clearDelaySeconds": 0.1])
-            let response = try call(method: "hud.configure", params: ["clearDelaySeconds": delayField?.doubleValue ?? 2.4])
+            let response = try call(method: "hud.configure", params: [
+                "clear": true,
+                "clearDelaySeconds": delayField?.doubleValue ?? 2.4
+            ])
             lastState = HUDState(response: response)
         } catch {
             lastState = .offline(message: localizedErrorMessage(error))
@@ -358,9 +361,50 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     @objc private func stopLearningDemoAction(_ sender: Any?) {
         do {
             _ = try call(method: "learning.demo.stop", params: [:])
-            lastLearningDemoStatus = "已停止当前学习效果演示。"
+            let hudResponse = try call(method: "hud.configure", params: ["clear": true])
+            lastState = HUDState(response: hudResponse)
+            if let lastLearningDemoAction {
+                lastLearningDemoStatus = "已关闭 \(lastLearningDemoAction.title) 的 HUD 结果。需要复看时点「重放上次演示」，不会真实点击或输入。"
+            } else {
+                lastLearningDemoStatus = "已关闭当前学习效果演示 HUD。"
+            }
         } catch {
-            lastLearningDemoStatus = "停止演示失败：\(localizedErrorMessage(error))"
+            lastLearningDemoStatus = "关闭演示失败：\(localizedErrorMessage(error))"
+        }
+        updateControls()
+    }
+
+    @objc private func replayLearningDemoAction(_ sender: Any?) {
+        guard let lastLearningDemoAction else {
+            lastLearningDemoStatus = "暂无可重放的演示结果。请先点击一个动作生成 dry-run HUD 结果。"
+            updateControls()
+            return
+        }
+        do {
+            if runtime == nil {
+                startRuntime()
+            }
+            let hudResponse = try call(method: "hud.configure", params: [
+                "enabled": true,
+                "replayLast": true,
+                "settings": [
+                    "trail": true,
+                    "trailPoints": true,
+                    "expectedPoint": true,
+                    "actualPoint": true,
+                    "clickEffects": true,
+                    "dragEffects": true,
+                    "scrollEffects": true,
+                    "keyboardEffects": true,
+                    "windowFrame": true,
+                    "status": true,
+                    "persistent": true
+                ]
+            ])
+            lastState = HUDState(response: hudResponse)
+            lastLearningDemoStatus = "\(lastLearningDemoAction.title) 已在 HUD 重放同一条 dry-run 事件链；结果会保留到手动关闭。"
+        } catch {
+            lastLearningDemoStatus = "重放演示失败：\(localizedErrorMessage(error))"
         }
         updateControls()
     }
@@ -375,6 +419,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
             }
             runtime = activeRuntime
+            lastLearningDemoAction = (action: action, title: title)
             lastLearningDemoStatus = "\(title) 准备中：HUD 只显示 VirtualHID 规划事件，不会真实点击或输入；本动作完成后会保留轨迹供观察。"
             updateControls()
         } catch {
@@ -394,6 +439,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                         "expectedPoint": true,
                         "actualPoint": true,
                         "clickEffects": true,
+                        "dragEffects": true,
+                        "scrollEffects": true,
+                        "keyboardEffects": true,
                         "windowFrame": true,
                         "status": true,
                         "persistent": true
@@ -1041,7 +1089,8 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         moreButtons.spacing = 8
         moreButtons.addArrangedSubview(actionButton("滚轮", action: #selector(runScrollDemoAction(_:))))
         moreButtons.addArrangedSubview(actionButton("键盘事件", action: #selector(runKeyboardDemoAction(_:))))
-        moreButtons.addArrangedSubview(actionButton("停止当前演示", action: #selector(stopLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("重放上次演示", action: #selector(replayLearningDemoAction(_:))))
+        moreButtons.addArrangedSubview(actionButton("关闭 HUD 演示", action: #selector(stopLearningDemoAction(_:))))
         moreButtons.addArrangedSubview(actionButton("刷新", action: #selector(refreshAction(_:))))
         cardContent.addArrangedSubview(moreButtons)
 
@@ -1769,6 +1818,7 @@ private struct LearningDemoResult {
             let autoAdvance = manual["autoAdvance"] as? Bool == true ? "自动推进" : "不自动推进"
             lines.append("演示控制：\(repeatable)，\(autoAdvance)，同一时间最多一个演示。")
         }
+        lines.append("HUD 控制：结果保留到手动关闭；可点「重放上次演示」复播同一条 dry-run 事件链。")
         if let baseline {
             lines.append("对照：\(Self.actionSummaryLine(baseline))")
         }

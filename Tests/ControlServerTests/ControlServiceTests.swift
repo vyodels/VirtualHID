@@ -420,6 +420,84 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertNotNil(definitions?["scope"])
     }
 
+    func testTraceCommitPayloadPreservesRawHIDFieldsForRebuild() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+
+        for index in 0..<5 {
+            let scroll = try traceCommitLine(
+                id: "scroll-\(index)",
+                host: "example.com",
+                sig: "sig-scroll",
+                task: "task-scroll",
+                traceType: "scroll",
+                payload: [
+                    "type": "scrollWheel",
+                    "point": ["x": 100, "y": 120],
+                    "scrollDeltas": [
+                        ["dx": 0, "dy": -120 - index],
+                        ["dx": 0, "dy": -72 - index]
+                    ],
+                    "scrollIntervalsMs": [42 + index],
+                    "modifierFlags": [1 << 17],
+                    "eventTimeline": ["scrollWheel", "scrollWheel"]
+                ]
+            )
+            let click = try traceCommitLine(
+                id: "click-\(index)",
+                host: "example.com",
+                sig: "sig-click",
+                task: "task-click",
+                traceType: "click",
+                payload: [
+                    "type": "leftMouseUp",
+                    "point": ["x": 130, "y": 150],
+                    "clickHoldMs": [54 + index],
+                    "doubleClickIntervalMs": [180 + index],
+                    "eventTimeline": ["leftMouseDown", "leftMouseUp", "leftMouseDown", "leftMouseUp"]
+                ]
+            )
+            let type = try traceCommitLine(
+                id: "type-\(index)",
+                host: "example.com",
+                sig: "sig-type",
+                task: "task-type",
+                traceType: "type",
+                payload: [
+                    "type": "keyUp",
+                    "keyCode": 12,
+                    "dwellMs": [70 + index],
+                    "interKeyMs": [96 + index],
+                    "modifierFlags": [1 << 17],
+                    "flagsChangedKeyCodes": [56],
+                    "comboKeyCodes": [56, 12],
+                    "repeatCount": 1,
+                    "eventTimeline": ["flagsChanged", "keyDown", "keyUp"]
+                ]
+            )
+
+            XCTAssertEqual(try decode(service.handleLine(scroll))["ok"] as? Bool, true)
+            XCTAssertEqual(try decode(service.handleLine(click))["ok"] as? Bool, true)
+            XCTAssertEqual(try decode(service.handleLine(type))["ok"] as? Bool, true)
+        }
+
+        XCTAssertEqual(try decode(service.handleLine(#"{"id":"rebuild","method":"profiles.rebuild","params":{"host":"example.com"}}"#))["ok"] as? Bool, true)
+
+        let scrollRaw = try rawHIDObject(service: service, host: "example.com", sig: "sig-scroll", task: "task-scroll", action: "scroll")
+        XCTAssertNotNil(scrollRaw["scrollDeltaY"])
+        XCTAssertNotNil(scrollRaw["scrollIntervalsMs"])
+        XCTAssertEqual(scrollRaw["modifierFlags"] as? [Int], [1 << 17])
+
+        let clickRaw = try rawHIDObject(service: service, host: "example.com", sig: "sig-click", task: "task-click", action: "click")
+        XCTAssertNotNil(clickRaw["doubleClickIntervalMs"])
+        XCTAssertTrue((clickRaw["eventTimeline"] as? [String] ?? []).contains("leftMouseDown"))
+
+        let typeRaw = try rawHIDObject(service: service, host: "example.com", sig: "sig-type", task: "task-type", action: "type")
+        XCTAssertEqual(typeRaw["modifierFlags"] as? [Int], [1 << 17])
+        XCTAssertEqual(typeRaw["flagsChangedKeyCodes"] as? [Int], [56])
+        XCTAssertEqual(typeRaw["comboKeyCodes"] as? [[Int]], [[12, 56]])
+    }
+
     func testTypeFallsBackToPasteTextForChinese() throws {
         let service = try makeService()
         let response = service.handleLine(
@@ -604,6 +682,41 @@ final class ControlServiceTests: XCTestCase {
 
     private func decode(_ text: String) throws -> [String: Any] {
         try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] ?? [:]
+    }
+
+    private func traceCommitLine(
+        id: String,
+        host: String,
+        sig: String,
+        task: String,
+        traceType: String,
+        payload: [String: Any]
+    ) throws -> String {
+        let object: [String: Any] = [
+            "id": id,
+            "method": "trace.commit",
+            "params": [
+                "eventId": id,
+                "host": host,
+                "elementSig": sig,
+                "taskId": task,
+                "traceType": traceType,
+                "payload": payload
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private func rawHIDObject(service: ControlService, host: String, sig: String, task: String, action: String) throws -> [String: Any] {
+        let response = service.handleLine(
+            #"{"id":"get","method":"profiles.get","params":{"host":"\#(host)","sig":"\#(sig)","taskId":"\#(task)","actionType":"\#(action)"}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let template = result?["template"] as? [String: Any]
+        let params = template?["params"] as? [String: Any]
+        return params?["rawHID"] as? [String: Any] ?? [:]
     }
 
     private func selfTargetVisibleFrame() -> CGRect {

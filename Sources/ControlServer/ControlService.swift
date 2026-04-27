@@ -3074,6 +3074,14 @@ private func parseTracePayload(
         interClickMs: parseDoubleArray(payloadObject["interClickMs"]),
         dwellMs: parseDoubleArray(payloadObject["dwellMs"]),
         interKeyMs: parseDoubleArray(payloadObject["interKeyMs"]),
+        scrollDeltas: parseTraceScrollDeltas(payloadObject["scrollDeltas"]),
+        scrollIntervalsMs: parseDoubleArray(payloadObject["scrollIntervalsMs"]),
+        doubleClickIntervalMs: parseDoubleArray(payloadObject["doubleClickIntervalMs"]),
+        modifierFlags: parseUInt64Array(payloadObject["modifierFlags"]),
+        flagsChangedKeyCodes: parseUInt16Array(payloadObject["flagsChangedKeyCodes"]),
+        comboKeyCodes: parseUInt16Array(payloadObject["comboKeyCodes"]),
+        repeatCount: intValue(payloadObject["repeatCount"]) ?? 0,
+        eventTimeline: parseStringArray(payloadObject["eventTimeline"]),
         behaviorMode: (payloadObject["behaviorMode"] as? String).flatMap(HumanBehaviorMode.init(rawValue:)),
         flavor: (payloadObject["flavor"] as? String).flatMap(MotionFlavor.init(rawValue:)),
         straightness: number(payloadObject["straightness"]),
@@ -3095,6 +3103,53 @@ private func parseDoubleArray(_ value: Any?) -> [Double] {
         return []
     }
     return values.compactMap(number)
+}
+
+private func parseTraceScrollDeltas(_ value: Any?) -> [TraceScrollDelta] {
+    guard let objects = value as? [[String: Any]] else {
+        return []
+    }
+    return objects.compactMap { object in
+        guard let dx = number(object["dx"]),
+              let dy = number(object["dy"]) else {
+            return nil
+        }
+        return TraceScrollDelta(dx: dx, dy: dy)
+    }
+}
+
+private func parseUInt16Array(_ value: Any?) -> [UInt16] {
+    guard let values = value as? [Any] else {
+        return []
+    }
+    return values.compactMap { value in
+        guard let int = intValue(value), int >= 0, int <= Int(UInt16.max) else {
+            return nil
+        }
+        return UInt16(int)
+    }
+}
+
+private func parseUInt64Array(_ value: Any?) -> [UInt64] {
+    guard let values = value as? [Any] else {
+        return []
+    }
+    return values.compactMap { value in
+        if let uint = value as? UInt64 {
+            return uint
+        }
+        guard let int = intValue(value), int >= 0 else {
+            return nil
+        }
+        return UInt64(int)
+    }
+}
+
+private func parseStringArray(_ value: Any?) -> [String] {
+    guard let values = value as? [Any] else {
+        return []
+    }
+    return values.compactMap { $0 as? String }
 }
 
 private extension Array {
