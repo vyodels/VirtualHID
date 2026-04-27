@@ -309,7 +309,7 @@ private func runLearningSmoke(configuration: DaemonConfiguration) throws {
     }
     let passiveState = service.handleLine(#"{"id":"learning-passive","method":"learning.state","params":{}}"#)
 
-    let start = service.handleLine(#"{"id":"training-start","method":"learning.session.start","params":{"label":"专项鼠标训练","host":"training.local","targetAction":"click"}}"#)
+    let start = service.handleLine(#"{"id":"training-start","method":"learning.teaching.start","params":{"label":"现场教学：完整点击","host":"training.local","targetAction":"click"}}"#)
     for index in 0..<5 {
         let base = nowMs + Int64(20_000 + index * 900)
         _ = supervisor.observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 30, y: 30), ts: base)
@@ -318,7 +318,7 @@ private func runLearningSmoke(configuration: DaemonConfiguration) throws {
         _ = supervisor.observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 146 + Double(index), y: 108 + Double(index)), ts: base + 230)
         _ = supervisor.observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 146 + Double(index), y: 108 + Double(index)), ts: base + 302)
     }
-    let stop = service.handleLine(#"{"id":"training-stop","method":"learning.session.stop","params":{"commit":true}}"#)
+    let stop = service.handleLine(#"{"id":"training-stop","method":"learning.teaching.stop","params":{"commit":true}}"#)
     let finalState = service.handleLine(#"{"id":"learning-final","method":"learning.state","params":{}}"#)
     let passiveTemplate = try? store.lookupTemplate(
         host: ProfileStore.globalLearningHost,

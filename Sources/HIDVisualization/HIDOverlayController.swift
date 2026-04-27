@@ -137,6 +137,9 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
             ?? boolValue(params["replay"])
             ?? boolValue(params["replay_last"])
             ?? false
+        let teachingGuide = params["teachingGuide"] as? [String: Any]
+            ?? params["teaching_guide"] as? [String: Any]
+            ?? params["guide"] as? [String: Any]
 
         var next = currentSettings
         if let clearDelay = doubleValue(params["clearDelaySeconds"]), clearDelay.isFinite, clearDelay > 0 {
@@ -159,6 +162,10 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         } else if shouldReplay {
             DispatchQueue.main.async { [weak self] in
                 self?.replayLastSummary()
+            }
+        } else if let teachingGuide {
+            DispatchQueue.main.async { [weak self] in
+                self?.showTeachingGuide(teachingGuide)
             }
         }
         return hidVisualizationState()
@@ -323,6 +330,42 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         }
         ensureOverlay(for: summary.context)
         playback(summary)
+    }
+
+    private func showTeachingGuide(_ guide: [String: Any]) {
+        guard isEnabled else {
+            return
+        }
+        let start = pointValue(guide["startPoint"] ?? guide["start_point"] ?? guide["origin"])
+        let target = pointValue(guide["targetPoint"] ?? guide["target_point"] ?? guide["target"])
+        let action = nonEmptyString(guide["action"] ?? guide["actionType"] ?? guide["action_type"]) ?? "teaching"
+        let title = nonEmptyString(guide["title"]) ?? "现场教学"
+        let detail = nonEmptyString(guide["detail"]) ?? "请按 HUD 标记完成真实键鼠动作，VirtualHID 只记录物理输入特征。"
+        let context = HIDActionVisualContext(
+            actionId: nonEmptyString(guide["id"] ?? guide["actionId"] ?? guide["action_id"]) ?? "teaching-\(Int(Date().timeIntervalSince1970 * 1000))",
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.VirtualHID",
+            pid: Int32(getpid()),
+            windowTitle: title,
+            windowFrame: teachingGuideWindowFrame(start: start, target: target),
+            dryRun: true,
+            postMode: "guide",
+            actionTypes: ["teaching", action]
+        )
+        ensureOverlay(for: context)
+        overlayView?.render(
+            HIDOverlayFrame(
+                context: context,
+                events: [],
+                expected: target,
+                actual: nil,
+                errorCode: nil,
+                stepTitle: title,
+                stepDetail: detail,
+                guideStart: start,
+                guideTarget: target,
+                guideAction: action
+            )
+        )
     }
 
     private func shouldRetainPlayback(for context: HIDActionVisualContext) -> Bool {
@@ -731,6 +774,18 @@ public final class HIDOverlayController: HIDEventSink, HIDVisualizationControl {
         return fallback
     }
 
+    private func teachingGuideWindowFrame(start: CodablePoint?, target: CodablePoint?) -> CodableRect {
+        let fallback = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let candidates = [start, target].compactMap { $0 }.map { point in
+            NSPoint(x: point.x, y: primaryScreenTopY() - point.y)
+        }
+        let screen = NSScreen.screens.first { screen in
+            candidates.contains { screen.frame.contains($0) }
+        } ?? NSScreen.main
+        let frame = screen?.frame ?? fallback
+        return codableScreenRect(from: frame)
+    }
+
     private func appKitRect(from rect: CodableRect) -> NSRect {
         let yReference = primaryScreenTopY()
         return NSRect(
@@ -870,6 +925,15 @@ private func codableRect(from frame: CGRect) -> CodableRect {
     CodableRect(
         x: frame.origin.x,
         y: frame.origin.y,
+        width: frame.width,
+        height: frame.height
+    )
+}
+
+private func codableScreenRect(from frame: CGRect) -> CodableRect {
+    CodableRect(
+        x: frame.origin.x,
+        y: primaryScreenTopY() - frame.maxY,
         width: frame.width,
         height: frame.height
     )
@@ -1065,6 +1129,23 @@ private func doubleValue(_ value: Any?) -> Double? {
     return nil
 }
 
+private func nonEmptyString(_ value: Any?) -> String? {
+    guard let string = value as? String else {
+        return nil
+    }
+    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+private func pointValue(_ value: Any?) -> CodablePoint? {
+    guard let object = value as? [String: Any],
+          let x = doubleValue(object["x"]),
+          let y = doubleValue(object["y"]) else {
+        return nil
+    }
+    return CodablePoint(x: x, y: y)
+}
+
 private func applyComponents(_ components: [String], visible: Bool, settings: inout HIDOverlaySettings) {
     for rawComponent in components {
         let component = rawComponent
@@ -1131,6 +1212,33 @@ struct HIDOverlayFrame {
     let errorCode: String?
     let stepTitle: String?
     let stepDetail: String?
+    let guideStart: CodablePoint?
+    let guideTarget: CodablePoint?
+    let guideAction: String?
+
+    init(
+        context: HIDActionVisualContext,
+        events: [InjectedEvent],
+        expected: CodablePoint?,
+        actual: CodablePoint?,
+        errorCode: String?,
+        stepTitle: String?,
+        stepDetail: String?,
+        guideStart: CodablePoint? = nil,
+        guideTarget: CodablePoint? = nil,
+        guideAction: String? = nil
+    ) {
+        self.context = context
+        self.events = events
+        self.expected = expected
+        self.actual = actual
+        self.errorCode = errorCode
+        self.stepTitle = stepTitle
+        self.stepDetail = stepDetail
+        self.guideStart = guideStart
+        self.guideTarget = guideTarget
+        self.guideAction = guideAction
+    }
 }
 
 struct HIDOverlayViewSnapshot: Equatable {
@@ -1234,7 +1342,10 @@ final class HIDOverlayView: NSView {
                 actual: frameData.actual,
                 errorCode: frameData.errorCode,
                 stepTitle: frameData.stepTitle,
-                stepDetail: frameData.stepDetail
+                stepDetail: frameData.stepDetail,
+                guideStart: frameData.guideStart,
+                guideTarget: frameData.guideTarget,
+                guideAction: frameData.guideAction
             )
         }
         if let lastPersistentFrame {
@@ -1245,7 +1356,10 @@ final class HIDOverlayView: NSView {
                 actual: lastPersistentFrame.actual,
                 errorCode: lastPersistentFrame.errorCode,
                 stepTitle: lastPersistentFrame.stepTitle,
-                stepDetail: lastPersistentFrame.stepDetail
+                stepDetail: lastPersistentFrame.stepDetail,
+                guideStart: lastPersistentFrame.guideStart,
+                guideTarget: lastPersistentFrame.guideTarget,
+                guideAction: lastPersistentFrame.guideAction
             )
         }
         historicalFrames = historicalFrames.map { frame in
@@ -1256,7 +1370,10 @@ final class HIDOverlayView: NSView {
                 actual: frame.actual,
                 errorCode: frame.errorCode,
                 stepTitle: frame.stepTitle,
-                stepDetail: frame.stepDetail
+                stepDetail: frame.stepDetail,
+                guideStart: frame.guideStart,
+                guideTarget: frame.guideTarget,
+                guideAction: frame.guideAction
             )
         }
         needsDisplay = true
@@ -1274,7 +1391,10 @@ final class HIDOverlayView: NSView {
             actual: frameData.actual,
             errorCode: errorCode,
             stepTitle: frameData.stepTitle,
-            stepDetail: frameData.stepDetail
+            stepDetail: frameData.stepDetail,
+            guideStart: frameData.guideStart,
+            guideTarget: frameData.guideTarget,
+            guideAction: frameData.guideAction
         )
         needsDisplay = true
         displayIfNeeded()
@@ -1322,6 +1442,7 @@ final class HIDOverlayView: NSView {
         guard let frameData else {
             return
         }
+        drawTeachingGuide(frameData)
         if settings.showTrail {
             drawTrail(frameData.events, actual: frameData.actual, final: frameData.actual != nil)
         }
@@ -1438,6 +1559,38 @@ final class HIDOverlayView: NSView {
         marker.lineWidth = 0.8
         marker.stroke()
         drawSmallLabel(title, at: NSPoint(x: converted.x + 8, y: converted.y + 3), color: color.withAlphaComponent(0.82))
+    }
+
+    private func drawTeachingGuide(_ frameData: HIDOverlayFrame) {
+        guard frameData.guideStart != nil || frameData.guideTarget != nil else {
+            return
+        }
+        let start = frameData.guideStart.map(convert(_:))
+        let target = frameData.guideTarget.map(convert(_:))
+        if let start, let target {
+            let path = NSBezierPath()
+            path.move(to: start)
+            path.line(to: target)
+            NSColor.systemYellow.withAlphaComponent(0.72).setStroke()
+            let dash: [CGFloat] = [7, 7]
+            dash.withUnsafeBufferPointer { buffer in
+                path.setLineDash(buffer.baseAddress, count: buffer.count, phase: 0)
+            }
+            path.lineWidth = 1.2
+            path.stroke()
+        }
+        if let start {
+            drawRing(at: start, color: .systemTeal, radius: 12, lineWidth: 1.6)
+            drawSmallLabel("教学起点", at: NSPoint(x: start.x + 14, y: start.y + 8), color: .systemTeal)
+        }
+        if let target {
+            drawRing(at: target, color: .systemYellow, radius: 15, lineWidth: 1.8)
+            drawRing(at: target, color: .systemOrange, radius: 5, lineWidth: 1.2)
+            drawSmallLabel("教学目标", at: NSPoint(x: target.x + 16, y: target.y + 8), color: .systemYellow)
+        }
+        if let action = frameData.guideAction, let anchor = target ?? start {
+            drawLabel("教学动作：\(displayGuideAction(action))", at: NSPoint(x: anchor.x + 18, y: anchor.y - 28), color: .systemYellow)
+        }
     }
 
     private func drawEffects(_ events: [InjectedEvent], context: HIDActionVisualContext) {
@@ -1658,6 +1811,25 @@ final class HIDOverlayView: NSView {
             return "完整点击演示"
         }
         return context.actionTypes.joined(separator: "+")
+    }
+
+    private func displayGuideAction(_ action: String) -> String {
+        switch action.lowercased() {
+        case "move":
+            return "移动轨迹"
+        case "click":
+            return "完整点击"
+        case "dblclick", "doubleclick":
+            return "双击"
+        case "drag":
+            return "拖拽"
+        case "scroll":
+            return "滚轮"
+        case "keyboard", "type", "key":
+            return "键盘输入"
+        default:
+            return action
+        }
     }
 
     private func drawClickCountBadges(_ events: [InjectedEvent]) {

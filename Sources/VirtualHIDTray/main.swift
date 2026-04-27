@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Darwin
 import Foundation
 import VirtualHIDRuntime
@@ -107,6 +108,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var learningEnabledCheckbox: NSButton?
     private var reuseDemoPointsCheckbox: NSButton?
     private var trainingHostField: NSTextField?
+    private var teachingActionPopup: NSPopUpButton?
+    private var teachingStartLabel: NSTextField?
+    private var teachingTargetLabel: NSTextField?
+    private var teachingStatusLabel: NSTextField?
+    private var teachingStartPoint: CGPoint?
+    private var teachingTargetPoint: CGPoint?
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningDemoAction: (action: String, title: String)?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
@@ -304,21 +311,118 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         updateControls()
     }
 
-    @objc private func startTrainingAction(_ sender: Any?) {
+    @objc private func recordTeachingStartAction(_ sender: Any?) {
+        teachingStartPoint = currentMousePoint()
+        updateControls()
+    }
+
+    @objc private func recordTeachingTargetAction(_ sender: Any?) {
+        teachingTargetPoint = currentMousePoint()
+        updateControls()
+    }
+
+    @objc private func startTeachingAction(_ sender: Any?) {
+        guard let start = teachingStartPoint, let target = teachingTargetPoint else {
+            teachingStatusLabel?.stringValue = "请先记录起点和目标点，再开始现场教学。"
+            teachingStatusLabel?.textColor = .systemRed
+            return
+        }
+        let action = teachingActionValue()
         do {
-            _ = try call(method: "learning.session.start", params: [
-                "host": trainingHostField?.stringValue ?? ""
+            _ = try call(method: "learning.configure", params: [
+                "enabled": true,
+                "mode": "passive"
+            ])
+            _ = try call(method: "learning.teaching.start", params: [
+                "label": "现场教学 \(teachingActionTitle(action))",
+                "host": trainingHostField?.stringValue ?? "",
+                "targetAction": action
+            ])
+            _ = try call(method: "hud.configure", params: [
+                "enabled": true,
+                "settings": [
+                    "trail": true,
+                    "trailPoints": true,
+                    "expectedPoint": true,
+                    "actualPoint": true,
+                    "clickEffects": true,
+                    "dragEffects": true,
+                    "scrollEffects": true,
+                    "keyboardEffects": true,
+                    "windowFrame": true,
+                    "status": true,
+                    "persistent": true
+                ],
+                "teachingGuide": [
+                    "action": action,
+                    "startPoint": pointObject(start),
+                    "targetPoint": pointObject(target),
+                    "title": "现场教学：\(teachingActionTitle(action))",
+                    "detail": "请从教学起点开始，按真实习惯完成 \(teachingActionTitle(action))；样本会实时入库。"
+                ]
             ])
             let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
+            lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+            teachingStatusLabel?.stringValue = "现场教学已开始。请按 HUD 起点和目标点完成真实键鼠动作，完成后点击「结束现场教学」。"
+            teachingStatusLabel?.textColor = .secondaryLabelColor
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
         updateControls()
     }
 
-    @objc private func commitTrainingAction(_ sender: Any?) {
-        stopTraining(commit: true)
+    @objc private func stopTeachingAction(_ sender: Any?) {
+        stopTeaching(commit: true)
+    }
+
+    private func currentMousePoint() -> CGPoint {
+        CGEvent(source: nil)?.location ?? CGPoint(x: 0, y: 0)
+    }
+
+    private func pointObject(_ point: CGPoint) -> [String: Double] {
+        ["x": Double(point.x), "y": Double(point.y)]
+    }
+
+    private func teachingActionValue() -> String {
+        switch teachingActionPopup?.titleOfSelectedItem {
+        case "移动轨迹":
+            return "move"
+        case "双击":
+            return "dblclick"
+        case "拖拽":
+            return "drag"
+        case "滚轮":
+            return "scroll"
+        case "键盘输入":
+            return "keyboard"
+        default:
+            return "click"
+        }
+    }
+
+    private func teachingActionTitle(_ action: String) -> String {
+        switch action {
+        case "move":
+            return "移动轨迹"
+        case "dblclick":
+            return "双击"
+        case "drag":
+            return "拖拽"
+        case "scroll":
+            return "滚轮"
+        case "keyboard":
+            return "键盘输入"
+        default:
+            return "完整点击"
+        }
+    }
+
+    private func teachingPointText(_ point: CGPoint?) -> String {
+        guard let point else {
+            return "未记录"
+        }
+        return "(\(Int(point.x.rounded())), \(Int(point.y.rounded())))"
     }
 
     @objc private func rebuildLearningProfilesAction(_ sender: Any?) {
@@ -687,6 +791,10 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningDemoStatusLabel = nil
         learningEnabledCheckbox = nil
         trainingHostField = nil
+        teachingActionPopup = nil
+        teachingStartLabel = nil
+        teachingTargetLabel = nil
+        teachingStatusLabel = nil
     }
 
     private func makeSectionContent(_ section: ManagementSection) -> NSView {
@@ -857,7 +965,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             title: "学习边界",
             body: [
                 "学习只在显式开启后采集系统键鼠事件，不记录输入文本内容。",
-                "聚焦采集只是临时标记一段训练窗口，样本会实时自动入库，不需要手动保存。",
+                "现场教学只给真实练习窗口加 HUD 起点、目标点和动作提示；样本仍来自物理键鼠事件并实时入库。",
                 "能力模板只影响轨迹、节奏、hold/inter-click、dwell/inter-key 等执行参数，不选择业务目标。"
             ]
         )
@@ -972,7 +1080,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         rhythm.widthAnchor.constraint(equalToConstant: 292).isActive = true
         stack.addArrangedSubview(rhythm)
 
-        stack.addArrangedSubview(label("聚焦采集用于临时标记一段练习窗口；这不是另一种学习模式，也不需要手动保存。开启后产生的键鼠片段会实时入库并参与模板重建。", size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(label("现场教学", size: 14, weight: .semibold))
+        stack.addArrangedSubview(label("后台学习会持续沉淀日常习惯；需要精准灌入某类行为时，记录起点和目标点，HUD 会显示教学标记，你按真实习惯完成动作，样本实时入库。", size: 11, color: .secondaryLabelColor))
 
         let hostField = NSTextField(string: "")
         hostField.placeholderString = "可选：网页域名 / 应用名；留空=全局键鼠能力"
@@ -980,19 +1090,48 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             field.widthAnchor.constraint(equalToConstant: 198).isActive = true
         }
         trainingHostField = hostField
+        let actionPopup = NSPopUpButton()
+        actionPopup.addItems(withTitles: ["完整点击", "移动轨迹", "双击", "拖拽", "滚轮", "键盘输入"])
+        actionPopup.widthAnchor.constraint(equalToConstant: 198).isActive = true
+        teachingActionPopup = actionPopup
         let grid = NSGridView(views: [
-            [label("采集范围", size: 12, color: .secondaryLabelColor), hostField]
+            [label("教学范围", size: 12, color: .secondaryLabelColor), hostField],
+            [label("教学动作", size: 12, color: .secondaryLabelColor), actionPopup]
         ])
         grid.rowSpacing = 6
         grid.columnSpacing = 8
         stack.addArrangedSubview(grid)
 
+        let pointLabels = NSStackView()
+        pointLabels.orientation = .vertical
+        pointLabels.spacing = 4
+        let startLabel = label("", size: 11, color: .secondaryLabelColor)
+        let targetLabel = label("", size: 11, color: .secondaryLabelColor)
+        teachingStartLabel = startLabel
+        teachingTargetLabel = targetLabel
+        pointLabels.addArrangedSubview(startLabel)
+        pointLabels.addArrangedSubview(targetLabel)
+        stack.addArrangedSubview(pointLabels)
+
+        let pointButtons = NSStackView()
+        pointButtons.orientation = .horizontal
+        pointButtons.spacing = 8
+        pointButtons.addArrangedSubview(actionButton("记录起点", action: #selector(recordTeachingStartAction(_:))))
+        pointButtons.addArrangedSubview(actionButton("记录目标点", action: #selector(recordTeachingTargetAction(_:))))
+        stack.addArrangedSubview(pointButtons)
+
         let buttons = NSStackView()
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        buttons.addArrangedSubview(actionButton("开始聚焦采集", action: #selector(startTrainingAction(_:))))
-        buttons.addArrangedSubview(actionButton("结束聚焦采集", action: #selector(commitTrainingAction(_:))))
+        buttons.addArrangedSubview(actionButton("开始现场教学", action: #selector(startTeachingAction(_:))))
+        buttons.addArrangedSubview(actionButton("结束现场教学", action: #selector(stopTeachingAction(_:))))
         stack.addArrangedSubview(buttons)
+
+        let teachingStatus = label("", size: 11, color: .secondaryLabelColor)
+        teachingStatus.maximumNumberOfLines = 3
+        teachingStatus.preferredMaxLayoutWidth = 292
+        teachingStatusLabel = teachingStatus
+        stack.addArrangedSubview(teachingStatus)
 
         stack.addArrangedSubview(separator())
         stack.addArrangedSubview(label("实时采集", size: 14, weight: .semibold))
@@ -1290,6 +1429,14 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         learningEnabledCheckbox?.isEnabled = lastLearningState.available
         learningEnabledCheckbox?.state = lastLearningState.enabled ? .on : .off
         trainingHostField?.isEnabled = lastLearningState.available
+        teachingActionPopup?.isEnabled = lastLearningState.available
+        teachingStartLabel?.stringValue = "起点：\(teachingPointText(teachingStartPoint))"
+        teachingTargetLabel?.stringValue = "目标点：\(teachingPointText(teachingTargetPoint))"
+        if teachingStatusLabel?.stringValue.isEmpty != false {
+            teachingStatusLabel?.stringValue = lastLearningState.hasActiveSession
+                ? "现场教学进行中：请按 HUD 标记完成真实键鼠动作。"
+                : "记录起点和目标点后，点击「开始现场教学」。"
+        }
     }
 
     private func position(panel: NSPanel) {
@@ -1308,11 +1455,14 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         panel.setFrameOrigin(origin)
     }
 
-    private func stopTraining(commit: Bool) {
+    private func stopTeaching(commit: Bool) {
         do {
-            _ = try call(method: "learning.session.stop", params: ["commit": commit])
+            _ = try call(method: "learning.teaching.stop", params: ["commit": commit])
+            _ = try call(method: "profiles.rebuild", params: [:])
             let response = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
             lastLearningState = LearningState(response: response)
+            teachingStatusLabel?.stringValue = "现场教学已结束，样本已自动入库并重建能力模板。"
+            teachingStatusLabel?.textColor = .secondaryLabelColor
         } catch {
             lastLearningState = .offline(message: localizedErrorMessage(error))
         }
@@ -1430,7 +1580,7 @@ private struct LearningState {
             return "关闭"
         }
         if hasActiveSession || activeSessionSampleCount > 0 {
-            return "聚焦采集中"
+            return "现场教学中"
         }
         return "持续分析"
     }
@@ -1439,7 +1589,7 @@ private struct LearningState {
         if let message {
             return "学习离线：\(message)"
         }
-        let sessionText = hasActiveSession ? "，聚焦采集（\(activeSessionSampleCount) 个片段，实时入库）" : ""
+        let sessionText = hasActiveSession ? "，现场教学（\(activeSessionSampleCount) 个片段，实时入库）" : ""
         return "键鼠输入学习分析：\(enabled ? "开启" : "关闭") / \(modeText)，已捕捉 \(producedSamples) 个片段，历史片段 \(traceCount) 个，能力模板 \(totalTemplates) 个\(sessionText)"
     }
 

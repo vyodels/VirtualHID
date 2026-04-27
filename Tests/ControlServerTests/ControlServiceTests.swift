@@ -503,6 +503,29 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertNotNil(definitions?["scope"])
     }
 
+    func testLearningTeachingStartStopAliasesSessionWithTeachingSemantics() throws {
+        let service = try makeService()
+
+        let startPayload = try decode(service.handleLine(
+            #"{"id":"teaching-start","method":"learning.teaching.start","params":{"label":"现场教学：完整点击","host":"teaching.local","targetAction":"click"}}"#
+        ))
+        let startResult = startPayload["result"] as? [String: Any]
+        let activeSession = startResult?["activeSession"] as? [String: Any]
+        let settings = startResult?["settings"] as? [String: Any]
+
+        XCTAssertEqual(startPayload["ok"] as? Bool, true)
+        XCTAssertEqual(settings?["enabled"] as? Bool, true)
+        XCTAssertEqual(activeSession?["label"] as? String, "现场教学：完整点击")
+        XCTAssertEqual(activeSession?["host"] as? String, "teaching.local")
+        XCTAssertEqual(activeSession?["targetAction"] as? String, "click")
+
+        let stopPayload = try decode(service.handleLine(#"{"id":"teaching-stop","method":"learning.teaching.stop","params":{"commit":true}}"#))
+        let stopResult = stopPayload["result"] as? [String: Any]
+
+        XCTAssertEqual(stopPayload["ok"] as? Bool, true)
+        XCTAssertEqual(stopResult?["discardedSamples"] as? Int, 0)
+    }
+
     func testLearningInspectReturnsAllTemplateSummariesForThirteenLearnedTemplates() throws {
         let service = try makeService()
         try seedTemplateInventory(service: service, count: 13)

@@ -265,6 +265,10 @@ public final class ControlService {
             return try handleLearningSessionStart(params)
         case "learning.session.stop":
             return try handleLearningSessionStop(params)
+        case "learning.teaching.start":
+            return try handleLearningSessionStart(params)
+        case "learning.teaching.stop":
+            return try handleLearningSessionStop(params)
         case "learning.demo.run":
             return try handleLearningDemoRun(params)
         case "learning.demo.step":
@@ -622,7 +626,7 @@ public final class ControlService {
             "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局键鼠能力。",
             "actionType": "动作类型来自真实键鼠事件链，例如点击、拖拽、滚动、键盘输入；模板只影响执行轨迹和节奏，不选择业务目标。",
             "continuousLearning": "开启键鼠输入学习分析后，真实事件会自动生成动作片段并实时入库。",
-            "focusedCapture": "聚焦采集只是给一段练习窗口加范围标签；它不是另一套学习模式，也不需要手动保存。",
+            "liveTeaching": "现场教学会给一段真实键鼠练习窗口加范围标签，并可通过 HUD 显示用户指定的起点、目标点和动作说明；样本仍来自物理输入事件并实时入库。",
             "templates": "能力模板由历史片段聚合生成，包含速度、点数、停顿、按压、键盘 dwell/inter-key 等执行参数。"
         ]
         return object

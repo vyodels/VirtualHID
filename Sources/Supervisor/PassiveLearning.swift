@@ -633,7 +633,7 @@ final class PassiveLearningRecorder {
     }
 
     private var sampleSource: String {
-        activeSession == nil ? "user-passive" : "user-focused"
+        activeSession == nil ? "user-passive" : "user-teaching"
     }
 
     private func publish(_ samples: [PassiveGestureSample]) -> [PassiveGestureSample] {
