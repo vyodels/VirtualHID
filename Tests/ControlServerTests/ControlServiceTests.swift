@@ -297,6 +297,8 @@ final class ControlServiceTests: XCTestCase {
         let actions = result?["actions"] as? [[String: Any]] ?? []
         let template = result?["template"] as? [String: Any]
         let safety = result?["safety"] as? [String: Any]
+        let firstActionHumanization = actions.first?["humanization"] as? [String: Any]
+        let firstActionMetrics = actions.first?["metrics"] as? [String: Any]
 
         XCTAssertEqual(payload["ok"] as? Bool, true)
         XCTAssertEqual(result?["ok"] as? Bool, true)
@@ -312,6 +314,9 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(actions.allSatisfy { ($0["mouseMoveCount"] as? Int ?? 0) > 0 }, true)
         XCTAssertEqual(actions.allSatisfy { ($0["mouseDownCount"] as? Int ?? 0) > 0 }, true)
         XCTAssertEqual(actions.allSatisfy { ($0["mouseUpCount"] as? Int ?? 0) > 0 }, true)
+        XCTAssertEqual(firstActionHumanization?["profileApplied"] as? Bool, true)
+        XCTAssertGreaterThan(firstActionMetrics?["pointCount"] as? Int ?? 0, 0)
+        XCTAssertGreaterThan(firstActionMetrics?["pathLengthPx"] as? Double ?? 0, 0)
     }
 
     func testLearningInspectReturnsObservableLearningData() throws {

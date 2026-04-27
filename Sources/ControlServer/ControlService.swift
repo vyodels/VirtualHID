@@ -291,7 +291,9 @@ public final class ControlService {
         let semanticEvidence = parseSemanticEvidence(params)
         let requestedMode = options.postMode ?? configuration.defaultPostMode
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
-        let profileResult = applyProfiles(to: primitives, context: context)
+        let profileResult = options.disableProfiles
+            ? (primitives: primitives, applied: false, templateIds: [])
+            : applyProfiles(to: primitives, context: context)
         let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode, eventSink: hidEventSink)
         let browserChromeOverlayPreflight = try handleBrowserChromeOverlayPreflight(
             target: target,
@@ -549,11 +551,11 @@ public final class ControlService {
         object["recentTraces"] = try profileStore.listTraceSummaries(limit: limit).map(traceSummaryObject)
         object["templates"] = try profileStore.listTemplates().prefix(limit).map(learningTemplateSummaryObject)
         object["definitions"] = [
-            "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局鼠标习惯。",
-            "actionType": "学习动作表示要学习哪类输入时间流，例如单击、拖拽、滚动；模板只影响轨迹和节奏，不选择业务目标。",
-            "startTraining": "开始专项训练会清空本次待提交缓冲，并把后续真实鼠标动作暂存到训练会话。",
-            "commitTraining": "保存训练会把本次暂存样本写入持久化轨迹库，并重建可复用模板。",
-            "discardTraining": "放弃训练只丢弃本次暂存样本，不删除已有轨迹和模板。"
+            "scope": "适用范围用于归因学习结果；网页目标通常是 URL host，桌面目标可以是应用或全局键鼠能力。",
+            "actionType": "动作类型来自真实键鼠事件链，例如点击、拖拽、滚动、键盘输入；模板只影响执行轨迹和节奏，不选择业务目标。",
+            "continuousLearning": "开启键鼠输入学习分析后，真实事件会自动生成动作片段并实时入库。",
+            "focusedCapture": "聚焦采集只是给一段练习窗口加范围标签；它不是另一套学习模式，也不需要手动保存。",
+            "templates": "能力模板由历史片段聚合生成，包含速度、点数、停顿、按压、键盘 dwell/inter-key 等执行参数。"
         ]
         return object
     }
@@ -721,6 +723,7 @@ public final class ControlService {
 
     private func seedManagementLearningDemoTemplate() throws -> AggregateReport {
         _ = try profileStore.forget(host: Self.managementLearningDemoHost, sig: Self.managementLearningDemoSig)
+        _ = try profileStore.forget(host: Self.managementLearningDemoBaselineHost, sig: nil)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         for index in 0..<30 {
             let origin = CGPoint(x: 70 + Double(index % 5) * 7, y: 78 + Double(index % 4) * 9)
@@ -843,6 +846,7 @@ public final class ControlService {
             ],
             "options": [
                 "dryRun": true,
+                "disableProfiles": baseline,
                 "postMode": "global",
                 "browserChromeOverlayPolicy": "off",
                 "timeoutMs": 8_000
@@ -863,6 +867,12 @@ public final class ControlService {
             "ok": result["ok"] as? Bool ?? false,
             "profileApplied": profiles["applied"] as? Bool ?? false,
             "templateIds": profiles["templateIds"] ?? [],
+            "humanization": [
+                "profileApplied": profiles["applied"] as? Bool ?? false,
+                "templateIds": profiles["templateIds"] ?? [],
+                "eventChainTypes": events.compactMap { $0["type"] as? String }
+            ],
+            "metrics": eventMetricsObject(events),
             "eventCount": events.count,
             "mouseMoveCount": mouseMoves.count,
             "mouseDownCount": mouseDowns.count,
@@ -873,8 +883,104 @@ public final class ControlService {
         ]
     }
 
+    private func eventMetricsObject(_ events: [[String: Any]]) -> [String: Any] {
+        let points = events.compactMap { event -> CGPoint? in
+            guard let location = event["location"] as? [String: Any],
+                  let x = number(location["x"]),
+                  let y = number(location["y"]) else {
+                return nil
+            }
+            return CGPoint(x: x, y: y)
+        }
+        let pathLength = zip(points.dropFirst(), points).reduce(0.0) { total, pair in
+            total + hypot(pair.0.x - pair.1.x, pair.0.y - pair.1.y)
+        }
+        let durationMs = eventDurationMs(events)
+        let straightness: Double?
+        if let first = points.first, let last = points.last, pathLength > 0 {
+            straightness = max(0, min(1, hypot(last.x - first.x, last.y - first.y) / pathLength))
+        } else {
+            straightness = nil
+        }
+        let speedPxS: Double?
+        if let durationMs, durationMs > 0, pathLength > 0 {
+            speedPxS = pathLength / durationMs * 1000
+        } else {
+            speedPxS = nil
+        }
+        return [
+            "pointCount": points.count,
+            "pathLengthPx": pathLength,
+            "durationMs": durationMs as Any? ?? NSNull(),
+            "speedPxS": speedPxS as Any? ?? NSNull(),
+            "straightness": straightness as Any? ?? NSNull(),
+            "turnJitter": turnJitter(points) as Any? ?? NSNull(),
+            "clickHoldMs": replayHoldDurations(from: injectedEvents(from: events)),
+            "interClickMs": replayInterClickDurations(from: injectedEvents(from: events))
+        ]
+    }
+
+    private func injectedEvents(from events: [[String: Any]]) -> [InjectedEvent] {
+        events.map { event in
+            let location = (event["location"] as? [String: Any]).flatMap { pointObject -> CodablePoint? in
+                guard let x = number(pointObject["x"]), let y = number(pointObject["y"]) else {
+                    return nil
+                }
+                return CodablePoint(x: x, y: y)
+            }
+            let virtualKey = (event["virtualKey"] as? UInt16) ?? intValue(event["virtualKey"]).map(UInt16.init)
+            return InjectedEvent(
+                type: event["type"] as? String ?? "event",
+                location: location,
+                key: event["key"] as? String,
+                virtualKey: virtualKey,
+                timestamp: event["timestamp"] as? String ?? ""
+            )
+        }
+    }
+
+    private func eventDurationMs(_ events: [[String: Any]]) -> Double? {
+        let dates = events.compactMap { event -> Date? in
+            guard let timestamp = event["timestamp"] as? String else {
+                return nil
+            }
+            return isoFormatter.date(from: timestamp)
+        }
+        guard let first = dates.first, let last = dates.last, last >= first else {
+            return nil
+        }
+        return last.timeIntervalSince(first) * 1000
+    }
+
+    private func turnJitter(_ points: [CGPoint]) -> Double? {
+        guard points.count > 2 else {
+            return nil
+        }
+        var turns = [Double]()
+        for index in 1..<(points.count - 1) {
+            let previous = points[index - 1]
+            let current = points[index]
+            let next = points[index + 1]
+            let a1 = atan2(current.y - previous.y, current.x - previous.x)
+            let a2 = atan2(next.y - current.y, next.x - current.x)
+            turns.append(abs(normalizeAngle(a2 - a1)) / Double.pi)
+        }
+        return turns.isEmpty ? nil : turns.reduce(0, +) / Double(turns.count)
+    }
+
+    private func normalizeAngle(_ value: Double) -> Double {
+        var result = value
+        while result > Double.pi {
+            result -= Double.pi * 2
+        }
+        while result < -Double.pi {
+            result += Double.pi * 2
+        }
+        return result
+    }
+
     private func learningTemplateSummaryObject(_ template: ProfileTemplate) -> [String: Any] {
-        [
+        var object: [String: Any] = [
             "host": template.host,
             "elementSig": template.elementSig,
             "taskId": template.taskId ?? NSNull(),
@@ -884,6 +990,50 @@ public final class ControlService {
             "updatedAt": template.updatedAt,
             "updatedAtText": isoString(ms: template.updatedAt)
         ]
+        if let motion = decodedMotionProfile(from: template) {
+            object["motion"] = motionSummaryObject(motion)
+        }
+        return object
+    }
+
+    private func motionSummaryObject(_ motion: MotionProfile) -> [String: Any] {
+        [
+            "flavor": motion.flavor?.rawValue ?? NSNull(),
+            "behaviorBlend": motion.behaviorBlend.map { blend in
+                [
+                    "idle": blend.idle,
+                    "normal": blend.normal,
+                    "flow": blend.flow,
+                    "lowEfficiency": blend.lowEfficiency
+                ]
+            } ?? NSNull(),
+            "moveSpeedPxS": rangeObject(motion.moveSpeedPxS),
+            "dragSpeedPxS": rangeObject(motion.dragSpeedPxS),
+            "pointCount": rangeObject(motion.pointCount),
+            "clickHoldMs": rangeObject(motion.clickHoldMs),
+            "interClickMs": rangeObject(motion.interClickMs),
+            "dwellMsMean": motion.dwellMsMean as Any? ?? NSNull(),
+            "interKeyMsMean": motion.interKeyMsMean as Any? ?? NSNull(),
+            "straightnessMean": motion.straightnessMean as Any? ?? NSNull(),
+            "turnJitterMean": motion.turnJitterMean as Any? ?? NSNull(),
+            "hesitationProbability": motion.hesitationProbability as Any? ?? NSNull(),
+            "detourProbability": motion.detourProbability as Any? ?? NSNull(),
+            "targetSpreadPx": motion.targetSpreadPx as Any? ?? NSNull()
+        ]
+    }
+
+    private func rangeObject(_ range: IntRange?) -> Any {
+        guard let range else {
+            return NSNull()
+        }
+        return ["min": range.min, "max": range.max]
+    }
+
+    private func rangeObject(_ range: DoubleRange?) -> Any {
+        guard let range else {
+            return NSNull()
+        }
+        return ["min": range.min, "max": range.max]
     }
 
     private func cancelCurrentAction() {
@@ -931,7 +1081,7 @@ public final class ControlService {
                 eventId: sample.id,
                 type: sample.eventType,
                 point: sample.point.map { TracePoint(x: $0.x, y: $0.y) },
-                keyCode: nil,
+                keyCode: sample.keyCode,
                 points: sample.pathSkeleton.map { TracePoint(x: $0.x, y: $0.y) },
                 origin: sample.pathSkeleton.first.map { TracePoint(x: $0.x, y: $0.y) },
                 targetPoint: sample.pathSkeleton.last.map { TracePoint(x: $0.x, y: $0.y) },
@@ -940,6 +1090,8 @@ public final class ControlService {
                 hesitationMs: sample.hesitationMs,
                 clickHoldMs: sample.clickHoldMs,
                 interClickMs: sample.interClickMs,
+                dwellMs: sample.dwellMs,
+                interKeyMs: sample.interKeyMs,
                 straightness: sample.straightness,
                 turnJitter: sample.turnJitter,
                 pathLengthPx: sample.pathLengthPx,
@@ -1125,7 +1277,10 @@ public final class ControlService {
             postMode: postMode,
             timeoutMs: intValue(object["timeoutMs"]),
             dryRun: object["dryRun"] as? Bool ?? false,
-            browserChromeOverlayPolicy: browserChromeOverlayPolicy(from: object)
+            browserChromeOverlayPolicy: browserChromeOverlayPolicy(from: object),
+            disableProfiles: object["disableProfiles"] as? Bool
+                ?? object["disable_profiles"] as? Bool
+                ?? false
         )
     }
 
@@ -1747,6 +1902,8 @@ public final class ControlService {
             "durationMs": trace.durationMs as Any? ?? NSNull(),
             "clickHoldMs": trace.clickHoldMs,
             "interClickMs": trace.interClickMs,
+            "dwellMs": trace.dwellMs,
+            "interKeyMs": trace.interKeyMs,
             "pathLengthPx": trace.pathLengthPx as Any? ?? NSNull(),
             "speedPxS": trace.speedPxS as Any? ?? NSNull(),
             "straightness": trace.straightness as Any? ?? NSNull(),

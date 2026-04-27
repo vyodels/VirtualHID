@@ -71,6 +71,7 @@ public struct PassiveGestureSample: Codable, Equatable {
     public let actionType: String
     public let eventType: String
     public let point: ObservedPoint?
+    public let keyCode: UInt16?
     public let pathSkeleton: [ObservedPoint]
     public let pointCount: Int
     public let durationMs: Double?
@@ -78,6 +79,8 @@ public struct PassiveGestureSample: Codable, Equatable {
     public let hesitationMs: [Double]
     public let clickHoldMs: [Double]
     public let interClickMs: [Double]
+    public let dwellMs: [Double]
+    public let interKeyMs: [Double]
     public let pathLengthPx: Double?
     public let speedPxS: Double?
     public let straightness: Double?
@@ -96,6 +99,7 @@ public struct PassiveGestureSample: Codable, Equatable {
         actionType: String,
         eventType: String,
         point: ObservedPoint?,
+        keyCode: UInt16? = nil,
         pathSkeleton: [ObservedPoint],
         pointCount: Int,
         durationMs: Double?,
@@ -103,6 +107,8 @@ public struct PassiveGestureSample: Codable, Equatable {
         hesitationMs: [Double],
         clickHoldMs: [Double],
         interClickMs: [Double],
+        dwellMs: [Double] = [],
+        interKeyMs: [Double] = [],
         pathLengthPx: Double?,
         speedPxS: Double?,
         straightness: Double?,
@@ -120,6 +126,7 @@ public struct PassiveGestureSample: Codable, Equatable {
         self.actionType = actionType
         self.eventType = eventType
         self.point = point
+        self.keyCode = keyCode
         self.pathSkeleton = pathSkeleton
         self.pointCount = pointCount
         self.durationMs = durationMs
@@ -127,6 +134,8 @@ public struct PassiveGestureSample: Codable, Equatable {
         self.hesitationMs = hesitationMs
         self.clickHoldMs = clickHoldMs
         self.interClickMs = interClickMs
+        self.dwellMs = dwellMs
+        self.interKeyMs = interKeyMs
         self.pathLengthPx = pathLengthPx
         self.speedPxS = speedPxS
         self.straightness = straightness
@@ -185,6 +194,11 @@ final class PassiveLearningRecorder {
         let prelude: [PassiveLearningTimedPoint]
     }
 
+    private struct KeyDown {
+        let keyCode: UInt16
+        let ts: Int64
+    }
+
     private static let globalHost = "__global__"
 
     private var settings = PassiveLearningSettings()
@@ -193,7 +207,9 @@ final class PassiveLearningRecorder {
     private var moveBuffer = [PassiveLearningTimedPoint]()
     private var dragBuffer = [PassiveLearningTimedPoint]()
     private var buttonDown: ButtonDown?
+    private var keyDowns = [UInt16: KeyDown]()
     private var lastClickUpAt: Int64?
+    private var lastKeyUpAt: Int64?
     private var producedSamples = 0
     private var recentSamples = [PassiveGestureSample]()
     private var lastSampleAt: Int64?
@@ -242,7 +258,9 @@ final class PassiveLearningRecorder {
             startedAt: now
         )
         settings.enabled = true
-        settings.mode = .training
+        if settings.mode == .off {
+            settings.mode = .passive
+        }
         resetGestureBuffers()
         return state
     }
@@ -252,7 +270,7 @@ final class PassiveLearningRecorder {
         let discarded = commit ? 0 : pendingTrainingSamples.count
         if var session = activeSession {
             session.endedAt = currentTimeMs()
-            session.status = commit ? "committed" : "discarded"
+            session.status = commit ? "ended" : "discarded"
             session.discardedCount += discarded
             activeSession = session
         }
@@ -290,6 +308,14 @@ final class PassiveLearningRecorder {
             }
         case "scrollWheel":
             if let sample = scrollSample(event: event, host: host, taskId: taskId) {
+                samples.append(sample)
+            }
+        case "keyDown":
+            if let keyCode = event.keyCode {
+                keyDowns[UInt16(keyCode)] = KeyDown(keyCode: UInt16(keyCode), ts: event.ts)
+            }
+        case "keyUp":
+            if let sample = keySample(event: event, host: host, taskId: taskId) {
                 samples.append(sample)
             }
         default:
@@ -341,7 +367,9 @@ final class PassiveLearningRecorder {
             point: event.point ?? down.point,
             path: path,
             clickHoldMs: [clickHold],
-            interClickMs: interClick
+            interClickMs: interClick,
+            dwellMs: [],
+            interKeyMs: []
         )
     }
 
@@ -360,12 +388,46 @@ final class PassiveLearningRecorder {
             point: point,
             path: [PassiveLearningTimedPoint(point: point, ts: event.ts)],
             clickHoldMs: [],
-            interClickMs: []
+            interClickMs: [],
+            dwellMs: [],
+            interKeyMs: []
+        )
+    }
+
+    private func keySample(event: ObservedEvent, host: String?, taskId: String?) -> PassiveGestureSample? {
+        guard let keyCode = event.keyCode else {
+            return nil
+        }
+        let normalizedKeyCode = UInt16(keyCode)
+        let down = keyDowns.removeValue(forKey: normalizedKeyCode)
+        let dwell = down.map { max(0, Double(event.ts - $0.ts)) }
+        let interKey: [Double]
+        if let lastKeyUpAt {
+            interKey = [max(0, Double(event.ts - lastKeyUpAt))]
+        } else {
+            interKey = []
+        }
+        lastKeyUpAt = event.ts
+        return makeSample(
+            ts: event.ts,
+            source: sampleSource,
+            host: resolvedHost(host),
+            taskId: nil,
+            stage: taskId,
+            actionType: activeSession?.targetAction ?? "type",
+            eventType: event.type,
+            point: nil,
+            keyCode: normalizedKeyCode,
+            path: [],
+            clickHoldMs: [],
+            interClickMs: [],
+            dwellMs: dwell.map { [$0] } ?? [],
+            interKeyMs: interKey
         )
     }
 
     private var sampleSource: String {
-        settings.mode == .training ? "user-training" : "user-passive"
+        activeSession == nil ? "user-passive" : "user-focused"
     }
 
     private func publish(_ samples: [PassiveGestureSample]) -> [PassiveGestureSample] {
@@ -378,11 +440,9 @@ final class PassiveLearningRecorder {
         if recentSamples.count > 24 {
             recentSamples.removeFirst(recentSamples.count - 24)
         }
-        if var session = activeSession, settings.mode == .training {
+        if var session = activeSession {
             session.sampleCount += samples.count
             activeSession = session
-            pendingTrainingSamples.append(contentsOf: samples)
-            return []
         }
         return samples
     }
@@ -396,12 +456,15 @@ final class PassiveLearningRecorder {
         actionType: String,
         eventType: String,
         point: ObservedPoint?,
+        keyCode: UInt16? = nil,
         path: [PassiveLearningTimedPoint],
         clickHoldMs: [Double],
-        interClickMs: [Double]
+        interClickMs: [Double],
+        dwellMs: [Double],
+        interKeyMs: [Double]
     ) -> PassiveGestureSample? {
         let compact = compactPath(path)
-        guard compact.count >= settings.minGesturePoints || actionType == "click" || actionType == "scroll" else {
+        guard compact.count >= settings.minGesturePoints || actionType == "click" || actionType == "scroll" || actionType == "type" else {
             return nil
         }
         let skeleton = downsample(compact, limit: settings.maxSkeletonPoints)
@@ -426,6 +489,7 @@ final class PassiveLearningRecorder {
             actionType: activeSession?.targetAction ?? actionType,
             eventType: eventType,
             point: point ?? compact.last?.point,
+            keyCode: keyCode,
             pathSkeleton: skeleton.map(\.point),
             pointCount: compact.count,
             durationMs: durationMs,
@@ -433,6 +497,8 @@ final class PassiveLearningRecorder {
             hesitationMs: hesitationDurations(segmentMs),
             clickHoldMs: clickHoldMs.filter { $0 > 0 },
             interClickMs: interClickMs.filter { $0 > 0 },
+            dwellMs: dwellMs.filter { $0 > 0 },
+            interKeyMs: interKeyMs.filter { $0 > 0 },
             pathLengthPx: pathLength > 0 ? pathLength : nil,
             speedPxS: speed,
             straightness: computeStraightness(compact.map(\.point)),
@@ -472,7 +538,9 @@ final class PassiveLearningRecorder {
         moveBuffer.removeAll()
         dragBuffer.removeAll()
         buttonDown = nil
+        keyDowns.removeAll()
         lastClickUpAt = nil
+        lastKeyUpAt = nil
     }
 
     private func resolvedHost(_ host: String?) -> String {

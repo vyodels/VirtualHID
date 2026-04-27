@@ -6,7 +6,7 @@
 
 - Edge/Safari live 矩阵：Chrome `windowId / tabId / host` 目标归因已通过 live smoke，Edge/Safari 仍需真实浏览器环境复验。
 - 滚动后跨项目重采样链路：VirtualHID 已返回 `E_VIEWPORT_RESAMPLE_REQUIRED` 阻止旧坐标盲点；真正“滚动 -> browser/Agent 重采样 -> 再执行”需要上游提交更新后的 `scrollOffset/pageScale/viewport`。
-- 真实长期样本质量：daemon replay 指纹持久化、被动鼠标习惯学习、专项训练和 synthetic proposal/apply smoke 已完成；仍需人工/HID 真实样本对照验证 profile 是否持续收敛。
+- 真实长期样本质量：daemon replay 指纹持久化、键鼠输入学习分析、聚焦采集自动入库和 synthetic proposal/apply smoke 已完成；仍需人工/HID 真实样本对照验证 profile 是否持续收敛。
 - `imePinyin`：中文 `pasteText` fallback 已可用；逐字拟人化 IME 采集/回放仍未实现。
 
 ## 中文输入支持
@@ -25,7 +25,7 @@
 
 M2-M7 主计划已经完成，但下一阶段还有一组结构性能力待补：
 
-- 回放级 `compact trace` 指纹：daemon 持久化、被动学习和专项训练已落地；下一步是真实样本回归
+- 回放级 `compact trace` 指纹：daemon 持久化、键鼠输入学习分析和聚焦采集已落地；下一步是真实样本回归
 - `windowId / tabId / host` 级目标解析与激活：Chrome 已有 live smoke；Edge/Safari 待矩阵
 - viewport → OS 绝对坐标换算下沉到 VirtualHID；primitive 坐标、origin 与 landingZone 已统一映射
 - 执行结果证据化：已区分注入、指针、焦点、observer 和语义确认；页面语义成功仍由 browser / Agent 回写

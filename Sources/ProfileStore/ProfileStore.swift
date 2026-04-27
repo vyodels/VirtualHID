@@ -246,6 +246,8 @@ public struct TraceSummary: Codable, Equatable {
     public let durationMs: Double?
     public let clickHoldMs: [Double]
     public let interClickMs: [Double]
+    public let dwellMs: [Double]
+    public let interKeyMs: [Double]
     public let pathLengthPx: Double?
     public let speedPxS: Double?
     public let straightness: Double?
@@ -265,6 +267,8 @@ public struct TraceSummary: Codable, Equatable {
         durationMs: Double?,
         clickHoldMs: [Double],
         interClickMs: [Double],
+        dwellMs: [Double] = [],
+        interKeyMs: [Double] = [],
         pathLengthPx: Double?,
         speedPxS: Double?,
         straightness: Double?,
@@ -283,6 +287,8 @@ public struct TraceSummary: Codable, Equatable {
         self.durationMs = durationMs
         self.clickHoldMs = clickHoldMs
         self.interClickMs = interClickMs
+        self.dwellMs = dwellMs
+        self.interKeyMs = interKeyMs
         self.pathLengthPx = pathLengthPx
         self.speedPxS = speedPxS
         self.straightness = straightness
@@ -780,6 +786,8 @@ public final class ProfileStore {
                         durationMs: payload?.durationMs,
                         clickHoldMs: payload?.clickHoldMs ?? [],
                         interClickMs: payload?.interClickMs ?? [],
+                        dwellMs: payload?.dwellMs ?? [],
+                        interKeyMs: payload?.interKeyMs ?? [],
                         pathLengthPx: payload?.pathLengthPx,
                         speedPxS: payload?.speedPxS,
                         straightness: payload?.straightness,

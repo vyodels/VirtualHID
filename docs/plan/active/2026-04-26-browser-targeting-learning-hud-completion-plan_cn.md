@@ -132,18 +132,18 @@
 
 补充进展（2026-04-27）：
 
-- `PassiveLearning` 已接入 `PassiveObserver`，在用户显式开启后从真实鼠标事件流自动生成 compact 行为样本。
+- `PassiveLearning` 已接入 `PassiveObserver`，在用户显式开启后从真实键鼠事件流自动生成 compact 行为样本。
 - `learning.state / learning.configure / learning.session.start / learning.session.stop` 已进入 daemon JSON-RPC 控制面。
-- 专项训练样本在提交前只留在 session buffer，提交后才写入 `ProfileStore`；丢弃训练不会落库。
-- `ProfileStore.lookupTemplate` 已加入 `__global__` 全局鼠标习惯模板 fallback，避免按站点硬编码鼠标习惯。
+- 聚焦采集样本实时自动写入 `ProfileStore`；`learning.session.stop` 只结束采集窗口，不再作为手动保存入口。
+- `ProfileStore.lookupTemplate` 已加入 `__global__` 全局键鼠能力模板 fallback，避免按站点硬编码行为规则。
 - 仍缺真实人工/HID 长期样本回归；当前 synthetic smoke 只证明闭环通路可用。
 
 任务：
 
 - action 完成后按 `instructionKey` 自动生成 compact trace fingerprint。
 - 将 trace 持久化到 ProfileStore/ReplayTraceStore，而不是只写临时 JSON。
-- 被动学习只保存压缩行为指纹，不保存完整原始轨迹、DOM、页面文本或截图。
-- 专项训练必须由托盘或本地控制 API 明确开始/提交/丢弃。
+- 键鼠输入学习分析只保存压缩行为指纹，不保存完整原始轨迹、DOM、页面文本或截图。
+- 聚焦采集必须由托盘或本地控制 API 明确开始/结束；样本实时入库，不要求用户手动保存。
 - 加入敏感字段过滤、大小限制、retention 和低质量样本淘汰。
 - 为真实样本建立最小回归集：人工样本、HID 样本、replay fingerprint、聚合 profile。
 
@@ -270,6 +270,6 @@
 - 真实 Chrome 已有目标激活验收；Edge/Safari 需要后续矩阵或记录环境缺口。
 - 滚动后二次坐标不允许复用旧坐标，已由 live guard 验收；跨项目“滚动后重采样再执行”需要 Agent/browser 配合。
 - response 能区分注入、指针、焦点、observer 和语义确认。
-- daemon 能自动生成并持久化 compact trace，被动学习和专项训练可写入 compact 行为样本，synthetic long-history 可驱动 profile patch proposal 并受控 apply。
+- daemon 能自动生成并持久化 compact trace，键鼠输入学习分析和聚焦采集可写入 compact 行为样本，synthetic long-history 可驱动 profile patch proposal 并受控 apply。
 - 中文 `pasteText` fallback 可用；`imePinyin` 明确继续列为后续项。
 - HUD 真实 GUI 视觉验收已有截图证据。

@@ -175,17 +175,20 @@ public struct ActionOptions: Codable {
     public var timeoutMs: Int?
     public var dryRun: Bool
     public var browserChromeOverlayPolicy: BrowserChromeOverlayPolicy
+    public var disableProfiles: Bool
 
     public init(
         postMode: PostMode? = nil,
         timeoutMs: Int? = nil,
         dryRun: Bool = false,
-        browserChromeOverlayPolicy: BrowserChromeOverlayPolicy = .auto
+        browserChromeOverlayPolicy: BrowserChromeOverlayPolicy = .auto,
+        disableProfiles: Bool = false
     ) {
         self.postMode = postMode
         self.timeoutMs = timeoutMs
         self.dryRun = dryRun
         self.browserChromeOverlayPolicy = browserChromeOverlayPolicy
+        self.disableProfiles = disableProfiles
     }
 }
 

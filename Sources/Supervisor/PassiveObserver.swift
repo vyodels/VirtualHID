@@ -181,7 +181,7 @@ public final class PassiveObserver {
         }
 
         let keyCode: CGKeyCode?
-        if type == .keyDown || type == .keyUp {
+        if type == .keyDown || type == .keyUp || type == .flagsChanged {
             keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         } else {
             keyCode = nil
@@ -235,6 +235,8 @@ public final class PassiveObserver {
             return "keyDown"
         case .keyUp:
             return "keyUp"
+        case .flagsChanged:
+            return "flagsChanged"
         default:
             return nil
         }

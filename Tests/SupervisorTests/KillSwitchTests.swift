@@ -57,7 +57,7 @@ final class KillSwitchTests: XCTestCase {
         XCTAssertEqual(supervisor.killSwitch.isActive, false)
     }
 
-    func testPassiveLearningBuildsCompactMouseGestureSamplesAndTrainingCommit() {
+    func testPassiveLearningBuildsCompactMouseAndKeyboardGestureSamplesAutomatically() {
         let observer = PassiveObserver()
         var published = [PassiveGestureSample]()
         observer.learningSampleHandler = { sample in
@@ -80,17 +80,24 @@ final class KillSwitchTests: XCTestCase {
         XCTAssertTrue((published[0].speedPxS ?? 0) > 0)
         XCTAssertTrue((published[0].straightness ?? 0) < 1)
 
-        _ = observer.startLearningSession(label: "专项训练", host: "training.local", targetAction: "click")
+        _ = observer.startLearningSession(label: nil, host: "training.local", targetAction: nil)
         _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 10, y: 10), ts: 2_000)
         _ = observer.appendSynthetic(type: "mouseMoved", point: ObservedPoint(x: 34, y: 18), ts: 2_070)
         _ = observer.appendSynthetic(type: "leftMouseDown", point: ObservedPoint(x: 58, y: 30), ts: 2_130)
         _ = observer.appendSynthetic(type: "leftMouseUp", point: ObservedPoint(x: 58, y: 30), ts: 2_200)
-        XCTAssertEqual(published.count, 1, "training samples should stay pending until committed")
+        XCTAssertEqual(published.count, 2, "focused capture samples are persisted automatically")
+        XCTAssertEqual(published[1].source, "user-focused")
+        XCTAssertEqual(published[1].host, "training.local")
 
         let stop = observer.stopLearningSession(commit: true)
-        XCTAssertEqual(stop.committedSamples.count, 1)
+        XCTAssertEqual(stop.committedSamples.count, 0)
         XCTAssertEqual(published.count, 2)
-        XCTAssertEqual(published[1].source, "user-training")
-        XCTAssertEqual(published[1].host, "training.local")
+
+        _ = observer.appendSynthetic(type: "keyDown", keyCode: 12, ts: 3_000)
+        _ = observer.appendSynthetic(type: "keyUp", keyCode: 12, ts: 3_082)
+        XCTAssertEqual(published.count, 3)
+        XCTAssertEqual(published[2].actionType, "type")
+        XCTAssertEqual(published[2].keyCode, 12)
+        XCTAssertEqual(published[2].dwellMs.first, 82)
     }
 }

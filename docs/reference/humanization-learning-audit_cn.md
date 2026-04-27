@@ -4,7 +4,7 @@
 
 ## 结论
 
-VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟人化与学习基础：轨迹、节律、落点采样、被动鼠标习惯学习、专项训练、profile 聚合、执行时 profile 应用、daemon replay 指纹持久化、长期分析入口、replay-aware report 和受控 profile patch apply 都已经存在。当前缺口不再是“没有拟人化/没有学习”，而是真实长期人工/HID 样本质量还没有闭环验收，`imePinyin` 逐字中文输入也尚未实现。
+VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟人化与学习基础：轨迹、节律、落点采样、键鼠输入学习分析、聚焦采集、profile 聚合、执行时 profile 应用、daemon replay 指纹持久化、长期分析入口、replay-aware report 和受控 profile patch apply 都已经存在。当前缺口不再是“没有拟人化/没有学习”，而是真实长期人工/HID 样本质量还没有闭环验收，`imePinyin` 逐字中文输入也尚未实现。
 
 本审计只收敛通用 HID 能力，不引入招聘站点规则。上游 browser / recruit-agent 仍只负责目标选择、DOM 发现、业务语义确认；实际 screen 坐标换算、HID 落点、轨迹和节奏必须由 VirtualHID 产生。
 
@@ -12,8 +12,8 @@ VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟�
 
 - 拟人化执行：`Sources/HumanizationKit/HumanizationKit.swift` 已提供 `WindMouse` / `BezierMouse`、`HumanTimingCurve`、`BehaviorBlend`、`MotionProfile`、`KeystrokeRhythm`；执行层在 `Sources/InjectorCore/ActionCore.swift` 中把 click / drag / move / type 转成完整事件流，并支持 `landingZone` 内 HID 自采样落点。
 - 学习闭环：`Sources/ProfileStore/ProfileStore.swift` 已支持 rich `TracePayload`、SQLite trace/template、retention、`profiles.rebuild` 聚合和 `LearnedMotionTemplate` 输出；`Sources/ControlServer/ControlService.swift` 会在 action 前按 `host + sig + taskId + actionType` 查询并应用 profile。
-- 被动学习：`Sources/Supervisor/PassiveLearning.swift` 会在用户显式开启后从真实鼠标事件流提取 compact `PassiveGestureSample`，只保存路径骨架、节奏、停顿、hold/inter-click、速度和形状特征，不保存 DOM、截图、业务文本或完整原始轨迹。
-- 专项训练：`learning.session.start/stop` 支持训练会话，托盘控制面可开始、提交或丢弃训练；提交后的样本进入 `ProfileStore` 并可触发模板重建。
+- 键鼠输入学习分析：`Sources/Supervisor/PassiveLearning.swift` 会在用户显式开启后从真实鼠标、滚动、拖拽、键盘事件流提取 compact `PassiveGestureSample`，只保存路径骨架、节奏、停顿、hold/inter-click、dwell/inter-key、速度和形状特征，不保存 DOM、截图、业务文本或完整原始轨迹。
+- 聚焦采集：`learning.session.start/stop` 支持给一段练习窗口打范围标签；样本会实时自动进入 `ProfileStore`，stop 只结束窗口，不再作为手动保存入口。
 - Replay 指纹：`Sources/ProfileStore/ReplayTraceStore.swift` 已支持 compact `ReplayTraceFingerprint`、路径骨架、节奏片段、质量分、retention 和 summary；`ControlService.action` 会自动把 HID action events 转为 daemon replay fingerprint 并持久化。
 - 长期分析入口：`scripts/humanization_analysis.py` 可读 `results/humanization-history.jsonl`，按 `instructionKey` 聚合人工/HID 差异，并消费 `replayFingerprint / compactTrace` 输出 replay-aware tuning 和 `profilePatchProposal`；`scripts/report_server.py` 通过 `GET /analysis/report` 暴露报告，并通过 `POST /analysis/apply-profile-patch?confirm=true` 提供受控 apply 入口。
 
@@ -21,8 +21,8 @@ VirtualHID 已具备可用于 mock recruiting workflow 后续评估的通用拟�
 
 - `scripts/humanization_analysis.py` 现在会把 Swift 风格 top-level `segmentMs / hesitationMs / clickHoldMs / interClickMs / dwellMs / interKeyMs` 归一化为 `recommendedProfile.preferredRhythm`，避免 replay-aware report 检测到 compact trace 但推荐 profile 里丢失节奏片段。
 - `ActionCore` dry-run 已使用虚拟时间线推进 `sleep`，因此 click hold、inter-click 和 settle 节奏能在无真实 HID 投递时被测试和沉淀为 replay 指纹。
-- `ProfileStore.lookupTemplate` 已增加全局鼠标习惯模板 fallback：精确 host/sig/task/action 未命中时，可回退到 `__global__` 通用行为模板，避免把站点规则写入执行层。
-- `VirtualHID.app` 管理中心已增加中文学习控制面：开启/关闭学习、选择被动学习或专项训练、填写训练名称、复用范围和练习动作，并开始本次采集、保存本次训练或丢弃本次采集；同时展示系统事件监听状态、实时原始事件、动作片段、历史片段、模板摘要，并能通过“演示学习效果”触发安全 dry-run 的 `learning.demo.run`，让 HUD 分步展示 VirtualHID planned events 产生的未使用模板 / 使用模板轨迹差异，不真实点击页面。
+- `ProfileStore.lookupTemplate` 已增加全局键鼠能力模板 fallback：精确 host/sig/task/action 未命中时，可回退到 `__global__` 通用行为模板，避免把站点规则写入执行层。
+- `VirtualHID.app` 管理中心已增加中文学习控制面：开启/关闭键鼠输入学习分析、开始/结束聚焦采集、展示系统事件监听状态、实时原始事件、动作片段、历史片段，并单独提供“能力模板”和“效果分析”页面。效果分析通过安全 dry-run 的 `learning.demo.run` 触发，让 HUD 分步展示 VirtualHID planned events 产生的未使用模板 / 使用模板轨迹差异，不真实点击页面。
 - 新增 `docs/reference/fixtures/humanization-replay-history.jsonl`，用于快速验证 replay-aware report 不依赖真实站点或业务语义。
 - 新增 `scripts/analysis-apply-smoke.sh`，构造 10 条长期样本，验证 `profilePatchProposal -> profiles.apply -> action profiles.applied`。
 - `docs/TODO_cn.md` 已更新为“daemon replay/apply 通路已存在，缺真实长期样本验收”，避免后续 worker 误判为完全未实现。
