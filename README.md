@@ -76,6 +76,8 @@ python3 scripts/humanization_analysis.py --pretty
 open dist/VirtualHID.app
 ```
 
+`dist/VirtualHID.app` 会以稳定 bundle id `com.vyodels.VirtualHID` 进行本地 ad-hoc 签名。首次开启鼠标习惯学习前，需要在 macOS 系统设置里给这个 app 打开“辅助功能”和“输入监控”；管理中心的“安全”页提供了跳转按钮。重新构建后如果系统仍显示未授权，通常是旧未签名 bundle 的 TCC 记录残留，移除旧 VirtualHID 条目后重新添加 `dist/VirtualHID.app` 即可。
+
 仅在 VirtualHID Web 实验台自测时，才使用实验台自动拉起带 HUD 控制能力的内部执行服务：
 
 ```bash

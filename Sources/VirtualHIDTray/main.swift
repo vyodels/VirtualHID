@@ -189,6 +189,14 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         }
     }
 
+    @objc private func openAccessibilitySettingsAction(_ sender: Any?) {
+        openSystemSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    @objc private func openInputMonitoringSettingsAction(_ sender: Any?) {
+        openSystemSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+    }
+
     @objc private func stopAction(_ sender: Any?) {
         do {
             _ = try call(method: "stop", params: [:])
@@ -671,6 +679,12 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         buttons.addArrangedSubview(actionButton("解除 Kill Switch / 清理输入状态", action: #selector(unlockAction(_:))))
         buttons.addArrangedSubview(actionButton("刷新状态", action: #selector(refreshAction(_:))))
         cardContent.addArrangedSubview(buttons)
+        let permissionButtons = NSStackView()
+        permissionButtons.orientation = .horizontal
+        permissionButtons.spacing = 8
+        permissionButtons.addArrangedSubview(actionButton("打开辅助功能授权", action: #selector(openAccessibilitySettingsAction(_:))))
+        permissionButtons.addArrangedSubview(actionButton("打开输入监控授权", action: #selector(openInputMonitoringSettingsAction(_:))))
+        cardContent.addArrangedSubview(permissionButtons)
         card.addContent(cardContent)
         stack.addArrangedSubview(card)
         return stack
@@ -1079,6 +1093,13 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             throw TrayError(runtimeError ?? "VirtualHID runtime 未启动")
         }
         return try runtime.call(method: method, params: params)
+    }
+
+    private func openSystemSettings(_ urlString: String) {
+        guard let url = URL(string: urlString) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func selectedLearningMode() -> String {

@@ -46,8 +46,14 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <true/>
   <key>NSHumanReadableCopyright</key>
   <string>VirtualHID local runtime</string>
+  <key>NSInputMonitoringUsageDescription</key>
+  <string>VirtualHID 仅在你开启鼠标习惯学习时监听本机鼠标/键盘事件，用于生成可复用的轨迹、节奏和点击习惯模板。</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>VirtualHID 需要辅助功能权限来监听和执行本机 HID 事件，并提供 HUD 可视化与安全停止能力。</string>
 </dict>
 </plist>
 PLIST
+
+/usr/bin/codesign --force --sign - --timestamp=none "$APP_DIR" >/dev/null
 
 echo "$APP_DIR"
