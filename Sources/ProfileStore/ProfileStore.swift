@@ -523,6 +523,7 @@ public final class ProfileStore {
         guard !input.actionType.isEmpty else {
             throw ProfileStoreError.invalidInput("action_type is required")
         }
+        let actionType = Self.canonicalActionType(input.actionType)
 
         let payload = String(data: try encoder.encode(input.payload), encoding: .utf8) ?? "{}"
         return try lock.withLock { [self] in
@@ -539,7 +540,7 @@ public final class ProfileStore {
             bindNullableText(input.elementSig, to: statement, at: 4)
             bindNullableText(input.taskId, to: statement, at: 5)
             bindNullableText(input.stage, to: statement, at: 6)
-            bindText(input.actionType, to: statement, at: 7)
+            bindText(actionType, to: statement, at: 7)
             bindText(payload, to: statement, at: 8)
 
             try stepDone(statement)
@@ -582,7 +583,7 @@ public final class ProfileStore {
             keyCode: keyCode,
             points: point.map { [$0] } ?? []
         )
-        let actionType = actionTypeOverride ?? Self.actionType(forObservedType: eventType)
+        let actionType = Self.canonicalActionType(actionTypeOverride ?? Self.actionType(forObservedType: eventType))
         let traceId = try insertTrace(
             TraceInput(
                 ts: ts,
@@ -702,6 +703,7 @@ public final class ProfileStore {
         guard !actionType.isEmpty else {
             throw ProfileStoreError.invalidInput("action_type is required")
         }
+        let canonicalActionType = Self.canonicalActionType(actionType)
         guard let data = paramsJSON.data(using: .utf8),
               (try? decoder.decode(LearnedMotionTemplate.self, from: data)) != nil else {
             throw ProfileStoreError.invalidInput("params must be a LearnedMotionTemplate JSON object")
@@ -710,10 +712,14 @@ public final class ProfileStore {
             host: host,
             elementSig: elementSig,
             taskId: taskId,
-            actionType: actionType,
+            actionType: canonicalActionType,
             sampleSize: max(1, sampleSize),
             confidence: clamp(confidence, min: 0, max: 1),
-            paramsJSON: paramsJSON,
+            paramsJSON: normalizedTemplateParamsJSON(
+                paramsJSON,
+                actionType: canonicalActionType,
+                sampleSize: max(1, sampleSize)
+            ),
             updatedAt: currentTimeMs()
         )
         try lock.withLock {
@@ -793,7 +799,8 @@ public final class ProfileStore {
     }
 
     public func lookupTemplate(host: String, sig: String, taskId: String?, actionType: String) throws -> ProfileTemplate {
-        try lock.withLock {
+        let canonicalActionType = Self.canonicalActionType(actionType)
+        return try lock.withLock {
             let candidates = [
                 (host, sig, taskId ?? ""),
                 (host, sig, ""),
@@ -814,7 +821,7 @@ public final class ProfileStore {
                 bindText(candidateHost, to: statement, at: 1)
                 bindText(candidateSig, to: statement, at: 2)
                 bindText(candidateTaskId, to: statement, at: 3)
-                bindText(actionType, to: statement, at: 4)
+                bindText(canonicalActionType, to: statement, at: 4)
                 if sqlite3_step(statement) == SQLITE_ROW {
                     return template(from: statement)
                 }
@@ -969,16 +976,16 @@ public final class ProfileStore {
         let sql: String
         if host == nil {
             sql = """
-            SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type, COUNT(*)
+            SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression()), COUNT(*)
             FROM traces
-            GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type
+            GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression())
             """
         } else {
             sql = """
-            SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type, COUNT(*)
+            SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression()), COUNT(*)
             FROM traces
             WHERE host = ?
-            GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), action_type
+            GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression())
             """
         }
 
@@ -1010,7 +1017,7 @@ public final class ProfileStore {
         WHERE host = ?
           AND COALESCE(element_sig, '') = ?
           AND COALESCE(task_id, '') = ?
-          AND action_type = ?
+          AND \(Self.canonicalActionTypeSQLExpression()) = ?
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1117,6 +1124,19 @@ public final class ProfileStore {
         sqlite3_bind_int64(statement, 8, template.updatedAt)
 
         try stepDone(statement)
+    }
+
+    private func normalizedTemplateParamsJSON(_ paramsJSON: String, actionType: String, sampleSize: Int) -> String {
+        guard let data = paramsJSON.data(using: .utf8),
+              var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return paramsJSON
+        }
+        object["actionType"] = actionType
+        object["sampleSize"] = sampleSize
+        guard let normalized = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return paramsJSON
+        }
+        return String(data: normalized, encoding: .utf8) ?? paramsJSON
     }
 
     private func deleteTraces(host: String?, sig: String?) throws {
@@ -1950,6 +1970,27 @@ public final class ProfileStore {
         default:
             return "move"
         }
+    }
+
+    private static func canonicalActionType(_ actionType: String) -> String {
+        switch actionType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "key", "keys", "keyboard", "type", "typing", "paste", "pastetext", "paste-text", "paste_text":
+            return "type"
+        case "dblclick", "doubleclick", "double-click", "double_click":
+            return "click"
+        default:
+            return actionType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+    }
+
+    private static func canonicalActionTypeSQLExpression() -> String {
+        """
+        CASE
+          WHEN lower(action_type) IN ('key', 'keys', 'keyboard', 'type', 'typing', 'paste', 'pastetext', 'paste-text', 'paste_text') THEN 'type'
+          WHEN lower(action_type) IN ('dblclick', 'doubleclick', 'double-click', 'double_click') THEN 'click'
+          ELSE lower(action_type)
+        END
+        """
     }
 
     public static func isSensitiveRole(_ role: String?) -> Bool {

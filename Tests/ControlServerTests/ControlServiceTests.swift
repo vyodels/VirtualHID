@@ -567,11 +567,17 @@ final class ControlServiceTests: XCTestCase {
             let result = payload["result"] as? [String: Any]
             let guide = result?["guide"] as? [String: Any]
             let bounds = guide?["bounds"] as? [String: Any]
+            let operationArea = guide?["operationArea"] as? [String: Any]
 
             XCTAssertEqual(payload["ok"] as? Bool, true)
             XCTAssertEqual(guide?["action"] as? String, expectedAction)
             assertPoint(guide?["startPoint"], inside: rect)
             assertPoint(guide?["targetPoint"], inside: rect)
+            assertRect(operationArea, inside: rect)
+            XCTAssertNotNil(guide?["startLabel"])
+            XCTAssertNotNil(guide?["targetLabel"])
+            XCTAssertNotNil(guide?["operationLabel"])
+            XCTAssertNotNil(guide?["completionHint"])
             XCTAssertEqual(bounds?["x"] as? Double, rect.minX)
             XCTAssertEqual(bounds?["y"] as? Double, rect.minY)
             XCTAssertEqual(bounds?["width"] as? Double, rect.width)
@@ -921,6 +927,24 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertLessThanOrEqual(x, rect.maxX, file: file, line: line)
         XCTAssertGreaterThanOrEqual(y, rect.minY, file: file, line: line)
         XCTAssertLessThanOrEqual(y, rect.maxY, file: file, line: line)
+    }
+
+    private func assertRect(_ value: Any?, inside rect: CGRect, file: StaticString = #filePath, line: UInt = #line) {
+        guard let object = value as? [String: Any],
+              let x = object["x"] as? Double,
+              let y = object["y"] as? Double,
+              let width = object["width"] as? Double,
+              let height = object["height"] as? Double
+        else {
+            XCTFail("missing rect", file: file, line: line)
+            return
+        }
+        XCTAssertGreaterThanOrEqual(x, rect.minX, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(y, rect.minY, file: file, line: line)
+        XCTAssertLessThanOrEqual(x + width, rect.maxX, file: file, line: line)
+        XCTAssertLessThanOrEqual(y + height, rect.maxY, file: file, line: line)
+        XCTAssertGreaterThan(width, 0, file: file, line: line)
+        XCTAssertGreaterThan(height, 0, file: file, line: line)
     }
 
     private func seedLearnedDemoProfiles(

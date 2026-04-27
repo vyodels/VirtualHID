@@ -785,18 +785,24 @@ public final class ControlService {
 
     private func teachingGuide(action: String, bounds: CGRect?) -> [String: Any] {
         let points = teachingGuidePoints(action: action, bounds: bounds)
+        let operationArea = teachingOperationArea(action: action, start: points.startPoint, target: points.targetPoint, bounds: points.bounds)
         return [
             "id": "teaching-\(action)-\(Int(Date().timeIntervalSince1970 * 1000))",
             "action": action,
             "startPoint": points.start,
             "targetPoint": points.target,
+            "operationArea": rectObject(operationArea),
+            "startLabel": "起始目标",
+            "targetLabel": teachingTargetLabel(action),
+            "operationLabel": teachingOperationLabel(action),
             "title": "现场教学：\(teachingActionTitle(action))",
             "detail": teachingInstruction(action),
+            "completionHint": "采集到当前动作片段后，管理中心会显示“本条已采集”；不会自动切到下一条。",
             "bounds": rectObject(points.bounds)
         ]
     }
 
-    private func teachingGuidePoints(action: String, bounds: CGRect?) -> (start: [String: Double], target: [String: Double], bounds: CGRect) {
+    private func teachingGuidePoints(action: String, bounds: CGRect?) -> (start: [String: Double], target: [String: Double], startPoint: CGPoint, targetPoint: CGPoint, bounds: CGRect) {
         let visible = bounds ?? defaultTeachingBounds()
         let inset = min(max(32.0, min(visible.width, visible.height) * 0.12), 120.0)
         let minX = visible.minX + inset
@@ -822,7 +828,75 @@ public final class ControlService {
                 y: Double.random(in: Double(minY)...Double(maxY))
             )
         }
-        return (pointObject(start), pointObject(target), visible)
+        return (pointObject(start), pointObject(target), start, target, visible)
+    }
+
+    private func teachingOperationArea(action: String, start: CGPoint, target: CGPoint, bounds: CGRect) -> CGRect {
+        let size: CGSize
+        switch action {
+        case "click":
+            size = CGSize(width: 92, height: 72)
+        case "dblclick":
+            size = CGSize(width: 104, height: 82)
+        case "drag":
+            let rect = CGRect(
+                x: min(start.x, target.x) - 26,
+                y: min(start.y, target.y) - 26,
+                width: abs(target.x - start.x) + 52,
+                height: abs(target.y - start.y) + 52
+            )
+            return clamp(rect: rect, within: bounds)
+        case "scroll":
+            size = CGSize(width: 170, height: 132)
+        case "keyboard":
+            size = CGSize(width: 220, height: 96)
+        default:
+            size = CGSize(width: 78, height: 64)
+        }
+        return clamp(
+            rect: CGRect(x: target.x - size.width / 2, y: target.y - size.height / 2, width: size.width, height: size.height),
+            within: bounds
+        )
+    }
+
+    private func clamp(rect: CGRect, within bounds: CGRect) -> CGRect {
+        let width = min(rect.width, bounds.width)
+        let height = min(rect.height, bounds.height)
+        let x = min(max(rect.minX, bounds.minX), bounds.maxX - width)
+        let y = min(max(rect.minY, bounds.minY), bounds.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func teachingTargetLabel(_ action: String) -> String {
+        switch action {
+        case "click":
+            return "单击目标"
+        case "dblclick":
+            return "双击目标"
+        case "scroll":
+            return "滚动区域"
+        case "keyboard":
+            return "输入焦点"
+        default:
+            return "终止目标"
+        }
+    }
+
+    private func teachingOperationLabel(_ action: String) -> String {
+        switch action {
+        case "click":
+            return "单击操作区域"
+        case "dblclick":
+            return "双击操作区域"
+        case "drag":
+            return "拖拽操作范围"
+        case "scroll":
+            return "滚轮操作区域"
+        case "keyboard":
+            return "键盘输入区域"
+        default:
+            return "移动终点区域"
+        }
     }
 
     private func teachingBounds(from params: [String: Any]) -> CGRect? {

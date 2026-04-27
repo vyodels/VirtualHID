@@ -123,6 +123,68 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertTrue(abs((typeLearned.motion.interKeyMsMean ?? 0) - 134) < 0.01)
     }
 
+    func testRebuildCanonicalizesKeyAndTypeIntoSingleInputTemplate() throws {
+        let store = try ProfileStore(path: ":memory:")
+
+        for index in 0..<3 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_010_000 + index),
+                    source: "user",
+                    host: "__global__",
+                    elementSig: "",
+                    taskId: nil,
+                    stage: nil,
+                    actionType: "key",
+                    payload: TracePayload(
+                        eventId: "key-\(index)",
+                        type: "flagsChanged",
+                        keyCode: 56,
+                        dwellMs: [48 + Double(index)],
+                        modifierFlags: [1],
+                        flagsChangedKeyCodes: [56],
+                        eventTimeline: ["flagsChanged"]
+                    )
+                )
+            )
+        }
+
+        for index in 0..<3 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_011_000 + index),
+                    source: "user",
+                    host: "__global__",
+                    elementSig: "",
+                    taskId: nil,
+                    stage: nil,
+                    actionType: "type",
+                    payload: TracePayload(
+                        eventId: "type-\(index)",
+                        type: "keyUp",
+                        keyCode: 12,
+                        dwellMs: [70 + Double(index)],
+                        interKeyMs: [120 + Double(index)],
+                        eventTimeline: ["keyDown", "keyUp"]
+                    )
+                )
+            )
+        }
+
+        let report = try store.rebuild(host: "__global__")
+        let templates = try store.listTemplates(host: "__global__")
+        let template = try store.lookupTemplate(host: "__global__", sig: "", taskId: nil, actionType: "key")
+        let learned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(template.paramsJSON.utf8))
+
+        XCTAssertEqual(report.scannedTraces, 6)
+        XCTAssertEqual(report.generatedTemplates, 1)
+        XCTAssertEqual(templates.map(\.actionType), ["type"])
+        XCTAssertEqual(template.actionType, "type")
+        XCTAssertEqual(template.sampleSize, 6)
+        XCTAssertEqual(learned.actionType, "type")
+        XCTAssertEqual(learned.sampleSize, 6)
+    }
+
     func testRebuildExposesRawHIDDistributionsForScrollKeyboardAndDoubleClick() throws {
         let store = try ProfileStore(path: ":memory:")
 

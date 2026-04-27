@@ -111,6 +111,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private var teachingStatusLabel: NSTextField?
     private var teachingInstructionLabel: NSTextField?
     private var teachingInstructionTimer: Timer?
+    private var currentTeachingSampleBaseline = 0
+    private var currentTeachingAcceptedTypes = ""
+    private var currentTeachingTitle = ""
     private var lastLearningDemoStatus = "尚未演示。请选择一个动作单独演示；每次只播放当前动作，可重复点击查看轨迹、落点和事件时间线。"
     private var lastLearningDemoAction: (action: String, title: String)?
     private var lastLearningState = LearningState.offline(message: "未连接到 VirtualHID 执行服务")
@@ -311,6 +314,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     @objc private func startTeachingAction(_ sender: Any?) {
         do {
+            currentTeachingSampleBaseline = 0
+            currentTeachingAcceptedTypes = ""
+            currentTeachingTitle = ""
             _ = try call(method: "learning.configure", params: [
                 "enabled": true,
                 "mode": "passive"
@@ -343,9 +349,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func startTeachingInstructionTimer() {
         teachingInstructionTimer?.invalidate()
-        teachingInstructionTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: true) { [weak self] _ in
+        teachingInstructionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             do {
-                try self?.advanceTeachingInstruction()
+                try self?.refreshTeachingProgress()
                 self?.updateControls()
             } catch {
                 self?.handleTeachingError(error)
@@ -388,12 +394,33 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         let title = teaching["title"] as? String ?? "键鼠动作"
         let instruction = teaching["instruction"] as? String ?? "按 HUD 提示完成真实键鼠动作。"
         let accepted = (teaching["acceptedActionTypes"] as? [String] ?? []).joined(separator: " / ")
+        currentTeachingTitle = title
+        currentTeachingAcceptedTypes = accepted.isEmpty ? "当前动作相关事件" : accepted
         teachingInstructionLabel?.stringValue = "当前教学：\(title)\n\(instruction)\n采集范围：\(accepted.isEmpty ? "当前动作相关事件" : accepted)"
-        teachingStatusLabel?.stringValue = "现场教学进行中。VirtualHID 会持续生成下一条指令；你手动点击「结束现场教学」后停止。"
-        teachingStatusLabel?.textColor = .secondaryLabelColor
         let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
         lastLearningState = LearningState(response: learningResponse)
+        currentTeachingSampleBaseline = lastLearningState.activeSessionSampleCount
         lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+        teachingStatusLabel?.stringValue = "等待当前动作：\(title)。采集范围：\(currentTeachingAcceptedTypes)。不会自动切换；完成后这里会显示“本条已采集”。"
+        teachingStatusLabel?.textColor = .secondaryLabelColor
+    }
+
+    private func refreshTeachingProgress() throws {
+        let learningResponse = try call(method: "learning.inspect", params: ["limit": learningInspectLimit])
+        let state = LearningState(response: learningResponse)
+        lastLearningState = state
+        lastState = HUDState(response: try call(method: "hud.state", params: [:]))
+        guard state.hasActiveSession else {
+            return
+        }
+        if state.activeSessionSampleCount > currentTeachingSampleBaseline {
+            let delta = state.activeSessionSampleCount - currentTeachingSampleBaseline
+            teachingStatusLabel?.stringValue = "本条已采集 \(delta) 个相关片段：\(currentTeachingTitle)。不会自动切换；确认无误后点击「下一条指令」。"
+            teachingStatusLabel?.textColor = .systemGreen
+        } else {
+            teachingStatusLabel?.stringValue = "等待当前动作：\(currentTeachingTitle)。采集范围：\(currentTeachingAcceptedTypes)。不会自动切换；完成后这里会显示“本条已采集”。"
+            teachingStatusLabel?.textColor = .secondaryLabelColor
+        }
     }
 
     private func teachingBoundsForCurrentPanel() -> [String: Double] {
@@ -1529,6 +1556,9 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func stopTeaching(commit: Bool) {
         stopTeachingInstructionTimer()
+        currentTeachingSampleBaseline = 0
+        currentTeachingAcceptedTypes = ""
+        currentTeachingTitle = ""
         do {
             _ = try call(method: "learning.teaching.stop", params: ["commit": commit])
             _ = try call(method: "profiles.rebuild", params: [:])
