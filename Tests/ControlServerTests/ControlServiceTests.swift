@@ -210,6 +210,49 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(semantic?["source"] as? String, "browser_snapshot")
     }
 
+    func testBrowserChromeOverlayPreflightBlocksTargetAction() throws {
+        let service = try makeService(
+            browserChromeOverlayPreflightOverride: { _, _, _ in
+                BrowserChromeOverlayPreflight(
+                    status: "blocked",
+                    overlayType: "chromePopup",
+                    confidence: 0.91,
+                    bounds: CodableRect(x: 100, y: 80, width: 160, height: 120),
+                    overlapsTarget: true,
+                    action: "blockTargetAction",
+                    evidence: ["source=test"]
+                )
+            }
+        )
+        let response = service.handleLine(
+            #"{"id":"overlay-block","method":"action","params":{"target":{"bundleId":"com.example.Browser","host":"example.com"},"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let preflight = (result?["preflight"] as? [String: Any])?["browserChromeOverlay"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["ok"] as? Bool, false)
+        XCTAssertEqual(result?["error"] as? String, "E_BROWSER_CHROME_OVERLAY_BLOCKED")
+        XCTAssertEqual(events?.count, 0)
+        XCTAssertEqual(preflight?["status"] as? String, "blocked")
+        XCTAssertEqual(preflight?["overlayType"] as? String, "chromePopup")
+        XCTAssertEqual(preflight?["overlapsTarget"] as? Bool, true)
+    }
+
+    func testActionRejectsUnsupportedBrowserChromeOverlayMode() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"overlay-mode","method":"action","params":{"target":{"bundleId":"com.example.Browser","host":"example.com"},"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true,"browserChromeOverlayPolicy":{"mode":"dismissSafe","dismissSafe":true}},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left"}]}}"#
+        )
+        let payload = try decode(response)
+        let error = payload["error"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, false)
+        XCTAssertEqual(error?["code"] as? String, "E_PARAM_INVALID")
+    }
+
     func testActionPersistsDaemonReplayFingerprint() throws {
         let store = try ProfileStore(path: ":memory:")
         let service = try makeService(profileStore: store)
@@ -713,7 +756,7 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(typeRaw["comboKeyCodes"] as? [[Int]], [[12, 56]])
     }
 
-    func testTypeFallsBackToPasteTextForChinese() throws {
+    func testTypeChineseDoesNotDefaultToWholeTextPaste() throws {
         let service = try makeService()
         let response = service.handleLine(
             #"{"id":"zh-type","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-input","role":"textbox"}},"options":{"dryRun":true},"primitives":[{"type":"type","text":"你好"}]}}"#
@@ -721,10 +764,35 @@ final class ControlServiceTests: XCTestCase {
         let payload = try decode(response)
         let result = payload["result"] as? [String: Any]
         let events = result?["events"] as? [[String: Any]]
+        let input = result?["input"] as? [String: Any]
+        let diagnostics = input?["fallbackDiagnostics"] as? [[String: Any]]
 
         XCTAssertEqual(payload["ok"] as? Bool, true)
-        XCTAssertEqual(events?.first?["type"] as? String, "pasteText")
-        XCTAssertEqual(events?.contains { $0["type"] as? String == "keyDown" && $0["virtualKey"] as? Int == 9 }, true)
+        XCTAssertEqual(result?["ok"] as? Bool, false)
+        XCTAssertEqual(result?["error"] as? String, "E_INPUT_FALLBACK_REQUIRED")
+        XCTAssertEqual(events?.contains { $0["type"] as? String == "pasteText" }, false)
+        XCTAssertEqual(diagnostics?.first?["path"] as? String, "chineseImeCharByChar")
+        XCTAssertEqual(diagnostics?.first?["fallback"] as? String, "pasteText")
+        XCTAssertTrue(diagnostics?.first?["fallbackReason"] != nil)
+    }
+
+    func testLongTypeTextIsChunkedWithoutPasteFallback() throws {
+        let service = try makeService()
+        let text = String(repeating: "abc123 ", count: 14)
+        let response = service.handleLine(
+            #"{"id":"long-type","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-input","role":"textbox"}},"options":{"dryRun":true},"primitives":[{"type":"type","text":"\#(text)"}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]]
+        let input = result?["input"] as? [String: Any]
+        let diagnostics = input?["fallbackDiagnostics"] as? [[String: Any]]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(result?["ok"] as? Bool, true)
+        XCTAssertEqual(events?.contains { $0["type"] as? String == "pasteText" }, false)
+        XCTAssertEqual(diagnostics?.first?["path"] as? String, "chunkedKeyboardCharByChar")
+        XCTAssertTrue((diagnostics?.first?["chunks"] as? Int ?? 0) > 1)
     }
 
     func testExplicitPasteTextPrimitiveDoesNotExposeTextInEvents() throws {
@@ -880,7 +948,8 @@ final class ControlServiceTests: XCTestCase {
         bundleIdentifiers: [String] = ["com.example.Browser"],
         profileStore: ProfileStore? = nil,
         hidEventSink: HIDEventSink? = nil,
-        targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil
+        targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil,
+        browserChromeOverlayPreflightOverride: ((BrowserTarget, [ActionPrimitive], BrowserChromeOverlayPolicy) -> BrowserChromeOverlayPreflight)? = nil
     ) throws -> ControlService {
         let store = try profileStore ?? ProfileStore(path: ":memory:")
         return ControlService(
@@ -891,7 +960,8 @@ final class ControlServiceTests: XCTestCase {
             supervisor: SupervisorService(),
             profileStore: store,
             hidEventSink: hidEventSink,
-            targetResolverOverride: targetResolverOverride
+            targetResolverOverride: targetResolverOverride,
+            browserChromeOverlayPreflightOverride: browserChromeOverlayPreflightOverride
         )
     }
 

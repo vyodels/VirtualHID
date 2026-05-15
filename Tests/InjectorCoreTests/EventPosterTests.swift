@@ -524,6 +524,30 @@ final class EventPosterTests: XCTestCase {
             XCTAssertEqual(delta, 75, accuracy: 1)
         }
     }
+
+    func testKeyPrimitiveAcceptsActionLevelRhythmProfile() {
+        let executor = ActionExecutor(target: testTarget())
+
+        let result = try! executor.execute(
+            ActionRequest(
+                id: "key-action-profile",
+                primitives: [
+                    .key(chord: KeyChord(keyCode: 0), holdMs: 45, profile: nil)
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-key", role: "button")),
+                options: ActionOptions(
+                    postMode: .global,
+                    dryRun: true,
+                    rhythmProfile: MotionProfile(clickHoldMs: IntRange(min: 90, max: 90))
+                )
+            )
+        )
+
+        XCTAssertEqual(result.ok, true)
+        XCTAssertEqual(result.events.map(\.type), ["keyDown", "keyUp"])
+        let holdMs = elapsedMs(from: result.events[0].timestamp, to: result.events[1].timestamp)
+        XCTAssertTrue((85...130).contains(holdMs), "expected action rhythmProfile clickHoldMs to drive key hold, got \(holdMs)ms")
+    }
 }
 
 private func testTarget() -> BrowserTarget {
@@ -578,6 +602,15 @@ private func averagePointDistance(_ left: [CodablePoint], _ right: [CodablePoint
         count += 1
     }
     return count == 0 ? 0 : total / Double(count)
+}
+
+private func elapsedMs(from start: String, to end: String) -> Int {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let startDate = formatter.date(from: start), let endDate = formatter.date(from: end) else {
+        return -1
+    }
+    return Int(endDate.timeIntervalSince(startDate) * 1000)
 }
 
 private final class RecordingBackend: EventPostingBackend {

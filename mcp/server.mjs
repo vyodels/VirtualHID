@@ -79,8 +79,10 @@ async function handleToolCall(name, args) {
     if (!response.ok) {
       return mcpError(response.error);
     }
+    const result = response.result || {};
     return {
-      content: [{ type: "text", text: JSON.stringify(response.result || {}, null, 2) }]
+      isError: false,
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
     };
   } catch (error) {
     return mcpError(error);

@@ -100,6 +100,7 @@ public final class ControlService {
     private let profileStore: ProfileStore
     private let hidEventSink: HIDEventSink?
     private let targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)?
+    private let browserChromeOverlayPreflightOverride: ((BrowserTarget, [ActionPrimitive], BrowserChromeOverlayPolicy) -> BrowserChromeOverlayPreflight)?
     private let actionQueue = DispatchQueue(label: "com.vyodels.virtualhid.control.actions")
     private let lock = NSLock()
     private let isoFormatter: ISO8601DateFormatter
@@ -124,13 +125,15 @@ public final class ControlService {
         supervisor: SupervisorService,
         profileStore: ProfileStore,
         hidEventSink: HIDEventSink? = nil,
-        targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil
+        targetResolverOverride: ((TargetDescriptor?) throws -> BrowserTarget)? = nil,
+        browserChromeOverlayPreflightOverride: ((BrowserTarget, [ActionPrimitive], BrowserChromeOverlayPolicy) -> BrowserChromeOverlayPreflight)? = nil
     ) {
         self.configuration = configuration
         self.supervisor = supervisor
         self.profileStore = profileStore
         self.hidEventSink = hidEventSink
         self.targetResolverOverride = targetResolverOverride
+        self.browserChromeOverlayPreflightOverride = browserChromeOverlayPreflightOverride
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         self.isoFormatter = formatter
@@ -353,7 +356,7 @@ public final class ControlService {
             )
         }
         let primitives = planned.primitives
-        let options = parseOptions(params["options"] as? [String: Any])
+        let options = try parseOptions(params["options"] as? [String: Any])
         let semanticEvidence = parseSemanticEvidence(params)
         let requestedMode = options.postMode ?? configuration.defaultPostMode
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
@@ -366,6 +369,35 @@ public final class ControlService {
             primitives: profileResult.primitives,
             options: options
         )
+        if browserChromeOverlayPreflight.blocksTargetAction {
+            let response: [String: Any] = [
+                "id": actionId,
+                "ok": false,
+                "error": "E_BROWSER_CHROME_OVERLAY_BLOCKED",
+                "events": [],
+                "elapsedMs": 0,
+                "preflight": [
+                    "browserChromeOverlay": browserChromeOverlayPreflight.object
+                ],
+                "post": ["used": usedMode],
+                "profiles": [
+                    "applied": profileResult.applied,
+                    "templateIds": profileResult.templateIds
+                ],
+                "targetApp": targetEvidenceObject(target),
+                "plan": try encodableObject(planned.plan)
+            ]
+            lock.withLock {
+                lastAction = [
+                    "id": actionId,
+                    "finishedAt": isoFormatter.string(from: Date()),
+                    "ok": false,
+                    "error": "E_BROWSER_CHROME_OVERLAY_BLOCKED",
+                    "elapsedMs": 0
+                ]
+            }
+            return response
+        }
         let observerStartId = supervisor.observer.tail(limit: 1).last?.id
         let observerWasEnabled = supervisor.observer.isEnabled
 
@@ -432,6 +464,9 @@ public final class ControlService {
             enriched["profiles"] = [
                 "applied": profileResult.applied,
                 "templateIds": profileResult.templateIds
+            ]
+            enriched["preflight"] = [
+                "browserChromeOverlay": browserChromeOverlayPreflight.object
             ]
             enriched["daemonLearning"] = daemonLearningObject(
                 result: result,
@@ -2329,7 +2364,7 @@ public final class ControlService {
         return context
     }
 
-    private func parseOptions(_ object: [String: Any]?) -> ActionOptions {
+    private func parseOptions(_ object: [String: Any]?) throws -> ActionOptions {
         guard let object else {
             return ActionOptions(postMode: configuration.defaultPostMode)
         }
@@ -2338,14 +2373,44 @@ public final class ControlService {
             postMode: postMode,
             timeoutMs: intValue(object["timeoutMs"]),
             dryRun: object["dryRun"] as? Bool ?? false,
-            browserChromeOverlayPolicy: browserChromeOverlayPolicy(from: object),
+            browserChromeOverlayPolicy: try browserChromeOverlayPolicy(from: object),
             disableProfiles: object["disableProfiles"] as? Bool
                 ?? object["disable_profiles"] as? Bool
-                ?? false
+                ?? false,
+            preDelayMs: intValue(object["preDelayMs"] ?? object["pre_delay_ms"]),
+            postDelayMs: intValue(object["postDelayMs"] ?? object["post_delay_ms"]),
+            behaviorMode: (object["behaviorMode"] as? String ?? object["behavior_mode"] as? String).flatMap(normalizedBehaviorMode),
+            rhythmProfile: try parseMotionProfile(sources: [object["profile"], object["motionProfile"], object["motion"], object])
         )
     }
 
-    private func browserChromeOverlayPolicy(from object: [String: Any]) -> BrowserChromeOverlayPolicy {
+    private func browserChromeOverlayPolicy(from object: [String: Any]) throws -> BrowserChromeOverlayPolicy {
+        if let policyObject = object["browserChromeOverlayPolicy"] as? [String: Any]
+            ?? object["browser_chrome_overlay_policy"] as? [String: Any] {
+            if policyObject["enabled"] as? Bool == false {
+                return .off
+            }
+            if let rawMode = nonEmptyString(policyObject["mode"])?.lowercased() {
+                if let policy = BrowserChromeOverlayPolicy(rawValue: rawMode) {
+                    return policy
+                }
+                if rawMode == "detectonly" {
+                    return .auto
+                }
+                throw ControlServerError.coded("E_PARAM_INVALID", "browserChromeOverlayPolicy.mode must be auto, force, off, or detectOnly")
+            }
+            if let detectOnly = policyObject["detectOnly"] as? Bool ?? policyObject["detect_only"] as? Bool {
+                guard detectOnly else {
+                    throw ControlServerError.coded("E_PARAM_INVALID", "browserChromeOverlayPolicy.detectOnly=false is not supported")
+                }
+                return .auto
+            }
+            if policyObject["dismissSafe"] as? Bool == true
+                || policyObject["dismiss_safe"] as? Bool == true {
+                return .force
+            }
+            return .auto
+        }
         if let raw = nonEmptyString(
             object["browserChromeOverlayPolicy"]
                 ?? object["chromeOverlayPolicy"]
@@ -2366,6 +2431,9 @@ public final class ControlService {
         options: ActionOptions
     ) throws -> BrowserChromeOverlayPreflightResult {
         let policy = options.browserChromeOverlayPolicy
+        if let override = browserChromeOverlayPreflightOverride?(target, primitives, policy) {
+            return BrowserChromeOverlayPreflightResult(policy: policy, status: override.status, external: override)
+        }
         guard policy != .off else {
             return BrowserChromeOverlayPreflightResult(policy: policy, status: "off")
         }
@@ -2927,7 +2995,10 @@ public final class ControlService {
             "ok": result.ok,
             "error": result.error ?? NSNull(),
             "events": try result.events.map(encodableObject),
-            "elapsedMs": result.elapsedMs
+            "elapsedMs": result.elapsedMs,
+            "input": [
+                "fallbackDiagnostics": try result.inputDiagnostics.map(encodableObject)
+            ]
         ]
     }
 
@@ -3008,6 +3079,7 @@ private struct BrowserChromeOverlayPreflightResult {
     let method: String?
     let reason: String?
     let detection: BrowserChromeOverlayDetection?
+    let external: BrowserChromeOverlayPreflight?
 
     init(
         policy: BrowserChromeOverlayPolicy,
@@ -3015,7 +3087,8 @@ private struct BrowserChromeOverlayPreflightResult {
         attempted: Bool = false,
         method: String? = nil,
         reason: String? = nil,
-        detection: BrowserChromeOverlayDetection? = nil
+        detection: BrowserChromeOverlayDetection? = nil,
+        external: BrowserChromeOverlayPreflight? = nil
     ) {
         self.policy = policy
         self.status = status
@@ -3023,23 +3096,41 @@ private struct BrowserChromeOverlayPreflightResult {
         self.method = method
         self.reason = reason
         self.detection = detection
+        self.external = external
+    }
+
+    var blocksTargetAction: Bool {
+        external?.blocksTargetAction ?? false
     }
 
     var object: [String: Any] {
-        [
+        if let external {
+            return [
+                "status": external.status,
+                "overlayType": external.overlayType ?? NSNull(),
+                "confidence": external.confidence,
+                "bounds": external.bounds.map {
+                    ["x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height]
+                } ?? NSNull(),
+                "overlapsTarget": external.overlapsTarget,
+                "action": external.action,
+                "evidence": external.evidence
+            ]
+        }
+        return [
             "policy": policy.rawValue,
             "status": status,
             "attempted": attempted,
             "method": method ?? NSNull(),
             "reason": reason ?? NSNull(),
-            "detection": detection.map {
+            "detection": (detection.map {
                 [
                     "available": $0.available,
                     "count": $0.count,
                     "roles": $0.roles,
                     "reason": $0.reason ?? NSNull()
                 ] as [String: Any]
-            } ?? NSNull()
+            } ?? NSNull()) as Any
         ]
     }
 }

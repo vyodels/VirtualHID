@@ -3,6 +3,10 @@ import CoreGraphics
 import Foundation
 
 public enum FocusController {
+    private static let activationLock = NSLock()
+    private static var lastActivationPid: pid_t?
+    private static var lastActivationAt: Date?
+
     @discardableResult
     public static func activate(app: NSRunningApplication) -> Bool {
         if app.activate(options: [.activateIgnoringOtherApps]) {
@@ -16,7 +20,30 @@ public enum FocusController {
     }
 
     public static func ensureFrontmost(app: NSRunningApplication, timeout: TimeInterval = 0.8) -> Bool {
+        if isFrontmost(app: app) {
+            return true
+        }
+
+        let now = Date()
+        let cooldownRemaining = activationLock.withLock { () -> TimeInterval in
+            guard lastActivationPid == app.processIdentifier, let lastActivationAt else {
+                return 0
+            }
+            return max(0, 0.18 - now.timeIntervalSince(lastActivationAt))
+        }
+        if cooldownRemaining > 0, waitUntilFrontmost(app: app, timeout: min(timeout, cooldownRemaining)) {
+            return true
+        }
+
+        activationLock.withLock {
+            lastActivationPid = app.processIdentifier
+            lastActivationAt = Date()
+        }
         _ = activate(app: app)
+        return waitUntilFrontmost(app: app, timeout: timeout)
+    }
+
+    private static func waitUntilFrontmost(app: NSRunningApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() <= deadline {
             if isFrontmost(app: app) {
@@ -108,4 +135,12 @@ public enum FocusController {
         return nil
     }
 
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
 }

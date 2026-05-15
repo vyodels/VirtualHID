@@ -160,10 +160,26 @@ export const tools = [
             postMode: { type: "string", enum: ["global", "pid", "auto"], description: "通常省略。global/auto 会由 VirtualHID 激活目标应用后执行真实写入；pid 仅限 mouseMoved/scrollWheel，不可用于 click/drag/type/pasteText/key。" },
             timeoutMs: { type: "integer" },
             dryRun: { type: "boolean" },
+            preDelayMs: { type: "integer", description: "Optional action-level pause before HID emission." },
+            postDelayMs: { type: "integer", description: "Optional action-level pause after HID emission." },
+            behaviorMode: { type: "string", enum: ["idle", "normal", "flow", "low-efficiency"] },
+            profile: objectSchema,
             browserChromeOverlayPolicy: {
-              type: "string",
-              enum: ["auto", "force", "off"],
-              description: "浏览器外壳瞬态遮挡预处理。auto 默认用 AX 检测 Chrome/Edge/Chromium/Safari 下载气泡、菜单、popover 等非网页遮挡并由 VirtualHID 关闭；force 表示下一次浏览器目标写入前强制发 Escape 清理外壳遮挡；off 关闭该预处理。该预处理不进入业务 HID events、HUD 轨迹或学习样本，只在 result.preflight.browserChromeOverlay 返回证据。"
+              anyOf: [
+                { type: "string", enum: ["auto", "force", "off"] },
+                {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    mode: { type: "string", enum: ["auto", "force", "off", "detectOnly"] },
+                    detectOnly: { type: "boolean" },
+                    dismissSafe: { type: "boolean" },
+                    minConfidence: { type: "number" }
+                  },
+                  additionalProperties: true
+                }
+              ],
+              description: "浏览器外壳瞬态遮挡预处理。字符串 auto/force/off 为当前执行策略；兼容对象形式的 detectOnly 配置会归一到 auto/off。该预处理不进入业务 HID events、HUD 轨迹或学习样本，只在 result.preflight.browserChromeOverlay 返回证据。"
             },
             contextVersion: { type: "integer" }
           },
