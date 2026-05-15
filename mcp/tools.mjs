@@ -160,6 +160,22 @@ export const tools = [
             postMode: { type: "string", enum: ["global", "pid", "auto"], description: "通常省略。global/auto 会由 VirtualHID 激活目标应用后执行真实写入；pid 仅限 mouseMoved/scrollWheel，不可用于 click/drag/type/pasteText/key。" },
             timeoutMs: { type: "integer" },
             dryRun: { type: "boolean" },
+            preDelayMs: { type: "integer", description: "Optional action-level pause before HID emission." },
+            postDelayMs: { type: "integer", description: "Optional action-level pause after HID emission." },
+            behaviorMode: { type: "string", enum: ["idle", "normal", "flow", "low-efficiency"] },
+            profile: objectSchema,
+            browserChromeOverlayPolicy: {
+              type: "object",
+              description: "Chrome shell overlay preflight. Default is detectOnly: if a Chrome popup/menu/dialog blocks the target point/area, VirtualHID returns diagnostics and does not execute the target HID action.",
+              properties: {
+                enabled: { type: "boolean" },
+                mode: { type: "string", enum: ["detectOnly"] },
+                detectOnly: { type: "boolean" },
+                dismissSafe: { type: "boolean", description: "Reserved no-op for a future explicit safe dismissal flow; VirtualHID does not auto-dismiss overlays." },
+                minConfidence: { type: "number" }
+              },
+              additionalProperties: true
+            },
             contextVersion: { type: "integer" }
           },
           additionalProperties: true

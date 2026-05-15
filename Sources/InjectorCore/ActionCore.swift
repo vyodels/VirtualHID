@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import Foundation
 import HumanizationKit
@@ -174,11 +175,27 @@ public struct ActionOptions: Codable {
     public var postMode: PostMode?
     public var timeoutMs: Int?
     public var dryRun: Bool
+    public var preDelayMs: Int?
+    public var postDelayMs: Int?
+    public var behaviorMode: HumanBehaviorMode?
+    public var rhythmProfile: MotionProfile?
 
-    public init(postMode: PostMode? = nil, timeoutMs: Int? = nil, dryRun: Bool = false) {
+    public init(
+        postMode: PostMode? = nil,
+        timeoutMs: Int? = nil,
+        dryRun: Bool = false,
+        preDelayMs: Int? = nil,
+        postDelayMs: Int? = nil,
+        behaviorMode: HumanBehaviorMode? = nil,
+        rhythmProfile: MotionProfile? = nil
+    ) {
         self.postMode = postMode
         self.timeoutMs = timeoutMs
         self.dryRun = dryRun
+        self.preDelayMs = preDelayMs
+        self.postDelayMs = postDelayMs
+        self.behaviorMode = behaviorMode
+        self.rhythmProfile = rhythmProfile
     }
 }
 
@@ -202,13 +219,46 @@ public struct ActionResult: Codable {
     public let error: String?
     public let events: [InjectedEvent]
     public let elapsedMs: Int
+    public let inputDiagnostics: [InputFallbackDiagnostic]
 
-    public init(id: String, ok: Bool, error: String?, events: [InjectedEvent], elapsedMs: Int) {
+    public init(id: String, ok: Bool, error: String?, events: [InjectedEvent], elapsedMs: Int, inputDiagnostics: [InputFallbackDiagnostic] = []) {
         self.id = id
         self.ok = ok
         self.error = error
         self.events = events
         self.elapsedMs = elapsedMs
+        self.inputDiagnostics = inputDiagnostics
+    }
+}
+
+public struct InputFallbackDiagnostic: Codable, Equatable {
+    public let primitiveIndex: Int
+    public let status: String
+    public let path: String
+    public let textLength: Int
+    public let chunks: Int
+    public let fallback: String?
+    public let fallbackReason: String?
+    public let evidence: [String]
+
+    public init(
+        primitiveIndex: Int,
+        status: String,
+        path: String,
+        textLength: Int,
+        chunks: Int,
+        fallback: String? = nil,
+        fallbackReason: String? = nil,
+        evidence: [String] = []
+    ) {
+        self.primitiveIndex = primitiveIndex
+        self.status = status
+        self.path = path
+        self.textLength = textLength
+        self.chunks = chunks
+        self.fallback = fallback
+        self.fallbackReason = fallbackReason
+        self.evidence = evidence
     }
 }
 
@@ -229,6 +279,18 @@ public enum ActionExecutionError: Error, LocalizedError {
         case .eventCreationFailed(let detail):
             return "无法创建事件：\(detail)"
         }
+    }
+}
+
+private struct PrimitiveEmitResult {
+    let events: [InjectedEvent]
+    let inputDiagnostics: [InputFallbackDiagnostic]
+    let terminalError: String?
+
+    init(events: [InjectedEvent], inputDiagnostics: [InputFallbackDiagnostic] = [], terminalError: String? = nil) {
+        self.events = events
+        self.inputDiagnostics = inputDiagnostics
+        self.terminalError = terminalError
     }
 }
 
@@ -277,6 +339,7 @@ public final class ActionExecutor {
     private var busy = false
     private var cancelled = false
     private var activeVisualContext: HIDActionVisualContext?
+    private var dryRunTimestampOffsetMs = 0
 
     public init(
         target: BrowserTarget,
@@ -324,10 +387,13 @@ public final class ActionExecutor {
         )
         var rng = SystemRandomNumberGenerator()
         var events = [InjectedEvent]()
+        var inputDiagnostics = [InputFallbackDiagnostic]()
+        dryRunTimestampOffsetMs = 0
         activeVisualContext = visualContext
         eventSink?.hidActionDidStart(visualContext)
         defer {
             activeVisualContext = nil
+            dryRunTimestampOffsetMs = 0
         }
 
         if requestedMode == .global, !dryRun {
@@ -337,15 +403,24 @@ public final class ActionExecutor {
             try ensurePidSafePrimitives(request.primitives)
         }
 
-        for primitive in request.primitives {
+        try sleep(milliseconds: request.options.preDelayMs ?? 0, dryRun: dryRun, deadline: deadline)
+
+        for (index, primitive) in request.primitives.enumerated() {
             try checkCancelled()
             try deadline.assertNotExpired()
-            let emitted = try emit(primitive, poster: poster, options: request.options, deadline: deadline, rng: &rng)
-            events.append(contentsOf: emitted)
+            let emitted = try emit(primitive, primitiveIndex: index, poster: poster, options: request.options, deadline: deadline, rng: &rng)
+            events.append(contentsOf: emitted.events)
+            inputDiagnostics.append(contentsOf: emitted.inputDiagnostics)
+            if let terminalError = emitted.terminalError {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                return ActionResult(id: request.id, ok: false, error: terminalError, events: events, elapsedMs: elapsedMs, inputDiagnostics: inputDiagnostics)
+            }
         }
 
+        try sleep(milliseconds: request.options.postDelayMs ?? 0, dryRun: dryRun, deadline: deadline)
+
         let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
-        return ActionResult(id: request.id, ok: true, error: nil, events: events, elapsedMs: elapsedMs)
+        return ActionResult(id: request.id, ok: true, error: nil, events: events, elapsedMs: elapsedMs, inputDiagnostics: inputDiagnostics)
     }
 
     private func beginExecution() throws {
@@ -380,15 +455,15 @@ public final class ActionExecutor {
         }
     }
 
-    private func emit(_ primitive: ActionPrimitive, poster: EventPoster, options: ActionOptions, deadline: ActionDeadline, rng: inout SystemRandomNumberGenerator) throws -> [InjectedEvent] {
+    private func emit(_ primitive: ActionPrimitive, primitiveIndex: Int, poster: EventPoster, options: ActionOptions, deadline: ActionDeadline, rng: inout SystemRandomNumberGenerator) throws -> PrimitiveEmitResult {
         let dryRun = options.dryRun
         try deadline.assertNotExpired()
         switch primitive {
         case .move(let to, let style, let durationMs, let profile):
-            let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
+            let motionProfile = actionMotionProfile(resolvedMotionProfile(style: style, explicitProfile: profile), options: options)
             let start = profile?.origin ?? currentMouseLocation(fallback: target.frame.center)
             let resolvedTarget = resolvedLandingPoint(base: to, profile: profile, rng: &rng)
-            return try emitMovePath(
+            return PrimitiveEmitResult(events: try emitMovePath(
                 from: start,
                 to: resolvedTarget,
                 style: style,
@@ -399,10 +474,10 @@ public final class ActionExecutor {
                 dryRun: dryRun,
                 deadline: deadline,
                 rng: &rng
-            )
+            ))
 
         case .click(let at, let button, let holdMs, let count, let profile):
-            let motionProfile = profile?.motionProfile
+            let motionProfile = actionMotionProfile(profile?.motionProfile, options: options)
             let clickPoint = resolvedLandingPoint(base: at, profile: profile, rng: &rng)
             let resolvedHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
             let interClickMs = motionProfile?.resolvedInterClickMs(defaultValue: 120, rng: &rng) ?? 120
@@ -434,10 +509,10 @@ public final class ActionExecutor {
             }
             let settleMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 72
             try sleep(milliseconds: settleMs, dryRun: dryRun, deadline: deadline)
-            return emitted
+            return PrimitiveEmitResult(events: emitted)
 
         case .drag(let from, let to, let button, let style, let profile):
-            let motionProfile = resolvedMotionProfile(style: style, explicitProfile: profile)
+            let motionProfile = actionMotionProfile(resolvedMotionProfile(style: style, explicitProfile: profile), options: options)
             let start = profile?.origin ?? from
             let resolvedTarget = resolvedLandingPoint(base: to, profile: profile, rng: &rng)
             let dragPath = trajectoryPath(
@@ -472,11 +547,11 @@ public final class ActionExecutor {
             let releasePoint = dragPath.last ?? resolvedTarget
             emitted.append(try postMouse(type: button.upEventType, location: releasePoint, button: button.cgButton, poster: poster, dryRun: dryRun))
             try sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? 92, dryRun: dryRun, deadline: deadline)
-            return emitted
+            return PrimitiveEmitResult(events: emitted)
 
         case .scroll(let at, let dx, let dy, _):
             if dryRun {
-                return [record(type: "scrollWheel", location: at)]
+                return PrimitiveEmitResult(events: [record(type: "scrollWheel", location: at)])
             }
             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy.rounded()), wheel2: Int32(dx.rounded()), wheel3: 0) else {
                 throw ActionExecutionError.eventCreationFailed("scroll")
@@ -484,49 +559,46 @@ public final class ActionExecutor {
             event.location = at
             try ensureFrontmostForPost(type: .scrollWheel, poster: poster, dryRun: dryRun)
             _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
-            return [record(type: "scrollWheel", location: at)]
+            return PrimitiveEmitResult(events: [record(type: "scrollWheel", location: at)])
 
         case .type(let text, _, let profile):
-            var emitted = [InjectedEvent]()
-            let schedule = KeystrokeRhythm.schedule(
-                for: text,
-                params: resolvedKeyRhythmParams(profile?.motionProfile),
+            return try emitTypeText(
+                text,
+                primitiveIndex: primitiveIndex,
+                profile: profile?.motionProfile,
+                options: options,
+                poster: poster,
+                dryRun: dryRun,
+                deadline: deadline,
                 rng: &rng
             )
-            if schedule.count != text.unicodeScalars.count {
-                return try emitPasteText(text, restoreClipboard: true, poster: poster, dryRun: dryRun, deadline: deadline)
-            }
-            for keyEvent in schedule {
-                if keyEvent.delayBeforeMs > 0 {
-                    try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
-                }
-
-                if keyEvent.modifiers.contains(.shift) {
-                    emitted.append(try postKey(keyCode: 56, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-                }
-
-                let keyCode = CGKeyCode(keyEvent.keyCode)
-                let recordedKey = String(keyEvent.char)
-                emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
-                try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline)
-                emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
-
-                if keyEvent.modifiers.contains(.shift) {
-                    emitted.append(try postKey(keyCode: 56, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
-                }
-            }
-            return emitted
 
         case .pasteText(let text, let restoreClipboard, _):
-            return try emitPasteText(text, restoreClipboard: restoreClipboard, poster: poster, dryRun: dryRun, deadline: deadline)
+            let events = try emitPasteText(text, restoreClipboard: restoreClipboard, poster: poster, dryRun: dryRun, deadline: deadline)
+            return PrimitiveEmitResult(
+                events: events,
+                inputDiagnostics: [
+                    InputFallbackDiagnostic(
+                        primitiveIndex: primitiveIndex,
+                        status: "explicitFallback",
+                        path: "pasteText",
+                        textLength: text.count,
+                        chunks: 1,
+                        fallback: nil,
+                        fallbackReason: "explicit pasteText primitive",
+                        evidence: ["restoreClipboard=\(restoreClipboard)"]
+                    )
+                ]
+            )
 
         case .key(let chord, let holdMs, let profile):
             var emitted = [InjectedEvent]()
+            let motionProfile = actionMotionProfile(profile?.motionProfile, options: options)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-            let keyHold = profile?.motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
+            let keyHold = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
             try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
-            return emitted
+            return PrimitiveEmitResult(events: emitted)
         }
     }
 
@@ -563,6 +635,178 @@ public final class ActionExecutor {
             }
         }
         return emitted
+    }
+
+    private func emitTypeText(
+        _ text: String,
+        primitiveIndex: Int,
+        profile: MotionProfile?,
+        options: ActionOptions,
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline,
+        rng: inout SystemRandomNumberGenerator
+    ) throws -> PrimitiveEmitResult {
+        let effectiveProfile = options.rhythmProfile?.merging(profile) ?? profile
+        let textLength = text.count
+        if text.isEmpty {
+            return PrimitiveEmitResult(
+                events: [],
+                inputDiagnostics: [
+                    InputFallbackDiagnostic(primitiveIndex: primitiveIndex, status: "typed", path: "keyboardCharByChar", textLength: 0, chunks: 0)
+                ]
+            )
+        }
+
+        let keyboardChunks = chunkText(text, maxScalars: 40)
+        let fullSchedule = KeystrokeRhythm.schedule(
+            for: text,
+            params: resolvedKeyRhythmParams(effectiveProfile),
+            rng: &rng
+        )
+        if fullSchedule.count == text.unicodeScalars.count {
+            var emitted = [InjectedEvent]()
+            for (chunkIndex, chunk) in keyboardChunks.enumerated() {
+                let schedule = KeystrokeRhythm.schedule(
+                    for: chunk,
+                    params: resolvedKeyRhythmParams(effectiveProfile),
+                    rng: &rng
+                )
+                for keyEvent in schedule {
+                    try emitScheduledKeyEvent(keyEvent, emitted: &emitted, poster: poster, dryRun: dryRun, deadline: deadline)
+                }
+                if chunkIndex < keyboardChunks.count - 1 {
+                    try sleep(milliseconds: 90, dryRun: dryRun, deadline: deadline)
+                }
+            }
+            return PrimitiveEmitResult(
+                events: emitted,
+                inputDiagnostics: [
+                    InputFallbackDiagnostic(
+                        primitiveIndex: primitiveIndex,
+                        status: "typed",
+                        path: keyboardChunks.count > 1 ? "chunkedKeyboardCharByChar" : "keyboardCharByChar",
+                        textLength: textLength,
+                        chunks: keyboardChunks.count,
+                        evidence: keyboardChunks.count > 1 ? ["chunkSizeScalars=40"] : []
+                    )
+                ]
+            )
+        }
+
+        if containsChinese(text) {
+            guard let inputSource = dryRun ? nil : currentChineseInputSource() else {
+                return PrimitiveEmitResult(
+                    events: [],
+                    inputDiagnostics: [
+                        InputFallbackDiagnostic(
+                            primitiveIndex: primitiveIndex,
+                            status: "fallbackRequired",
+                            path: "chineseImeCharByChar",
+                            textLength: textLength,
+                            chunks: text.count,
+                            fallback: "pasteText",
+                            fallbackReason: "Chinese IME input source is unavailable; submit an explicit pasteText primitive if paste fallback is acceptable",
+                            evidence: ["automatic pasteText disabled"]
+                        )
+                    ],
+                    terminalError: "E_INPUT_FALLBACK_REQUIRED"
+                )
+            }
+            let emitted = try emitChineseIMEText(text, inputSource: inputSource, poster: poster, dryRun: dryRun, deadline: deadline, rng: &rng)
+            return PrimitiveEmitResult(
+                events: emitted,
+                inputDiagnostics: [
+                    InputFallbackDiagnostic(
+                        primitiveIndex: primitiveIndex,
+                        status: "typed",
+                        path: "chineseImeCharByChar",
+                        textLength: textLength,
+                        chunks: text.count,
+                        evidence: ["inputSourceId=\(inputSource.id)", "inputSourceName=\(inputSource.name)"]
+                    )
+                ]
+            )
+        }
+
+        return PrimitiveEmitResult(
+            events: [],
+            inputDiagnostics: [
+                InputFallbackDiagnostic(
+                    primitiveIndex: primitiveIndex,
+                    status: "fallbackRequired",
+                    path: "keyboardCharByChar",
+                    textLength: textLength,
+                    chunks: keyboardChunks.count,
+                    fallback: "pasteText",
+                    fallbackReason: "text contains characters that are not mappable to the configured keyboard layout; submit an explicit pasteText primitive if paste fallback is acceptable",
+                    evidence: ["automatic pasteText disabled"]
+                )
+            ],
+            terminalError: "E_INPUT_FALLBACK_REQUIRED"
+        )
+    }
+
+    private func emitScheduledKeyEvent(
+        _ keyEvent: KeystrokeEvent,
+        emitted: inout [InjectedEvent],
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline
+    ) throws {
+        if keyEvent.delayBeforeMs > 0 {
+            try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
+        }
+
+        if keyEvent.modifiers.contains(.shift) {
+            emitted.append(try postKey(keyCode: 56, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
+        }
+
+        let keyCode = CGKeyCode(keyEvent.keyCode)
+        let recordedKey = String(keyEvent.char)
+        emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
+        try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline)
+        emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
+
+        if keyEvent.modifiers.contains(.shift) {
+            emitted.append(try postKey(keyCode: 56, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+        }
+    }
+
+    private func emitChineseIMEText(
+        _ text: String,
+        inputSource: ChineseInputSource,
+        poster: EventPoster,
+        dryRun: Bool,
+        deadline: ActionDeadline,
+        rng: inout SystemRandomNumberGenerator
+    ) throws -> [InjectedEvent] {
+        var emitted = [InjectedEvent]()
+        for scalar in text.unicodeScalars {
+            if emitted.count > 0 {
+                try sleep(milliseconds: Int.random(in: 80...160, using: &rng), dryRun: dryRun, deadline: deadline)
+            }
+            emitted.append(try postUnicodeScalar(scalar, keyDown: true, poster: poster, dryRun: dryRun))
+            try sleep(milliseconds: Int.random(in: 45...110, using: &rng), dryRun: dryRun, deadline: deadline)
+            emitted.append(try postUnicodeScalar(scalar, keyDown: false, poster: poster, dryRun: dryRun))
+        }
+        return emitted
+    }
+
+    private func postUnicodeScalar(_ scalar: UnicodeScalar, keyDown: Bool, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
+        if dryRun {
+            return record(type: keyDown ? "keyDown" : "keyUp", key: nil, virtualKey: 0)
+        }
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: keyDown) else {
+            throw ActionExecutionError.eventCreationFailed("unicode scalar")
+        }
+        let utf16 = Array(String(scalar).utf16)
+        utf16.withUnsafeBufferPointer { buffer in
+            event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+        }
+        try ensureFrontmostForPost(type: keyDown ? .keyDown : .keyUp, poster: poster, dryRun: dryRun)
+        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
+        return record(type: keyDown ? "keyDown" : "keyUp", key: nil, virtualKey: 0)
     }
 
     private func postMouse(type: CGEventType, location: CGPoint, button: CGMouseButton, poster: EventPoster, dryRun: Bool) throws -> InjectedEvent {
@@ -663,6 +907,7 @@ public final class ActionExecutor {
             return
         }
         if dryRun {
+            dryRunTimestampOffsetMs += milliseconds
             try deadline.assertNotExpired()
             return
         }
@@ -683,7 +928,7 @@ public final class ActionExecutor {
             location: location.map { CodablePoint(x: $0.x, y: $0.y) },
             key: key,
             virtualKey: virtualKey,
-            timestamp: isoFormatter.string(from: Date())
+            timestamp: isoFormatter.string(from: Date().addingTimeInterval(TimeInterval(dryRunTimestampOffsetMs) / 1000.0))
         )
         if let context = activeVisualContext {
             eventSink?.hidActionDidRecord(event, context: context)
@@ -859,6 +1104,10 @@ public final class ActionExecutor {
         }
     }
 
+    private func actionMotionProfile(_ primitiveProfile: MotionProfile?, options: ActionOptions) -> MotionProfile? {
+        options.rhythmProfile?.merging(primitiveProfile) ?? primitiveProfile
+    }
+
     private func detourWaypoint(
         from start: CGPoint,
         to end: CGPoint,
@@ -933,6 +1182,62 @@ public final class ActionExecutor {
             params.interWordSigma = 0.34
         }
         return params
+    }
+
+    private struct ChineseInputSource {
+        let id: String
+        let name: String
+    }
+
+    private func currentChineseInputSource() -> ChineseInputSource? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            return nil
+        }
+        let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID)
+            .map { Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String }
+        let name = TISGetInputSourceProperty(source, kTISPropertyLocalizedName)
+            .map { Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String }
+        let languages = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages)
+            .map { Unmanaged<CFArray>.fromOpaque($0).takeUnretainedValue() as? [String] }
+            ?? nil
+        let isChinese = languages?.contains(where: { $0.lowercased().hasPrefix("zh") }) == true
+            || id?.lowercased().contains("chinese") == true
+            || id?.lowercased().contains("pinyin") == true
+            || id?.lowercased().contains("scim") == true
+        guard isChinese else {
+            return nil
+        }
+        return ChineseInputSource(id: id ?? "unknown", name: name ?? "unknown")
+    }
+
+    private func containsChinese(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+                || (0x20000...0x2A6DF).contains(scalar.value)
+        }
+    }
+
+    private func chunkText(_ text: String, maxScalars: Int) -> [String] {
+        guard maxScalars > 0 else {
+            return [text]
+        }
+        var chunks = [String]()
+        var current = ""
+        var count = 0
+        for scalar in text.unicodeScalars {
+            if count >= maxScalars {
+                chunks.append(current)
+                current = ""
+                count = 0
+            }
+            current.unicodeScalars.append(scalar)
+            count += 1
+        }
+        if !current.isEmpty {
+            chunks.append(current)
+        }
+        return chunks
     }
 
     private func interpolatedPath(from start: CGPoint, to end: CGPoint, steps: Int) -> [CGPoint] {

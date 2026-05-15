@@ -194,6 +194,47 @@ final class EventPosterTests: XCTestCase {
             XCTAssertTrue(abs(finalLocation.y - Double(landingCenter.y)) <= 5)
         }
     }
+
+    func testKeyPrimitiveAcceptsActionLevelRhythmProfile() {
+        let app = NSRunningApplication.current
+        let target = BrowserTarget(
+            app: app,
+            pid: app.processIdentifier,
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.vyodels.virtualhid.tests",
+            windowTitle: nil,
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let executor = ActionExecutor(target: target)
+
+        let result = try! executor.execute(
+            ActionRequest(
+                id: "key-action-profile",
+                primitives: [
+                    .key(chord: KeyChord(keyCode: 0), holdMs: 45, profile: nil)
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-key", role: "button")),
+                options: ActionOptions(
+                    postMode: .global,
+                    dryRun: true,
+                    rhythmProfile: MotionProfile(clickHoldMs: IntRange(min: 90, max: 90))
+                )
+            )
+        )
+
+        XCTAssertEqual(result.ok, true)
+        XCTAssertEqual(result.events.map(\.type), ["keyDown", "keyUp"])
+        let holdMs = elapsedMs(from: result.events[0].timestamp, to: result.events[1].timestamp)
+        XCTAssertTrue((85...130).contains(holdMs), "expected action rhythmProfile clickHoldMs to drive key hold, got \(holdMs)ms")
+    }
+}
+
+private func elapsedMs(from start: String, to end: String) -> Int {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let startDate = formatter.date(from: start), let endDate = formatter.date(from: end) else {
+        return -1
+    }
+    return Int(endDate.timeIntervalSince(startDate) * 1000)
 }
 
 private final class RecordingBackend: EventPostingBackend {
