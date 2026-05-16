@@ -327,6 +327,8 @@ public final class ControlService {
             throw ControlServerError.coded("E_KILL_SWITCH", "user triggered kill switch at \(triggeredAt)")
         }
 
+        let options = try parseOptions(params["options"] as? [String: Any])
+        try assertHumanizationOwnership(params: params, options: options)
         let requestedPrimitives = try parsePrimitives(params["primitives"] as? [[String: Any]])
         let contextObject = try normalizedActionContext(params)
         let context = try parseActionContext(contextObject)
@@ -356,12 +358,11 @@ public final class ControlService {
             )
         }
         let primitives = planned.primitives
-        let options = try parseOptions(params["options"] as? [String: Any])
         let semanticEvidence = parseSemanticEvidence(params)
         let requestedMode = options.postMode ?? configuration.defaultPostMode
         let usedMode = inferredPostRoute(for: primitives, requestedMode: requestedMode).rawValue
         let profileResult = options.disableProfiles
-            ? (primitives: primitives, applied: false, templateIds: [])
+            ? (primitives: primitives, applied: false, templateIds: [], fallbackType: "profiles-disabled")
             : applyProfiles(to: primitives, context: context)
         let executor = ActionExecutor(target: target, defaultPostMode: configuration.defaultPostMode, eventSink: hidEventSink)
         let browserChromeOverlayPreflight = try handleBrowserChromeOverlayPreflight(
@@ -382,8 +383,16 @@ public final class ControlService {
                 "post": ["used": usedMode],
                 "profiles": [
                     "applied": profileResult.applied,
-                    "templateIds": profileResult.templateIds
+                    "templateIds": profileResult.templateIds,
+                    "fallbackType": profileResult.fallbackType
                 ],
+                "humanizationAudit": humanizationAuditObject(
+                    result: nil,
+                    profileApplied: profileResult.applied,
+                    templateIds: profileResult.templateIds,
+                    fallbackType: profileResult.fallbackType,
+                    options: options
+                ),
                 "targetApp": targetEvidenceObject(target),
                 "plan": try encodableObject(planned.plan)
             ]
@@ -463,8 +472,16 @@ public final class ControlService {
             enriched["post"] = ["used": usedMode]
             enriched["profiles"] = [
                 "applied": profileResult.applied,
-                "templateIds": profileResult.templateIds
+                "templateIds": profileResult.templateIds,
+                "fallbackType": profileResult.fallbackType
             ]
+            enriched["humanizationAudit"] = humanizationAuditObject(
+                result: result,
+                profileApplied: profileResult.applied,
+                templateIds: profileResult.templateIds,
+                fallbackType: profileResult.fallbackType,
+                options: options
+            )
             enriched["preflight"] = [
                 "browserChromeOverlay": browserChromeOverlayPreflight.object
             ]
@@ -2384,6 +2401,58 @@ public final class ControlService {
         )
     }
 
+    private func assertHumanizationOwnership(params: [String: Any], options: ActionOptions) throws {
+        guard !options.dryRun else {
+            return
+        }
+        if let object = params["options"] as? [String: Any] {
+            try assertNoProductionHumanizationKnobs(object, path: "options", inProfileObject: false)
+        }
+        let primitives = params["primitives"] as? [[String: Any]] ?? []
+        for (index, primitive) in primitives.enumerated() {
+            try assertNoProductionHumanizationKnobs(primitive, path: "primitives[\(index)]", inProfileObject: false)
+        }
+    }
+
+    private func assertNoProductionHumanizationKnobs(_ object: [String: Any], path: String, inProfileObject: Bool) throws {
+        for (key, value) in object {
+            if inProfileObject {
+                guard productionSafePrimitiveProfileKeys.contains(key) else {
+                    throw ControlServerError.coded(
+                        "E_HUMANIZATION_OWNERSHIP",
+                        "\(path).\(key) is caller-supplied humanization; production hid_action only accepts profile.origin and profile.landingZone geometry"
+                    )
+                }
+                if let nested = value as? [String: Any] {
+                    try assertNoProductionHumanizationKnobs(nested, path: "\(path).\(key)", inProfileObject: false)
+                }
+                continue
+            }
+
+            if key == "profile", let profileObject = value as? [String: Any] {
+                try assertNoProductionHumanizationKnobs(profileObject, path: "\(path).profile", inProfileObject: true)
+                continue
+            }
+
+            if productionHumanizationForbiddenKeys.contains(key) {
+                throw ControlServerError.coded(
+                    "E_HUMANIZATION_OWNERSHIP",
+                    "\(path).\(key) is caller-supplied humanization; production hid_action timing, path, and profiles are owned by VirtualHID"
+                )
+            }
+
+            if let nested = value as? [String: Any] {
+                try assertNoProductionHumanizationKnobs(nested, path: "\(path).\(key)", inProfileObject: false)
+            } else if let array = value as? [Any] {
+                for (index, item) in array.enumerated() {
+                    if let nested = item as? [String: Any] {
+                        try assertNoProductionHumanizationKnobs(nested, path: "\(path).\(key)[\(index)]", inProfileObject: false)
+                    }
+                }
+            }
+        }
+    }
+
     private func browserChromeOverlayPolicy(from object: [String: Any]) throws -> BrowserChromeOverlayPolicy {
         if let policyObject = object["browserChromeOverlayPolicy"] as? [String: Any]
             ?? object["browser_chrome_overlay_policy"] as? [String: Any] {
@@ -2848,13 +2917,11 @@ public final class ControlService {
         isoFormatter.date(from: event.timestamp)
     }
 
-    private func applyProfiles(to primitives: [ActionPrimitive], context: ActionContext) -> (primitives: [ActionPrimitive], applied: Bool, templateIds: [String]) {
-        guard let sig = context.element?.sig else {
-            return (primitives, false, [])
-        }
-
+    private func applyProfiles(to primitives: [ActionPrimitive], context: ActionContext) -> (primitives: [ActionPrimitive], applied: Bool, templateIds: [String], fallbackType: String) {
+        let sig = context.element?.sig ?? ""
         var applied = false
         var templateIds = [String]()
+        var fallbackTypes = Set<String>()
         let mapped = primitives.map { primitive -> ActionPrimitive in
             let actionType = profileActionType(for: primitive)
             guard let template = try? profileStore.lookupTemplate(
@@ -2873,6 +2940,7 @@ public final class ControlService {
             )
             applied = true
             templateIds.append(reference.id)
+            fallbackTypes.insert(profileFallbackType(template: template, requestedSig: sig))
             switch primitive {
             case .move(let to, _, let durationMs, let profile):
                 return .move(
@@ -2925,7 +2993,28 @@ public final class ControlService {
                 )
             }
         }
-        return (mapped, applied, templateIds)
+        let fallbackType: String
+        if !applied {
+            fallbackType = "sampled-default"
+        } else if fallbackTypes.count == 1, let only = fallbackTypes.first {
+            fallbackType = only
+        } else {
+            fallbackType = "mixed-learned-profile"
+        }
+        return (mapped, applied, templateIds, fallbackType)
+    }
+
+    private func profileFallbackType(template: ProfileTemplate, requestedSig: String) -> String {
+        if template.host == ProfileStore.globalLearningHost && template.elementSig.isEmpty {
+            return "global-learned-profile"
+        }
+        if requestedSig.isEmpty && template.elementSig.isEmpty {
+            return "host-learned-profile"
+        }
+        if template.elementSig == requestedSig {
+            return "exact-learned-profile"
+        }
+        return "scoped-learned-profile"
     }
 
     private func profileActionType(for primitive: ActionPrimitive) -> String {
@@ -2998,6 +3087,36 @@ public final class ControlService {
             "elapsedMs": result.elapsedMs,
             "input": [
                 "fallbackDiagnostics": try result.inputDiagnostics.map(encodableObject)
+            ]
+        ]
+    }
+
+    private func humanizationAuditObject(
+        result: ActionResult?,
+        profileApplied: Bool,
+        templateIds: [String],
+        fallbackType: String,
+        options: ActionOptions
+    ) -> [String: Any] {
+        let inputDiagnostics = (try? result?.inputDiagnostics.map(encodableObject)) ?? []
+        return [
+            "profile": [
+                "applied": profileApplied,
+                "fallbackType": fallbackType,
+                "templateIds": templateIds
+            ],
+            "input": [
+                "fallbackDiagnostics": inputDiagnostics,
+                "pasteUsed": result?.events.contains { $0.type == "pasteText" } ?? false
+            ],
+            "timingOwnership": [
+                "owner": "VirtualHID",
+                "productionCallerTimingAccepted": false,
+                "dryRunCompatibility": options.dryRun
+            ],
+            "localPacing": [
+                "preDelayMs": options.preDelayMs as Any? ?? NSNull(),
+                "postDelayMs": options.postDelayMs as Any? ?? NSNull()
             ]
         ]
     }
@@ -3681,6 +3800,47 @@ private let fixedPointOnlyForbiddenKeys: Set<String> = [
     "region",
     "targetSpreadPx",
     "target_spread_px"
+]
+
+private let productionHumanizationForbiddenKeys: Set<String> = [
+    "behavior",
+    "behaviorMode",
+    "behavior_mode",
+    "durationMs",
+    "duration_ms",
+    "holdMs",
+    "hold_ms",
+    "interClickMs",
+    "inter_click_ms",
+    "motion",
+    "motionProfile",
+    "motion_profile",
+    "moveSpeedPxS",
+    "move_speed_px_s",
+    "pointCount",
+    "point_count",
+    "profileId",
+    "profile_id",
+    "speed",
+    "speedPxS",
+    "speed_px_s",
+    "templateId",
+    "template_id",
+    "via"
+]
+
+private let productionSafePrimitiveProfileKeys: Set<String> = [
+    "origin",
+    "landingZone",
+    "landing_zone",
+    "landingCenter",
+    "landing_center",
+    "landingWidth",
+    "landing_width",
+    "landingHeight",
+    "landing_height",
+    "landingRadius",
+    "landing_radius"
 ]
 
 private func assertFixedPointOnlyPayload(_ value: Any?, path: String = "primitive") throws {

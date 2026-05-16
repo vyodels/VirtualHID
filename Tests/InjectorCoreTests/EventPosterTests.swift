@@ -183,6 +183,39 @@ final class EventPosterTests: XCTestCase {
         }
     }
 
+    func testDryRunMoveObservesCancellationBetweenPathEvents() throws {
+        var executor: ActionExecutor!
+        let sink = RecordingHIDSink()
+        sink.onRecord = { event in
+            if event.type == "mouseMoved" {
+                executor.cancel()
+            }
+        }
+        executor = ActionExecutor(target: testTarget(), eventSink: sink)
+
+        XCTAssertThrowsError(try executor.execute(
+            ActionRequest(
+                id: "cancel-move-path",
+                primitives: [
+                    .move(
+                        to: CGPoint(x: 520, y: 180),
+                        via: .wind,
+                        durationMs: 1_200,
+                        profile: PrimitiveProfile(origin: CGPoint(x: 20, y: 80))
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )) { error in
+            guard case ActionExecutionError.cancelled = error else {
+                return XCTFail("expected cancelled, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(sink.recorded.filter { $0.type == "mouseMoved" }.count, 1)
+    }
+
     func testHidEventSinkReceivesOnlyRecordedEvents() {
         let app = NSRunningApplication.current
         let target = BrowserTarget(
@@ -493,6 +526,43 @@ final class EventPosterTests: XCTestCase {
         XCTAssertEqual(deltas[2], 210, accuracy: 1)
     }
 
+    func testDryRunTypeCancellationWaitsForKeyUpPairBoundary() throws {
+        var executor: ActionExecutor!
+        let sink = RecordingHIDSink()
+        sink.onRecord = { event in
+            if event.type == "keyDown" {
+                executor.cancel()
+            }
+        }
+        executor = ActionExecutor(target: testTarget(), eventSink: sink)
+
+        XCTAssertThrowsError(try executor.execute(
+            ActionRequest(
+                id: "cancel-type-pair-boundary",
+                primitives: [
+                    .type(
+                        text: "ab",
+                        layout: .us,
+                        profile: PrimitiveProfile(
+                            motionProfile: MotionProfile(
+                                dwellMs: IntRange(min: 120, max: 120),
+                                interKeyMs: IntRange(min: 160, max: 160)
+                            )
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-type", role: "textbox")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )) { error in
+            guard case ActionExecutionError.cancelled = error else {
+                return XCTFail("expected cancelled, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(sink.recorded.map(\.type), ["keyDown", "keyUp"])
+    }
+
     func testLearnedScrollProfileControlsDryRunBurstTiming() throws {
         let executor = ActionExecutor(target: testTarget())
         let profile = MotionProfile(
@@ -633,6 +703,7 @@ private final class RecordingBackend: EventPostingBackend {
 private final class RecordingHIDSink: HIDEventSink {
     private(set) var started: HIDActionVisualContext?
     private(set) var recorded: [InjectedEvent] = []
+    var onRecord: ((InjectedEvent) -> Void)?
 
     func hidActionDidStart(_ context: HIDActionVisualContext) {
         started = context
@@ -640,5 +711,6 @@ private final class RecordingHIDSink: HIDEventSink {
 
     func hidActionDidRecord(_ event: InjectedEvent, context: HIDActionVisualContext) {
         recorded.append(event)
+        onRecord?(event)
     }
 }

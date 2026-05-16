@@ -309,6 +309,19 @@ private struct PrimitiveEmitResult {
     }
 }
 
+private enum HumanizationDefaults {
+    static let clickHoldMs = IntRange(min: 38, max: 74)
+    static let interClickMs = IntRange(min: 96, max: 178)
+    static let settleMs = IntRange(min: 42, max: 112)
+    static let dragPreHoldMs = IntRange(min: 34, max: 76)
+    static let dragHoldMs = IntRange(min: 46, max: 92)
+    static let pasteChordHoldMs = IntRange(min: 28, max: 58)
+    static let pasteRestoreDelayMs = IntRange(min: 90, max: 180)
+    static let scrollStepCount = IntRange(min: 2, max: 4)
+    static let scrollStepDelayMs = IntRange(min: 14, max: 46)
+    static let scrollInertiaDecay = DoubleRange(min: 0.58, max: 0.86)
+}
+
 private struct ActionDeadline {
     private let timeoutMs: Int?
     private let expiresAt: Date?
@@ -426,8 +439,7 @@ public final class ActionExecutor {
         try sleep(milliseconds: request.options.preDelayMs ?? 0, dryRun: dryRun, deadline: deadline)
 
         for (index, primitive) in request.primitives.enumerated() {
-            try checkCancelled()
-            try deadline.assertNotExpired()
+            try checkpoint(deadline)
             let emitted = try emit(primitive, primitiveIndex: index, poster: poster, options: request.options, deadline: deadline, rng: &rng)
             events.append(contentsOf: emitted.events)
             inputDiagnostics.append(contentsOf: emitted.inputDiagnostics)
@@ -466,6 +478,11 @@ public final class ActionExecutor {
         }
     }
 
+    private func checkpoint(_ deadline: ActionDeadline) throws {
+        try checkCancelled()
+        try deadline.assertNotExpired()
+    }
+
     private func ensurePidSafePrimitives(_ primitives: [ActionPrimitive]) throws {
         for primitive in primitives {
             guard let unsupportedType = primitive.firstUnsupportedPidEventType else {
@@ -477,7 +494,7 @@ public final class ActionExecutor {
 
     private func emit(_ primitive: ActionPrimitive, primitiveIndex: Int, poster: EventPoster, options: ActionOptions, deadline: ActionDeadline, rng: inout SystemRandomNumberGenerator) throws -> PrimitiveEmitResult {
         let dryRun = options.dryRun
-        try deadline.assertNotExpired()
+        try checkpoint(deadline)
         switch primitive {
         case .move(let to, let style, let durationMs, let profile):
             let motionProfile = actionMotionProfile(resolvedMotionProfile(style: style, explicitProfile: profile), options: options)
@@ -499,13 +516,15 @@ public final class ActionExecutor {
         case .click(let at, let button, let holdMs, let count, let profile):
             let motionProfile = actionMotionProfile(profile?.motionProfile, options: options)
             let clickPoint = resolvedLandingPoint(base: at, profile: profile, rng: &rng)
-            let resolvedHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
-            let interClickMs = motionProfile?.resolvedInterClickMs(defaultValue: 120, rng: &rng) ?? 120
+            let defaultHoldMs = holdMs ?? HumanizationDefaults.clickHoldMs.sample(rng: &rng)
+            let resolvedHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: defaultHoldMs, rng: &rng) ?? defaultHoldMs
+            let defaultInterClickMs = HumanizationDefaults.interClickMs.sample(rng: &rng)
+            let interClickMs = motionProfile?.resolvedInterClickMs(defaultValue: defaultInterClickMs, rng: &rng) ?? defaultInterClickMs
             var emitted = [InjectedEvent]()
             let start = profile?.origin ?? currentMouseLocation(fallback: clickPoint)
             if needsCursorTravel(from: start, to: clickPoint) {
                 let travelDurationMs = motionProfile == nil
-                    ? implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: 72)
+                    ? implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: HumanizationDefaults.settleMs.sample(rng: &rng))
                     : nil
                 emitted.append(contentsOf: try emitMovePath(
                     from: start,
@@ -523,7 +542,7 @@ public final class ActionExecutor {
             let clickCount = max(count, 1)
             let secondClickOffset = clickCount > 1 ? motionProfile?.resolvedDoubleClickSecondOffset(rng: &rng).cgPoint ?? .zero : .zero
             for index in 0..<clickCount {
-                try deadline.assertNotExpired()
+                try checkpoint(deadline)
                 let perClickHoldMs = clickCount > 1
                     ? motionProfile?.resolvedDoubleClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
                     : motionProfile?.resolvedClickHoldMs(defaultValue: resolvedHoldMs, rng: &rng) ?? resolvedHoldMs
@@ -539,8 +558,9 @@ public final class ActionExecutor {
                     rng: &rng
                 ))
                 emitted.append(try postMouse(type: button.downEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
-                try sleep(milliseconds: perClickHoldMs, dryRun: dryRun, deadline: deadline)
+                try sleep(milliseconds: perClickHoldMs, dryRun: dryRun, deadline: deadline, allowCancellation: false)
                 emitted.append(try postMouse(type: button.upEventType, location: perClickPoint, button: button.cgButton, poster: poster, dryRun: dryRun))
+                try checkpoint(deadline)
                 if index < clickCount - 1 {
                     let interval = clickCount == 2
                         ? motionProfile?.resolvedDoubleClickInterClickMs(defaultValue: interClickMs, rng: &rng) ?? interClickMs
@@ -548,7 +568,7 @@ public final class ActionExecutor {
                     try sleep(milliseconds: interval, dryRun: dryRun, deadline: deadline)
                 }
             }
-            let settleMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 72
+            let settleMs = motionProfile?.settleMs?.sample(rng: &rng) ?? HumanizationDefaults.settleMs.sample(rng: &rng)
             try sleep(milliseconds: settleMs, dryRun: dryRun, deadline: deadline)
             return PrimitiveEmitResult(events: emitted)
 
@@ -571,8 +591,9 @@ public final class ActionExecutor {
                 isDrag: true,
                 rng: &rng
             )
-            let preHoldMs = motionProfile?.settleMs?.sample(rng: &rng) ?? 40
-            let dragHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: 56, rng: &rng) ?? 56
+            let preHoldMs = motionProfile?.settleMs?.sample(rng: &rng) ?? HumanizationDefaults.dragPreHoldMs.sample(rng: &rng)
+            let defaultDragHoldMs = HumanizationDefaults.dragHoldMs.sample(rng: &rng)
+            let dragHoldMs = motionProfile?.resolvedClickHoldMs(defaultValue: defaultDragHoldMs, rng: &rng) ?? defaultDragHoldMs
             var emitted = [InjectedEvent]()
             emitted.append(contentsOf: try ensurePointerAtTarget(
                 start,
@@ -589,17 +610,24 @@ public final class ActionExecutor {
             }
             try sleep(milliseconds: preHoldMs, dryRun: dryRun, deadline: deadline)
             emitted.append(try postMouse(type: button.downEventType, location: start, button: button.cgButton, poster: poster, dryRun: dryRun))
-            try sleep(milliseconds: dragHoldMs, dryRun: dryRun, deadline: deadline)
-            for (index, point) in dragPath.enumerated() {
-                try deadline.assertNotExpired()
-                emitted.append(try postMouse(type: dragEventType(for: button), location: point, button: button.cgButton, poster: poster, dryRun: dryRun))
-                if index < dragPath.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
-                    try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
+            do {
+                try sleep(milliseconds: dragHoldMs, dryRun: dryRun, deadline: deadline, allowCancellation: false)
+                for (index, point) in dragPath.enumerated() {
+                    try checkpoint(deadline)
+                    emitted.append(try postMouse(type: dragEventType(for: button), location: point, button: button.cgButton, poster: poster, dryRun: dryRun))
+                    if index < dragPath.count - 1, timing.delaysMs.indices.contains(index), timing.delaysMs[index] > 0 {
+                        try sleep(milliseconds: timing.delaysMs[index], dryRun: dryRun, deadline: deadline)
+                    }
                 }
+            } catch {
+                let releasePoint = emitted.last?.location.map { CGPoint(x: $0.x, y: $0.y) } ?? start
+                _ = try? postMouse(type: button.upEventType, location: releasePoint, button: button.cgButton, poster: poster, dryRun: dryRun)
+                throw error
             }
             let releasePoint = dragPath.last ?? resolvedTarget
             emitted.append(try postMouse(type: button.upEventType, location: releasePoint, button: button.cgButton, poster: poster, dryRun: dryRun))
-            try sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? 92, dryRun: dryRun, deadline: deadline)
+            try checkpoint(deadline)
+            try sleep(milliseconds: motionProfile?.settleMs?.sample(rng: &rng) ?? HumanizationDefaults.settleMs.sample(rng: &rng), dryRun: dryRun, deadline: deadline)
             return PrimitiveEmitResult(events: emitted)
 
         case .scroll(let at, let dx, let dy, _, let profile):
@@ -618,7 +646,7 @@ public final class ActionExecutor {
             )
 
         case .pasteText(let text, let restoreClipboard, _):
-            let events = try emitPasteText(text, restoreClipboard: restoreClipboard, poster: poster, dryRun: dryRun, deadline: deadline)
+            let events = try emitPasteText(text, restoreClipboard: restoreClipboard, poster: poster, dryRun: dryRun, deadline: deadline, rng: &rng)
             return PrimitiveEmitResult(
                 events: events,
                 inputDiagnostics: [
@@ -639,9 +667,11 @@ public final class ActionExecutor {
             var emitted = [InjectedEvent]()
             let motionProfile = actionMotionProfile(profile?.motionProfile, options: options)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
-            let keyHold = motionProfile?.resolvedClickHoldMs(defaultValue: holdMs ?? 45, rng: &rng) ?? (holdMs ?? 45)
-            try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline)
+            let defaultKeyHold = holdMs ?? HumanizationDefaults.clickHoldMs.sample(rng: &rng)
+            let keyHold = motionProfile?.resolvedClickHoldMs(defaultValue: defaultKeyHold, rng: &rng) ?? defaultKeyHold
+            try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline, allowCancellation: false)
             emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+            try checkpoint(deadline)
             return PrimitiveEmitResult(events: emitted)
         }
     }
@@ -651,7 +681,8 @@ public final class ActionExecutor {
         restoreClipboard: Bool,
         poster: EventPoster,
         dryRun: Bool,
-        deadline: ActionDeadline
+        deadline: ActionDeadline,
+        rng: inout SystemRandomNumberGenerator
     ) throws -> [InjectedEvent] {
         var emitted = [record(type: "pasteText", key: "clipboard")]
         let oldClipboard: String?
@@ -666,12 +697,13 @@ public final class ActionExecutor {
 
         emitted.append(try postKey(keyCode: 55, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun, flags: [.maskCommand]))
         emitted.append(try postKey(keyCode: 9, keyDown: true, recordedKey: "v", poster: poster, dryRun: dryRun, flags: [.maskCommand]))
-        try sleep(milliseconds: 36, dryRun: dryRun, deadline: deadline)
+        try sleep(milliseconds: HumanizationDefaults.pasteChordHoldMs.sample(rng: &rng), dryRun: dryRun, deadline: deadline, allowCancellation: false)
         emitted.append(try postKey(keyCode: 9, keyDown: false, recordedKey: "v", poster: poster, dryRun: dryRun, flags: [.maskCommand]))
         emitted.append(try postKey(keyCode: 55, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+        try checkpoint(deadline)
 
         if !dryRun, restoreClipboard {
-            try sleep(milliseconds: 120, dryRun: false, deadline: deadline)
+            try sleep(milliseconds: HumanizationDefaults.pasteRestoreDelayMs.sample(rng: &rng), dryRun: false, deadline: deadline)
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             if let oldClipboard {
@@ -691,14 +723,16 @@ public final class ActionExecutor {
         deadline: ActionDeadline,
         rng: inout SystemRandomNumberGenerator
     ) throws -> PrimitiveEmitResult {
-        let stepCount = motionProfile?.resolvedScrollStepCount(fallback: 1, rng: &rng) ?? 1
+        let fallbackStepCount = HumanizationDefaults.scrollStepCount.sample(rng: &rng)
+        let stepCount = motionProfile?.resolvedScrollStepCount(fallback: fallbackStepCount, rng: &rng) ?? fallbackStepCount
         let baseDelta = motionProfile?.resolvedScrollDelta(requestedDx: dx, requestedDy: dy, rng: &rng)
             ?? HumanPoint(x: dx, y: dy)
-        let decay = motionProfile?.resolvedScrollInertiaDecay(rng: &rng) ?? 1
-        let delay = motionProfile?.resolvedScrollDelayMs(fallback: 0, rng: &rng) ?? 0
+        let decay = motionProfile?.resolvedScrollInertiaDecay(rng: &rng) ?? HumanizationDefaults.scrollInertiaDecay.sample(rng: &rng)
+        let delay = motionProfile?.resolvedScrollDelayMs(fallback: HumanizationDefaults.scrollStepDelayMs.sample(rng: &rng), rng: &rng)
+            ?? HumanizationDefaults.scrollStepDelayMs.sample(rng: &rng)
         var emitted = [InjectedEvent]()
         for index in 0..<stepCount {
-            try deadline.assertNotExpired()
+            try checkpoint(deadline)
             let factor = pow(decay, Double(index))
             let stepDx = baseDelta.x * factor
             let stepDy = baseDelta.y * factor
@@ -763,6 +797,7 @@ public final class ActionExecutor {
                     rng: &rng
                 )
                 for keyEvent in schedule {
+                    try checkpoint(deadline)
                     try emitScheduledKeyEvent(keyEvent, emitted: &emitted, poster: poster, dryRun: dryRun, deadline: deadline)
                 }
                 if chunkIndex < keyboardChunks.count - 1 {
@@ -847,6 +882,7 @@ public final class ActionExecutor {
         if keyEvent.delayBeforeMs > 0 {
             try sleep(milliseconds: keyEvent.delayBeforeMs, dryRun: dryRun, deadline: deadline)
         }
+        try checkpoint(deadline)
 
         if keyEvent.modifiers.contains(.shift) {
             emitted.append(try postKey(keyCode: 56, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
@@ -855,12 +891,13 @@ public final class ActionExecutor {
         let keyCode = CGKeyCode(keyEvent.keyCode)
         let recordedKey = String(keyEvent.char)
         emitted.append(try postKey(keyCode: keyCode, keyDown: true, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
-        try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline)
+        try sleep(milliseconds: keyEvent.dwellMs, dryRun: dryRun, deadline: deadline, allowCancellation: false)
         emitted.append(try postKey(keyCode: keyCode, keyDown: false, recordedKey: recordedKey, poster: poster, dryRun: dryRun))
 
         if keyEvent.modifiers.contains(.shift) {
             emitted.append(try postKey(keyCode: 56, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
         }
+        try checkpoint(deadline)
     }
 
     private func emitChineseIMEText(
@@ -873,12 +910,14 @@ public final class ActionExecutor {
     ) throws -> [InjectedEvent] {
         var emitted = [InjectedEvent]()
         for scalar in text.unicodeScalars {
+            try checkpoint(deadline)
             if emitted.count > 0 {
                 try sleep(milliseconds: Int.random(in: 80...160, using: &rng), dryRun: dryRun, deadline: deadline)
             }
             emitted.append(try postUnicodeScalar(scalar, keyDown: true, poster: poster, dryRun: dryRun))
-            try sleep(milliseconds: Int.random(in: 45...110, using: &rng), dryRun: dryRun, deadline: deadline)
+            try sleep(milliseconds: Int.random(in: 45...110, using: &rng), dryRun: dryRun, deadline: deadline, allowCancellation: false)
             emitted.append(try postUnicodeScalar(scalar, keyDown: false, poster: poster, dryRun: dryRun))
+            try checkpoint(deadline)
         }
         return emitted
     }
@@ -983,7 +1022,7 @@ public final class ActionExecutor {
         var emitted = [InjectedEvent]()
         var lastPlannedPoint = start
         for (index, point) in path.enumerated() {
-            try deadline.assertNotExpired()
+            try checkpoint(deadline)
             if correctionBudget > 0,
                index > 0,
                shouldMonitorPhysicalCursor(dryRun: dryRun) {
@@ -1080,20 +1119,28 @@ public final class ActionExecutor {
         return min(fallback, max(120, timeoutMs - reservedMs))
     }
 
-    private func sleep(milliseconds: Int, dryRun: Bool, deadline: ActionDeadline) throws {
+    private func sleep(milliseconds: Int, dryRun: Bool, deadline: ActionDeadline, allowCancellation: Bool = true) throws {
         guard milliseconds > 0 else {
+            if allowCancellation {
+                try checkCancelled()
+            }
             try deadline.assertNotExpired()
             return
         }
         if dryRun {
             activeDryRunTimestamp = (activeDryRunTimestamp ?? Date()).addingTimeInterval(TimeInterval(milliseconds) / 1000.0)
+            if allowCancellation {
+                try checkCancelled()
+            }
             try deadline.assertNotExpired()
             return
         }
         try deadline.assertCanSpend(milliseconds: milliseconds)
         var remaining = milliseconds
         while remaining > 0 {
-            try checkCancelled()
+            if allowCancellation {
+                try checkCancelled()
+            }
             try deadline.assertNotExpired()
             let chunk = min(remaining, 50)
             FocusController.sleep(milliseconds: chunk)

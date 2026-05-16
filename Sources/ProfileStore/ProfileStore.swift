@@ -731,7 +731,7 @@ public final class ProfileStore {
     public func rebuild(host: String? = nil) throws -> AggregateReport {
         try lock.withLock { [self] in
             try self.performRetentionIfNeeded(nowMs: self.currentTimeMs(), force: true)
-            let scanned = try self.countTraces(host: host)
+            let scanned = try self.countTrainableTraces(host: host)
             try self.deleteTemplates(host: host, sig: nil)
             let groups = try self.loadGroups(host: host)
             var generated = 0
@@ -978,13 +978,14 @@ public final class ProfileStore {
             sql = """
             SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression()), COUNT(*)
             FROM traces
+            WHERE \(Self.trainableSourceSQLExpression())
             GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression())
             """
         } else {
             sql = """
             SELECT host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression()), COUNT(*)
             FROM traces
-            WHERE host = ?
+            WHERE host = ? AND \(Self.trainableSourceSQLExpression())
             GROUP BY host, COALESCE(element_sig, ''), COALESCE(task_id, ''), \(Self.canonicalActionTypeSQLExpression())
             """
         }
@@ -1018,6 +1019,7 @@ public final class ProfileStore {
           AND COALESCE(element_sig, '') = ?
           AND COALESCE(task_id, '') = ?
           AND \(Self.canonicalActionTypeSQLExpression()) = ?
+          AND \(Self.trainableSourceSQLExpression())
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1183,6 +1185,19 @@ public final class ProfileStore {
             return Int(sqlite3_column_int(statement, 0))
         }
         return try scalarInt("SELECT COUNT(*) FROM traces")
+    }
+
+    private func countTrainableTraces(host: String?) throws -> Int {
+        if let host {
+            let statement = try prepare("SELECT COUNT(*) FROM traces WHERE host = ? AND \(Self.trainableSourceSQLExpression())")
+            defer { sqlite3_finalize(statement) }
+            bindText(host, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_ROW else {
+                return 0
+            }
+            return Int(sqlite3_column_int(statement, 0))
+        }
+        return try scalarInt("SELECT COUNT(*) FROM traces WHERE \(Self.trainableSourceSQLExpression())")
     }
 
     private func performRetentionIfNeeded(nowMs: Int64, force: Bool = false) throws {
@@ -1991,6 +2006,10 @@ public final class ProfileStore {
           ELSE lower(action_type)
         END
         """
+    }
+
+    private static func trainableSourceSQLExpression() -> String {
+        "source IN ('user', 'user-passive', 'user-teaching')"
     }
 
     public static func isSensitiveRole(_ role: String?) -> Bool {

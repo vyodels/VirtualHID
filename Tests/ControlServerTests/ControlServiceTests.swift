@@ -285,6 +285,33 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(try store.lookupTemplate(host: "example.com", sig: "sig-apply", taskId: "task", actionType: "click").sampleSize, 10)
     }
 
+    func testProductionActionRejectsCallerSuppliedHumanizationKnobs() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"prod-humanization","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":false,"profile":{"pointCount":{"min":1,"max":1}}},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left","profile":{"origin":{"x":120,"y":88},"motion":{"clickHoldMs":{"min":1,"max":1}}}}]}}"#
+        )
+        let payload = try decode(response)
+        let error = payload["error"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, false)
+        XCTAssertEqual(error?["code"] as? String, "E_HUMANIZATION_OWNERSHIP")
+    }
+
+    func testDryRunKeepsCallerHumanizationCompatibilityAndReturnsAudit() throws {
+        let service = try makeService()
+        let response = service.handleLine(
+            #"{"id":"dry-humanization","method":"action","params":{"context":{"host":"example.com","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true,"profile":{"clickHoldMs":{"min":80,"max":80}}},"primitives":[{"type":"click","at":{"x":120,"y":88},"button":"left","profile":{"origin":{"x":120,"y":88},"motion":{"clickHoldMs":{"min":80,"max":80}}}}]}}"#
+        )
+        let payload = try decode(response)
+        let result = payload["result"] as? [String: Any]
+        let audit = result?["humanizationAudit"] as? [String: Any]
+        let timing = audit?["timingOwnership"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(timing?["owner"] as? String, "VirtualHID")
+        XCTAssertEqual(timing?["dryRunCompatibility"] as? Bool, true)
+    }
+
     func testLearnedProfilePlaybackEmitsActionEventsToHidSink() throws {
         let store = try ProfileStore(path: ":memory:")
         let box = HIDSinkBox()
@@ -308,6 +335,27 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(mouseMoves.count, 10)
         XCTAssertEqual(box.finished?.context.actionId, "learned-playback")
         XCTAssertEqual(box.finished?.events.count, events.count)
+    }
+
+    func testGlobalLearningProfileAppliesWhenElementSignatureIsMissing() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let service = try makeService(profileStore: store)
+        _ = service.handleLine(
+            #"{"id":"apply-global","method":"profiles.apply","params":{"host":"__global__","elementSig":"","actionType":"click","sampleSize":12,"confidence":0.8,"params":{"version":2,"strategy":"profile","actionType":"click","sampleSize":12,"motion":{"pointCount":{"min":6,"max":6},"clickHoldMs":{"min":90,"max":90}}}}}"#
+        )
+
+        let payload = try decode(service.handleLine(
+            #"{"id":"global-fallback","method":"action","params":{"context":{"host":"example.com","element":{"role":"button"}},"options":{"dryRun":true,"postMode":"global"},"primitives":[{"type":"click","at":{"x":220,"y":150},"button":"left","profile":{"origin":{"x":28,"y":42}}}]}}"#
+        ))
+        let result = payload["result"] as? [String: Any]
+        let profiles = result?["profiles"] as? [String: Any]
+        let audit = result?["humanizationAudit"] as? [String: Any]
+        let profileAudit = audit?["profile"] as? [String: Any]
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(profiles?["applied"] as? Bool, true)
+        XCTAssertEqual(profiles?["fallbackType"] as? String, "global-learned-profile")
+        XCTAssertEqual(profileAudit?["fallbackType"] as? String, "global-learned-profile")
     }
 
     func testLearnedProfileChangesMovementAndClickTimingAgainstDisabledProfiles() throws {

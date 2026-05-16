@@ -185,6 +185,60 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(learned.sampleSize, 6)
     }
 
+    func testRebuildIgnoresVirtualHIDGeneratedReplaySources() throws {
+        let store = try ProfileStore(path: ":memory:")
+
+        for index in 0..<5 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_020_000 + index),
+                    source: index.isMultiple(of: 2) ? "hid-dry-run" : "hid",
+                    host: "example.com",
+                    elementSig: "sig-click",
+                    taskId: "task-click",
+                    stage: "stage",
+                    actionType: "click",
+                    payload: TracePayload(
+                        eventId: "hid-\(index)",
+                        type: "leftMouseUp",
+                        point: TracePoint(x: 120, y: 88),
+                        clickHoldMs: [20]
+                    )
+                )
+            )
+        }
+
+        for index in 0..<5 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_021_000 + index),
+                    source: "user-passive",
+                    host: "example.com",
+                    elementSig: "sig-click",
+                    taskId: "task-click",
+                    stage: "stage",
+                    actionType: "click",
+                    payload: TracePayload(
+                        eventId: "user-\(index)",
+                        type: "leftMouseUp",
+                        point: TracePoint(x: 120, y: 88),
+                        clickHoldMs: [80 + Double(index)]
+                    )
+                )
+            )
+        }
+
+        let report = try store.rebuild(host: "example.com")
+        let template = try store.lookupTemplate(host: "example.com", sig: "sig-click", taskId: "task-click", actionType: "click")
+        let learned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(template.paramsJSON.utf8))
+
+        XCTAssertEqual(try store.traceCount(host: "example.com"), 10)
+        XCTAssertEqual(report.scannedTraces, 5)
+        XCTAssertEqual(report.generatedTemplates, 1)
+        XCTAssertEqual(template.sampleSize, 5)
+        XCTAssertGreaterThanOrEqual(learned.motion.clickHoldMs?.min ?? 0, 70)
+    }
+
     func testRebuildExposesRawHIDDistributionsForScrollKeyboardAndDoubleClick() throws {
         let store = try ProfileStore(path: ":memory:")
 
