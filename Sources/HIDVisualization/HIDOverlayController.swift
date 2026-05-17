@@ -1275,30 +1275,29 @@ struct HIDOverlayFrame {
 struct HIDOverlayViewSnapshot: Equatable {
     let currentEventCount: Int?
     let currentTrailPoints: [CodablePoint]
+    let currentActualPoint: CodablePoint?
     let historyEventCounts: [Int]
     let historyTrailPoints: [[CodablePoint]]
+    let historyActualPoints: [CodablePoint?]
 }
 
-func hidOverlayTrailPoints(events: [InjectedEvent], actual: CodablePoint?) -> [CodablePoint] {
-    var points = events.compactMap(\.location)
-    guard let actual else {
-        return points
+func hidOverlayTrailPoints(events: [InjectedEvent], actual _: CodablePoint?) -> [CodablePoint] {
+    events.compactMap { event -> CodablePoint? in
+        guard hidOverlayIsTrajectoryEvent(event.type) else {
+            return nil
+        }
+        return event.location
     }
-    if let last = points.last, hidOverlayApproximatelyEqual(last, actual) {
-        return points
-    }
-    points.append(actual)
-    return points
+}
+
+private func hidOverlayIsTrajectoryEvent(_ type: String) -> Bool {
+    type == "mouseMoved" || type.contains("Dragged")
 }
 
 private func hidOverlayIsCompletedHistoryFrame(_ frame: HIDOverlayFrame) -> Bool {
     frame.actual != nil
         && frame.events.count > 1
         && hidOverlayTrailPoints(events: frame.events, actual: frame.actual).count >= 2
-}
-
-private func hidOverlayApproximatelyEqual(_ lhs: CodablePoint, _ rhs: CodablePoint, tolerance: Double = 0.5) -> Bool {
-    abs(lhs.x - rhs.x) <= tolerance && abs(lhs.y - rhs.y) <= tolerance
 }
 
 private struct HIDPlaybackStep {
@@ -1343,8 +1342,10 @@ final class HIDOverlayView: NSView {
         HIDOverlayViewSnapshot(
             currentEventCount: frameData?.events.count,
             currentTrailPoints: frameData.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) } ?? [],
+            currentActualPoint: frameData?.actual,
             historyEventCounts: historicalFrames.map(\.events.count),
-            historyTrailPoints: historicalFrames.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) }
+            historyTrailPoints: historicalFrames.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) },
+            historyActualPoints: historicalFrames.map(\.actual)
         )
     }
 

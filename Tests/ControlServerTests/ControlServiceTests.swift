@@ -53,6 +53,20 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertTrue(elapsedMs < 220, "dry-run actions should not sleep through holdMs; elapsedMs=\(elapsedMs)")
     }
 
+    func testKeyPrimitiveSupportsCommandChordForBrowserAddressBarRecovery() {
+        let service = try! makeService()
+        let response = service.handleLine(
+            #"{"id":"cmd-l","method":"action","params":{"context":{"host":"example.com","element":{"sig":"address-bar-recovery","role":"browser"}},"options":{"dryRun":true},"primitives":[{"type":"key","keyCode":37,"modifiers":["cmd"]}]}}"#
+        )
+        let payload = try! decode(response)
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        let result = payload["result"] as? [String: Any]
+        let events = result?["events"] as? [[String: Any]]
+
+        XCTAssertEqual(events?.map { $0["type"] as? String }, ["keyDown", "keyDown", "keyUp", "keyUp"])
+        XCTAssertEqual(events?.map { $0["virtualKey"] as? Int }, [55, 37, 37, 55])
+    }
+
     func testDryRunEventsUseSyntheticTimelineForHoldAndInterClickDurations() throws {
         let service = try makeService()
         let response = service.handleLine(
@@ -116,6 +130,35 @@ final class ControlServiceTests: XCTestCase {
         XCTAssertEqual(plan?["geometryApplied"] as? Bool, true)
         XCTAssertEqual(mapping?["viewportSource"] as? String, "self-target-visible-screen")
         XCTAssertEqual(mapping?["ignoredCallerViewportInScreen"] as? Bool, false)
+    }
+
+    func testActionParsesBrowserWindowBoundsForTargetDisambiguation() {
+        let app = NSRunningApplication.current
+        var capturedDescriptor: TargetDescriptor?
+        let service = try! makeService(
+            allowSelfTarget: false,
+            targetResolverOverride: { descriptor in
+                capturedDescriptor = descriptor
+                return BrowserTarget(
+                    app: app,
+                    pid: app.processIdentifier,
+                    bundleIdentifier: descriptor?.bundleId ?? "com.google.Chrome",
+                    windowTitle: "Jobs",
+                    tabId: descriptor?.tabId,
+                    host: descriptor?.host,
+                    frame: CGRect(x: 3195, y: -1251, width: 1526, height: 1160),
+                    viewportFrame: CGRect(x: 3195, y: -1172, width: 1526, height: 1081),
+                    viewportFrameSource: "test"
+                )
+            }
+        )
+        let response = service.handleLine(
+            #"{"id":"bounds-target","method":"action","params":{"target":{"bundleId":"com.google.Chrome","tabId":1136767008,"host":"127.0.0.1:50149","browserWindowBounds":{"x":3195,"y":-1251,"width":1526,"height":1160}},"geometry":{"coordSpace":"viewport","pageScale":1},"context":{"host":"127.0.0.1:50149","element":{"sig":"sig-fixed","role":"button"}},"options":{"dryRun":true},"primitives":[{"type":"click","at":{"x":220,"y":160},"button":"left"}]}}"#
+        )
+        let payload = try! decode(response)
+
+        XCTAssertEqual(payload["ok"] as? Bool, true)
+        XCTAssertEqual(capturedDescriptor?.browserWindowBounds, CodableRect(x: 3195, y: -1251, width: 1526, height: 1160))
     }
 
     func testActionRejectsViewportMappingWhenViewportUnresolved() {

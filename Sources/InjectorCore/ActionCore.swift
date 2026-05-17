@@ -98,9 +98,11 @@ public enum TrajectoryStyle {
 
 public struct KeyChord {
     public let keyCode: CGKeyCode
+    public let modifiers: CGEventFlags
 
-    public init(keyCode: CGKeyCode) {
+    public init(keyCode: CGKeyCode, modifiers: CGEventFlags = []) {
         self.keyCode = keyCode
+        self.modifiers = modifiers
     }
 }
 
@@ -131,6 +133,15 @@ public extension ActionPrimitive {
             return "pasteText"
         case .key:
             return "key"
+        }
+    }
+
+    var isPidSafeForPointerSequence: Bool {
+        switch self {
+        case .move, .scroll:
+            return true
+        case .click, .drag, .type, .pasteText, .key:
+            return false
         }
     }
 }
@@ -320,11 +331,17 @@ private enum HumanizationDefaults {
     static let scrollStepCount = IntRange(min: 2, max: 4)
     static let scrollStepDelayMs = IntRange(min: 14, max: 46)
     static let scrollInertiaDecay = DoubleRange(min: 0.58, max: 0.86)
+    static let pointerCorrectionMs = 650
+    static let longDistancePointerTravelPx: CGFloat = 900
 }
 
 private struct ActionDeadline {
     private let timeoutMs: Int?
     private let expiresAt: Date?
+
+    var hasTimeout: Bool {
+        timeoutMs != nil
+    }
 
     init(timeoutMs: Int?, responseReserveMs: Int = 350) {
         guard let timeoutMs, timeoutMs > 0 else {
@@ -405,9 +422,10 @@ public final class ActionExecutor {
 
         let startedAt = Date()
         let requestedMode = request.options.postMode ?? defaultPostMode
+        let effectivePostMode = self.effectivePostMode(requestedMode, primitives: request.primitives)
         let dryRun = request.options.dryRun
         let deadline = ActionDeadline(timeoutMs: request.options.timeoutMs)
-        let poster = EventPoster(mode: requestedMode, targetPid: target.pid)
+        let poster = EventPoster(mode: effectivePostMode, targetPid: target.pid)
         let visualContext = HIDActionVisualContext(
             actionId: request.id,
             bundleIdentifier: target.bundleIdentifier,
@@ -415,7 +433,7 @@ public final class ActionExecutor {
             windowTitle: target.windowTitle,
             windowFrame: CodableRect(x: target.frame.origin.x, y: target.frame.origin.y, width: target.frame.width, height: target.frame.height),
             dryRun: dryRun,
-            postMode: requestedMode.rawValue,
+            postMode: effectivePostMode.rawValue,
             actionTypes: request.primitives.map(\.actionTypeName)
         )
         var rng = SystemRandomNumberGenerator()
@@ -431,7 +449,7 @@ public final class ActionExecutor {
 
         if requestedMode == .global, !dryRun {
             try ensureFrontmostForPost(type: .leftMouseDown, poster: poster, dryRun: dryRun)
-            try poster.preflight(frontmost: FocusController.isFrontmost(app: target.app))
+            try poster.preflight(frontmost: isTargetReadyForEvent(.leftMouseDown))
         } else if requestedMode == .pid {
             try ensurePidSafePrimitives(request.primitives)
         }
@@ -523,9 +541,14 @@ public final class ActionExecutor {
             var emitted = [InjectedEvent]()
             let start = profile?.origin ?? currentMouseLocation(fallback: clickPoint)
             if needsCursorTravel(from: start, to: clickPoint) {
-                let travelDurationMs = motionProfile == nil
-                    ? implicitPointerTravelDurationMs(options: options, holdMs: resolvedHoldMs, settleMs: HumanizationDefaults.settleMs.sample(rng: &rng))
-                    : nil
+                let travelDurationMs = clickPreludeDurationMs(
+                    from: start,
+                    to: clickPoint,
+                    motionProfile: motionProfile,
+                    options: options,
+                    holdMs: resolvedHoldMs,
+                    settleMs: HumanizationDefaults.settleMs.sample(rng: &rng)
+                )
                 emitted.append(contentsOf: try emitMovePath(
                     from: start,
                     to: clickPoint,
@@ -666,14 +689,38 @@ public final class ActionExecutor {
         case .key(let chord, let holdMs, let profile):
             var emitted = [InjectedEvent]()
             let motionProfile = actionMotionProfile(profile?.motionProfile, options: options)
-            emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun))
+            let modifierCodes = modifierKeyCodes(for: chord.modifiers)
+            for modifierCode in modifierCodes {
+                emitted.append(try postKey(keyCode: modifierCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun, flags: chord.modifiers))
+            }
+            emitted.append(try postKey(keyCode: chord.keyCode, keyDown: true, recordedKey: nil, poster: poster, dryRun: dryRun, flags: chord.modifiers))
             let defaultKeyHold = holdMs ?? HumanizationDefaults.clickHoldMs.sample(rng: &rng)
             let keyHold = motionProfile?.resolvedClickHoldMs(defaultValue: defaultKeyHold, rng: &rng) ?? defaultKeyHold
             try sleep(milliseconds: keyHold, dryRun: dryRun, deadline: deadline, allowCancellation: false)
-            emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+            emitted.append(try postKey(keyCode: chord.keyCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun, flags: chord.modifiers))
+            for modifierCode in modifierCodes.reversed() {
+                emitted.append(try postKey(keyCode: modifierCode, keyDown: false, recordedKey: nil, poster: poster, dryRun: dryRun))
+            }
             try checkpoint(deadline)
             return PrimitiveEmitResult(events: emitted)
         }
+    }
+
+    private func modifierKeyCodes(for flags: CGEventFlags) -> [CGKeyCode] {
+        var keyCodes = [CGKeyCode]()
+        if flags.contains(.maskCommand) {
+            keyCodes.append(55)
+        }
+        if flags.contains(.maskShift) {
+            keyCodes.append(56)
+        }
+        if flags.contains(.maskControl) {
+            keyCodes.append(59)
+        }
+        if flags.contains(.maskAlternate) {
+            keyCodes.append(58)
+        }
+        return keyCodes
     }
 
     private func emitPasteText(
@@ -751,7 +798,7 @@ public final class ActionExecutor {
                 }
                 event.location = point
                 try ensureFrontmostForPost(type: .scrollWheel, poster: poster, dryRun: dryRun)
-                _ = try poster.post(event, type: .scrollWheel, frontmost: FocusController.isFrontmost(app: target.app))
+                _ = try poster.post(event, type: .scrollWheel, frontmost: isTargetReadyForEvent(.scrollWheel))
                 emitted.append(record(type: "scrollWheel", location: point))
             }
             if index < stepCount - 1, delay > 0 {
@@ -934,7 +981,7 @@ public final class ActionExecutor {
             event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
         }
         try ensureFrontmostForPost(type: keyDown ? .keyDown : .keyUp, poster: poster, dryRun: dryRun)
-        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
+        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: isTargetReadyForEvent(keyDown ? .keyDown : .keyUp))
         return record(type: keyDown ? "keyDown" : "keyUp", key: nil, virtualKey: 0)
     }
 
@@ -946,7 +993,7 @@ public final class ActionExecutor {
             throw ActionExecutionError.eventCreationFailed(eventTypeDescription(type))
         }
         try ensureFrontmostForPost(type: type, poster: poster, dryRun: dryRun)
-        _ = try poster.post(event, type: type, frontmost: FocusController.isFrontmost(app: target.app))
+        _ = try poster.post(event, type: type, frontmost: isTargetReadyForEvent(type))
         return record(type: eventName(for: type), location: location)
     }
 
@@ -966,7 +1013,7 @@ public final class ActionExecutor {
         }
         event.flags = flags
         try ensureFrontmostForPost(type: keyDown ? .keyDown : .keyUp, poster: poster, dryRun: dryRun)
-        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
+        _ = try poster.post(event, type: keyDown ? .keyDown : .keyUp, frontmost: isTargetReadyForEvent(keyDown ? .keyDown : .keyUp))
         return record(type: keyDown ? "keyDown" : "keyUp", key: recordedKey, virtualKey: keyCode)
     }
 
@@ -977,18 +1024,104 @@ public final class ActionExecutor {
 
         switch poster.mode {
         case .global:
-            guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+            guard ensureTargetReadyForGlobalPost(type: type, dryRun: dryRun) else {
                 throw PosterError.notFrontmost
             }
         case .auto:
             guard !EventPoster.isPidSafe(type) else {
                 return
             }
-            guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+            guard ensureTargetReadyForGlobalPost(type: type, dryRun: dryRun) else {
                 throw PosterError.notFrontmost
             }
         case .pid:
             return
+        }
+    }
+
+    private func ensureTargetReadyForGlobalPost(type: CGEventType, dryRun: Bool) -> Bool {
+        if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.2) {
+            return true
+        }
+        if pointerEventCanActivateTarget(type), FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle) {
+            return true
+        }
+        guard focusTargetWindowWithChromeClick(dryRun: dryRun) else {
+            return false
+        }
+        if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.0) {
+            return true
+        }
+        return pointerEventCanActivateTarget(type)
+            && FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+    }
+
+    private func focusTargetWindowWithChromeClick(dryRun: Bool) -> Bool {
+        guard !dryRun, target.frame.width > 160, target.frame.height > 80 else {
+            return false
+        }
+        let viewportPoint = target.viewportFrame.map { CGPoint(x: $0.midX, y: $0.midY) }
+        let points = [
+            CGPoint(x: target.frame.midX, y: target.frame.minY + 14),
+            viewportPoint,
+        ].compactMap { $0 }
+        for point in points {
+            if postFocusClick(at: point), FocusController.isFrontmost(app: target.app) {
+                return true
+            }
+        }
+        return true
+    }
+
+    private func postFocusClick(at point: CGPoint) -> Bool {
+        guard
+            let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+            let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+        else {
+            return false
+        }
+        down.post(tap: .cghidEventTap)
+        FocusController.sleep(milliseconds: 45)
+        up.post(tap: .cghidEventTap)
+        FocusController.sleep(milliseconds: 180)
+        return true
+    }
+
+    private func effectivePostMode(_ requestedMode: PostMode, primitives: [ActionPrimitive]) -> PostMode {
+        if requestedMode == .auto, primitives.contains(where: { !$0.isPidSafeForPointerSequence }) {
+            return .global
+        }
+        return requestedMode
+    }
+
+    private func isTargetWindowFrontmost() -> Bool {
+        FocusController.isFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+    }
+
+    private func isTargetReadyForEvent(_ type: CGEventType) -> Bool {
+        if isTargetWindowFrontmost() {
+            return true
+        }
+        return pointerEventCanActivateTarget(type)
+            && FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+    }
+
+    private func pointerEventCanActivateTarget(_ type: CGEventType) -> Bool {
+        switch type {
+        case .mouseMoved,
+             .leftMouseDown,
+             .leftMouseUp,
+             .rightMouseDown,
+             .rightMouseUp,
+             .otherMouseDown,
+             .otherMouseUp,
+             .leftMouseDragged,
+             .rightMouseDragged,
+             .otherMouseDragged,
+             .scrollWheel:
+            return true
+        default:
+            return false
         }
     }
 
@@ -1032,7 +1165,7 @@ public final class ActionExecutor {
                         from: actual,
                         to: end,
                         style: style,
-                        durationMs: nil,
+                        durationMs: deadline.hasTimeout ? (durationMs ?? HumanizationDefaults.pointerCorrectionMs) : nil,
                         motionProfile: motionProfile,
                         button: button,
                         poster: poster,
@@ -1062,7 +1195,7 @@ public final class ActionExecutor {
                     from: actual,
                     to: end,
                     style: style,
-                    durationMs: nil,
+                    durationMs: deadline.hasTimeout ? (durationMs ?? HumanizationDefaults.pointerCorrectionMs) : nil,
                     motionProfile: motionProfile,
                     button: button,
                     poster: poster,
@@ -1099,7 +1232,7 @@ public final class ActionExecutor {
             from: actual,
             to: targetPoint,
             style: style,
-            durationMs: nil,
+            durationMs: deadline.hasTimeout ? HumanizationDefaults.pointerCorrectionMs : nil,
             motionProfile: motionProfile,
             button: button,
             poster: poster,
@@ -1108,6 +1241,32 @@ public final class ActionExecutor {
             rng: &rng,
             correctionBudget: 1
         )
+    }
+
+    private func clickPreludeDurationMs(
+        from start: CGPoint,
+        to end: CGPoint,
+        motionProfile: MotionProfile?,
+        options: ActionOptions,
+        holdMs: Int,
+        settleMs: Int
+    ) -> Int? {
+        let fallback = implicitPointerTravelDurationMs(options: options, holdMs: holdMs, settleMs: settleMs)
+        if options.timeoutMs != nil, distance(start, end) >= HumanizationDefaults.longDistancePointerTravelPx {
+            return fallback
+        }
+        guard let motionProfile else {
+            return fallback
+        }
+        guard let timeoutMs = options.timeoutMs, timeoutMs > 0 else {
+            return nil
+        }
+        let budgetMs = max(120, timeoutMs - max(800, holdMs + settleMs + (options.preDelayMs ?? 0) + (options.postDelayMs ?? 0) + 700))
+        let fastestSpeed = max(motionProfile.moveSpeedPxS?.max ?? 620, 80)
+        let conservativeSpeed = max(motionProfile.moveSpeedPxS?.min ?? 260, 80)
+        let estimatedFastestMs = Int((Double(distance(start, end)) / fastestSpeed) * 1000.0) + settleMs
+        let estimatedConservativeMs = Int((Double(distance(start, end)) / conservativeSpeed) * 1000.0) + settleMs
+        return estimatedFastestMs > budgetMs || estimatedConservativeMs > budgetMs ? fallback : nil
     }
 
     private func implicitPointerTravelDurationMs(options: ActionOptions, holdMs: Int, settleMs: Int) -> Int {
@@ -1181,7 +1340,7 @@ public final class ActionExecutor {
         motionProfile: MotionProfile?,
         rng: inout SystemRandomNumberGenerator
     ) -> [CGPoint] {
-        let count = effectivePointCount(from: start, to: end, requested: pointCount, motionProfile: motionProfile)
+        let count = effectivePointCount(from: start, to: end, style: style, requested: pointCount, motionProfile: motionProfile)
         if let learned = learnedSkeletonPath(from: start, to: end, count: count, motionProfile: motionProfile, rng: &rng) {
             return learned
         }
@@ -1209,12 +1368,23 @@ public final class ActionExecutor {
         return baseTrajectoryPath(from: start, to: end, style: style, pointCount: count, motionProfile: motionProfile, rng: &rng)
     }
 
-    private func effectivePointCount(from start: CGPoint, to end: CGPoint, requested: Int, motionProfile: MotionProfile?) -> Int {
+    private func effectivePointCount(from start: CGPoint, to end: CGPoint, style: TrajectoryStyle, requested: Int, motionProfile: MotionProfile?) -> Int {
         let requested = max(requested, 1)
-        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 2 else {
-            return requested
+        guard case .linear = style else {
+            let distance = hypot(end.x - start.x, end.y - start.y)
+            let minimum = distance <= 4 ? 1 : min(max(Int((distance / 80.0).rounded(.up)), 6), 24)
+            guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 3 else {
+                return max(requested, minimum)
+            }
+            let densityCount = Int((distance / 10.0).rounded(.up))
+            let skeletonCount = skeleton.count * 6
+            return min(max(requested, minimum, densityCount, skeletonCount, 18), 96)
         }
         let distance = hypot(end.x - start.x, end.y - start.y)
+        let minimum = distance <= 4 ? 1 : min(max(Int((distance / 80.0).rounded(.up)), 6), 24)
+        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 3 else {
+            return max(requested, minimum)
+        }
         let densityCount = Int((distance / 10.0).rounded(.up))
         let skeletonCount = skeleton.count * 6
         return min(max(requested, densityCount, skeletonCount, 18), 96)
@@ -1275,7 +1445,7 @@ public final class ActionExecutor {
         motionProfile: MotionProfile?,
         rng: inout SystemRandomNumberGenerator
     ) -> [CGPoint]? {
-        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 2, count >= 2 else {
+        guard let skeleton = motionProfile?.pathSkeleton, skeleton.count >= 3, count >= 2 else {
             return nil
         }
         let sourceStart = skeleton[0].cgPoint
@@ -1287,6 +1457,9 @@ public final class ActionExecutor {
         let targetDy = end.y - start.y
         let targetDistance = hypot(targetDx, targetDy)
         guard targetDistance > 4 else {
+            return nil
+        }
+        guard !hasOverlongStraightWindow(skeleton.map(\.cgPoint)) else {
             return nil
         }
 
@@ -1319,6 +1492,9 @@ public final class ActionExecutor {
         smoothed = lightSmooth(points: smoothed, passes: 2)
         smoothed[0] = start
         smoothed[smoothed.count - 1] = end
+        guard !hasOverlongStraightWindow(smoothed) else {
+            return nil
+        }
         return smoothed
     }
 
@@ -1481,6 +1657,53 @@ public final class ActionExecutor {
 
     private func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
         hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+
+    private func hasOverlongStraightWindow(_ path: [CGPoint]) -> Bool {
+        guard path.count >= 8 else {
+            return false
+        }
+        let totalChord = distance(path[0], path[path.count - 1])
+        let minimumChord = max(CGFloat(480), totalChord * 0.30)
+        for startIndex in 0..<(path.count - 6) {
+            var pathLength = CGFloat(0)
+            for endIndex in (startIndex + 1)..<path.count {
+                pathLength += distance(path[endIndex - 1], path[endIndex])
+                let pointSpan = endIndex - startIndex + 1
+                guard pointSpan >= 6 else {
+                    continue
+                }
+                let chord = distance(path[startIndex], path[endIndex])
+                guard chord >= minimumChord, pathLength > 0 else {
+                    continue
+                }
+                let straightness = chord / pathLength
+                let lateralLimit = max(CGFloat(2), chord * 0.003)
+                if straightness >= 0.995,
+                   maxLateralDistance(Array(path[startIndex...endIndex])) <= lateralLimit {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func maxLateralDistance(_ path: [CGPoint]) -> CGFloat {
+        guard path.count >= 3 else {
+            return 0
+        }
+        let start = path[0]
+        let end = path[path.count - 1]
+        let chord = distance(start, end)
+        guard chord > 0 else {
+            return 0
+        }
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        return path.dropFirst().dropLast().reduce(CGFloat(0)) { partial, point in
+            let lateral = abs(dx * (start.y - point.y) - (start.x - point.x) * dy) / chord
+            return max(partial, lateral)
+        }
     }
 
     private func pointerActionStyle(for motionProfile: MotionProfile?) -> TrajectoryStyle {

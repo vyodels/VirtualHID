@@ -40,6 +40,10 @@ public enum FocusController {
             lastActivationAt = Date()
         }
         _ = activate(app: app)
+        if waitUntilFrontmost(app: app, timeout: timeout) {
+            return true
+        }
+        _ = activateProcessViaSystemEvents(pid: app.processIdentifier)
         return waitUntilFrontmost(app: app, timeout: timeout)
     }
 
@@ -55,10 +59,57 @@ public enum FocusController {
     }
 
     public static func isFrontmost(app: NSRunningApplication) -> Bool {
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+    }
+
+    public static func isFrontmostWindow(app: NSRunningApplication, windowId: Int?, windowTitle: String? = nil) -> Bool {
+        guard isFrontmost(app: app),
+              let frontmost = frontmostWindow(),
+              frontmost.ownerPid == app.processIdentifier
+        else {
+            return false
+        }
+        if let windowTitle, !windowTitle.isEmpty, frontmost.title?.contains(windowTitle) == true {
             return true
         }
-        return frontmostWindowOwnerPid() == app.processIdentifier
+        if let windowId {
+            return frontmost.windowId == windowId
+        }
+        return true
+    }
+
+    public static func isTopVisibleWindow(app: NSRunningApplication, windowId: Int?, windowTitle: String? = nil) -> Bool {
+        guard let frontmost = frontmostWindow(), frontmost.ownerPid == app.processIdentifier else {
+            return false
+        }
+        if let windowTitle, !windowTitle.isEmpty, frontmost.title?.contains(windowTitle) == true {
+            return true
+        }
+        if let windowId {
+            return frontmost.windowId == windowId
+        }
+        return true
+    }
+
+    public static func ensureFrontmostWindow(
+        app: NSRunningApplication,
+        windowId: Int?,
+        windowTitle: String? = nil,
+        timeout: TimeInterval = 1.2
+    ) -> Bool {
+        guard ensureFrontmost(app: app, timeout: timeout) else {
+            return false
+        }
+        if windowId == nil, (windowTitle == nil || windowTitle?.isEmpty == true) {
+            return true
+        }
+        if !isFrontmostWindow(app: app, windowId: windowId, windowTitle: windowTitle),
+           let bundleIdentifier = app.bundleIdentifier,
+           let windowTitle,
+           !windowTitle.isEmpty {
+            _ = raiseWindowViaAppleScript(bundleIdentifier: bundleIdentifier, windowTitle: windowTitle)
+        }
+        return waitUntilFrontmostWindow(app: app, windowId: windowId, windowTitle: windowTitle, timeout: timeout)
     }
 
     public static func launchTextEdit() throws -> NSRunningApplication {
@@ -110,7 +161,70 @@ public enum FocusController {
         return error == nil
     }
 
-    private static func frontmostWindowOwnerPid() -> pid_t? {
+    @discardableResult
+    private static func activateProcessViaSystemEvents(pid: pid_t) -> Bool {
+        let source = """
+        tell application "System Events"
+          set frontmost of first process whose unix id is \(pid) to true
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else {
+            return false
+        }
+
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error == nil
+    }
+
+    @discardableResult
+    private static func raiseWindowViaAppleScript(bundleIdentifier: String, windowTitle: String) -> Bool {
+        let escapedBundleIdentifier = appleScriptStringLiteral(bundleIdentifier)
+        let escapedWindowTitle = appleScriptStringLiteral(windowTitle)
+        let source = """
+        tell application id \(escapedBundleIdentifier)
+          activate
+          repeat with w in windows
+            if (title of w as text) contains \(escapedWindowTitle) then
+              set index of w to 1
+              exit repeat
+            end if
+          end repeat
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else {
+            return false
+        }
+
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error == nil
+    }
+
+    private static func appleScriptStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private static func waitUntilFrontmostWindow(
+        app: NSRunningApplication,
+        windowId: Int?,
+        windowTitle: String?,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() <= deadline {
+            if isFrontmostWindow(app: app, windowId: windowId, windowTitle: windowTitle) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return isFrontmostWindow(app: app, windowId: windowId, windowTitle: windowTitle)
+    }
+
+    private static func frontmostWindow() -> (ownerPid: pid_t, windowId: Int?, title: String?)? {
         guard
             let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else {
@@ -129,7 +243,9 @@ public enum FocusController {
             guard let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t else {
                 continue
             }
-            return ownerPid
+            let windowId = window[kCGWindowNumber as String] as? Int
+            let title = window[kCGWindowName as String] as? String
+            return (ownerPid: ownerPid, windowId: windowId, title: title)
         }
 
         return nil

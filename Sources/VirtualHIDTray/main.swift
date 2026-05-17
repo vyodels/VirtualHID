@@ -1270,7 +1270,7 @@ final class VirtualHIDTrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         card.widthAnchor.constraint(equalToConstant: 680).isActive = true
         let cardContent = cardStack(spacing: 10)
         cardContent.addArrangedSubview(label("拟人化与学习效果", size: 16, weight: .semibold))
-        cardContent.addArrangedSubview(label("这里展示模板是否真实参与执行、内置拟人化算法是否产生轨迹/点击/键盘事件，以及学习参数是否来自样本聚合。演示使用安全 dry-run，不会投递真实点击。", size: 12, color: .secondaryLabelColor))
+        cardContent.addArrangedSubview(label("这里展示模板是否真实参与执行、内置拟人化算法是否产生轨迹/点击/键盘事件，以及学习参数是否来自样本聚合。演示使用安全 dry-run 计划事件预览，不会投递真实点击，也不等同于真实物理光标采样。", size: 12, color: .secondaryLabelColor))
 
         let controls = CardView()
         let controlsContent = cardStack(spacing: 8)
@@ -2194,7 +2194,7 @@ private struct LearningDemoResult {
         let activeFields = (effect["activeFields"] as? [String] ?? []).prefix(8).joined(separator: ", ")
         let title = result["title"] as? String ?? fallbackTitle
         var lines = [
-            "\(title) 完成：已使用真实学习结果 \(templateId) 生成 \(actions.count) 次 dry-run 动作；不会真实点击页面。",
+            "\(title) 完成：已使用真实学习结果 \(templateId) 生成 \(actions.count) 次 dry-run 计划事件预览；不会真实点击页面。",
             "学习生效字段：\(activeFields.isEmpty ? "暂无" : activeFields)。"
         ]
         if let manual = result["manualControl"] as? [String: Any] {
@@ -2202,7 +2202,7 @@ private struct LearningDemoResult {
             let autoAdvance = manual["autoAdvance"] as? Bool == true ? "自动推进" : "不自动推进"
             lines.append("演示控制：\(repeatable)，\(autoAdvance)，同一时间最多一个演示。")
         }
-        lines.append("HUD 控制：结果保留到手动关闭；可点「重放上次演示」复播同一条 dry-run 事件链。")
+        lines.append("HUD 控制：结果保留到手动关闭；可点「重放上次演示」复播同一条 dry-run 计划事件链。")
         if let baseline {
             lines.append("对照：\(Self.actionSummaryLine(baseline))")
         }

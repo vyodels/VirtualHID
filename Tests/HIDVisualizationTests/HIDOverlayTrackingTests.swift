@@ -5,7 +5,7 @@ import InjectorCore
 import XCTest
 
 final class HIDOverlayTrackingTests: XCTestCase {
-    func testTrailPointsIncludeFinalActualPointWithoutDuplicate() {
+    func testTrailPointsExcludeFinalActualPointFromTrajectory() {
         let finalPoint = CodablePoint(x: 140, y: 160)
         let events = [
             injectedEvent(type: "mouseMoved", x: 20, y: 40, offsetMs: 0),
@@ -14,9 +14,24 @@ final class HIDOverlayTrackingTests: XCTestCase {
 
         let trail = hidOverlayTrailPoints(events: events, actual: finalPoint)
 
-        XCTAssertEqual(trail.map(\.x), [20, 80, 140])
-        XCTAssertEqual(trail.last, finalPoint)
+        XCTAssertEqual(trail.map(\.x), [20, 80])
+        XCTAssertEqual(trail.map(\.y), [40, 120])
         XCTAssertEqual(hidOverlayTrailPoints(events: events + [injectedEvent(type: "mouseMoved", x: 140, y: 160, offsetMs: 24)], actual: finalPoint).count, 3)
+    }
+
+    func testTrailPointsIgnoreClickAndScrollLocations() {
+        let finalPoint = CodablePoint(x: 118, y: 136)
+        let events = [
+            injectedEvent(type: "mouseMoved", x: 20, y: 40, offsetMs: 0),
+            injectedEvent(type: "leftMouseDown", x: 110, y: 130, offsetMs: 16),
+            injectedEvent(type: "leftMouseUp", x: 110, y: 130, offsetMs: 28),
+            injectedEvent(type: "scrollWheel", x: 400, y: 420, offsetMs: 40)
+        ]
+
+        let trail = hidOverlayTrailPoints(events: events, actual: finalPoint)
+
+        XCTAssertEqual(trail.map(\.x), [20])
+        XCTAssertEqual(trail.map(\.y), [40])
     }
 
     func testPersistentDryRunHistoryKeepsCompletedFrameAcrossReplayPrefixesUntilClear() {
@@ -37,20 +52,24 @@ final class HIDOverlayTrackingTests: XCTestCase {
         view.render(frame(context: context, events: events, actual: actual))
         var snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, events.count)
-        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, CodablePoint(x: 70, y: 90))
+        XCTAssertEqual(snapshot.currentActualPoint, actual)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
-        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, CodablePoint(x: 70, y: 90))
+        XCTAssertEqual(snapshot.historyActualPoints.first ?? nil, actual)
 
         view.render(frame(context: context, events: Array(events.prefix(1)), actual: nil))
         snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, 1)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
-        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, CodablePoint(x: 70, y: 90))
+        XCTAssertEqual(snapshot.historyActualPoints.first ?? nil, actual)
 
         view.clearTransientState()
         snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, events.count)
-        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, CodablePoint(x: 70, y: 90))
+        XCTAssertEqual(snapshot.currentActualPoint, actual)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
 
         view.render(frame(context: context, events: events, actual: actual))
@@ -63,6 +82,7 @@ final class HIDOverlayTrackingTests: XCTestCase {
         XCTAssertNil(snapshot.currentEventCount)
         XCTAssertTrue(snapshot.historyEventCounts.isEmpty)
         XCTAssertTrue(snapshot.historyTrailPoints.isEmpty)
+        XCTAssertTrue(snapshot.historyActualPoints.isEmpty)
     }
 
     func testPersistentLiveHistoryKeepsCompletedFrameAcrossTransientClearsAndPrefixes() {
@@ -83,21 +103,25 @@ final class HIDOverlayTrackingTests: XCTestCase {
         view.render(frame(context: context, events: events, actual: actual))
         var snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, events.count)
-        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, CodablePoint(x: 120, y: 110))
+        XCTAssertEqual(snapshot.currentActualPoint, actual)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
-        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, CodablePoint(x: 120, y: 110))
+        XCTAssertEqual(snapshot.historyActualPoints.first ?? nil, actual)
 
         view.clearTransientState()
         snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, events.count)
-        XCTAssertEqual(snapshot.currentTrailPoints.last, actual)
+        XCTAssertEqual(snapshot.currentTrailPoints.last, CodablePoint(x: 120, y: 110))
+        XCTAssertEqual(snapshot.currentActualPoint, actual)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
 
         view.render(frame(context: context, events: Array(events.prefix(1)), actual: nil))
         snapshot = view.snapshotForTesting()
         XCTAssertEqual(snapshot.currentEventCount, 1)
         XCTAssertEqual(snapshot.historyEventCounts, [events.count])
-        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, actual)
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.last, CodablePoint(x: 120, y: 110))
+        XCTAssertEqual(snapshot.historyActualPoints.first ?? nil, actual)
     }
 
     func testBestTrackedWindowMatchPrefersTitleMatch() {

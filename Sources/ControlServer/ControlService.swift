@@ -335,7 +335,11 @@ public final class ControlService {
         let actionId = params["id"] as? String ?? requestId
         let targetDescriptor = try parseTargetDescriptor(params["target"] as? [String: Any])
         let geometryRequest = try parseViewportGeometry(params["geometry"] as? [String: Any])
-        let target = try resolveTarget(descriptor: targetDescriptor, allowInternalSelfTarget: allowInternalSelfTarget)
+        let target = try resolveTarget(
+            descriptor: targetDescriptor,
+            expectedViewportSize: geometryRequest?.viewportSize.map { CGSize(width: $0.width, height: $0.height) },
+            allowInternalSelfTarget: allowInternalSelfTarget
+        )
         let geometryResolution: ViewportGeometryResolution?
         do {
             geometryResolution = try geometryRequest.map {
@@ -439,7 +443,7 @@ public final class ControlService {
             let evidence = OutcomeVerifier.evidence(
                 result: result,
                 expectedFinalPoint: expectedFinalPoint(from: profileResult.primitives),
-                focusConfirmed: FocusController.isFrontmost(app: target.app),
+                focusConfirmed: isTargetWindowFrontmost(target),
                 observerEcho: observerEvidence.status == "echoed",
                 observer: observerEvidence,
                 semantic: semanticEvidence,
@@ -1514,8 +1518,8 @@ public final class ControlService {
             "demoAction": demoAction?.rawValue ?? actionType,
             "title": demoAction?.title ?? (phase == "baseline" ? "对照动作：未使用键鼠习惯模板" : "学习动作 \(ordinal)：使用键鼠习惯模板"),
             "description": phase == "baseline"
-                ? "用于对比的安全 dry-run，禁用模板，只展示基础拟人化轨迹。"
-                : "使用历史样本聚合出的 MotionProfile 生成路线、速度、停顿和点击节奏。",
+                ? "用于对比的安全 dry-run 计划事件预览，禁用模板，只展示基础拟人化轨迹。"
+                : "使用历史样本聚合出的 MotionProfile 生成 dry-run 计划路线、速度、停顿和点击节奏。",
             "demonstrates": learningDemoDemonstrates(events: events),
             "profileApplied": profiles["applied"] as? Bool ?? false,
             "templateIds": profiles["templateIds"] ?? [],
@@ -2213,7 +2217,11 @@ public final class ControlService {
         )
     }
 
-    private func resolveTarget(descriptor: TargetDescriptor?, allowInternalSelfTarget: Bool = false) throws -> BrowserTarget {
+    private func resolveTarget(
+        descriptor: TargetDescriptor?,
+        expectedViewportSize: CGSize? = nil,
+        allowInternalSelfTarget: Bool = false
+    ) throws -> BrowserTarget {
         if let targetResolverOverride {
             return try targetResolverOverride(descriptor)
         }
@@ -2223,7 +2231,8 @@ public final class ControlService {
         do {
             return try BrowserResolver.resolve(
                 bundleIdentifiers: configuration.bundleIdentifiers,
-                descriptor: descriptor
+                descriptor: descriptor,
+                expectedViewportSize: expectedViewportSize
             )
         } catch BrowserResolverError.permissionDenied {
             throw ControlServerError.coded("E_PERMISSION", "accessibility permission missing")
@@ -2238,7 +2247,7 @@ public final class ControlService {
             return [
                 "bundleId": target.bundleIdentifier,
                 "pid": Int(target.pid),
-                "frontmost": FocusController.isFrontmost(app: target.app),
+                "frontmost": isTargetWindowFrontmost(target),
                 "windowTitle": target.windowTitle ?? NSNull(),
                 "viewportFrame": rectObject(target.viewportFrame),
                 "viewportSource": target.viewportFrameSource ?? NSNull()
@@ -2257,7 +2266,7 @@ public final class ControlService {
                 return [
                     "bundleId": bundleId,
                     "pid": Int(app.processIdentifier),
-                    "frontmost": FocusController.isFrontmost(app: app),
+                    "frontmost": target.map(isTargetWindowFrontmost) ?? FocusController.isFrontmost(app: app),
                     "windowTitle": target?.windowTitle ?? NSNull(),
                     "viewportFrame": rectObject(target?.viewportFrame),
                     "viewportSource": target?.viewportFrameSource ?? NSNull()
@@ -2279,7 +2288,7 @@ public final class ControlService {
         [
             "bundleId": target.bundleIdentifier,
             "pid": Int(target.pid),
-            "frontmost": FocusController.isFrontmost(app: target.app),
+            "frontmost": isTargetWindowFrontmost(target),
             "windowTitle": target.windowTitle ?? NSNull(),
             "windowId": target.windowId ?? NSNull(),
             "browserWindowId": target.browserWindowId ?? NSNull(),
@@ -2619,7 +2628,7 @@ public final class ControlService {
     }
 
     private func postEscapeToDismissBrowserChrome(target: BrowserTarget) throws {
-        guard FocusController.ensureFrontmost(app: target.app, timeout: 1.2) else {
+        guard FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.2) else {
             throw PosterError.notFrontmost
         }
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
@@ -2627,9 +2636,13 @@ public final class ControlService {
             throw ActionExecutionError.eventCreationFailed("escape")
         }
         let poster = EventPoster(mode: .global, targetPid: target.pid)
-        _ = try poster.post(down, type: .keyDown, frontmost: FocusController.isFrontmost(app: target.app))
-        _ = try poster.post(up, type: .keyUp, frontmost: FocusController.isFrontmost(app: target.app))
+        _ = try poster.post(down, type: .keyDown, frontmost: isTargetWindowFrontmost(target))
+        _ = try poster.post(up, type: .keyUp, frontmost: isTargetWindowFrontmost(target))
         FocusController.sleep(milliseconds: 80)
+    }
+
+    private func isTargetWindowFrontmost(_ target: BrowserTarget) -> Bool {
+        FocusController.isFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
     }
 
     private func parsePrimitives(_ array: [[String: Any]]?) throws -> [ActionPrimitive] {
@@ -2667,7 +2680,7 @@ public final class ControlService {
                     via: try trajectoryStyle(primitive["via"], fallbackMotionProfile: profile?.motionProfile),
                     profile: profile
                 )
-            case "scroll":
+            case "scroll", "scrollWheel", "wheel":
                 return .scroll(
                     at: try point(primitive["at"] as? [String: Any], name: "at"),
                     dx: number(primitive["dx"]) ?? 0,
@@ -2689,8 +2702,9 @@ public final class ControlService {
                 )
             case "key":
                 let keyCode = UInt16(number(primitive["keyCode"]) ?? number(primitive["virtualKey"]) ?? 0)
+                let modifiers = parseKeyModifiers(primitive["modifiers"] ?? primitive["modifier"])
                 return .key(
-                    chord: KeyChord(keyCode: keyCode),
+                    chord: KeyChord(keyCode: keyCode, modifiers: modifiers),
                     holdMs: intValue(primitive["holdMs"]),
                     profile: profile
                 )
@@ -3434,6 +3448,25 @@ private func parseOptionalPoint(_ object: [String: Any]?) -> TracePoint? {
     return TracePoint(x: x, y: y)
 }
 
+private func parseOptionalRect(_ object: [String: Any]?) -> CodableRect? {
+    guard let object else {
+        return nil
+    }
+    let xValue = object["x"] ?? object["left"]
+    let yValue = object["y"] ?? object["top"]
+    guard
+        let x = number(xValue),
+        let y = number(yValue),
+        let width = number(object["width"]),
+        let height = number(object["height"]),
+        width > 0,
+        height > 0
+    else {
+        return nil
+    }
+    return CodableRect(x: x, y: y, width: width, height: height)
+}
+
 private func parseTargetDescriptor(_ object: [String: Any]?) throws -> TargetDescriptor? {
     guard let object else {
         return nil
@@ -3443,9 +3476,15 @@ private func parseTargetDescriptor(_ object: [String: Any]?) throws -> TargetDes
         windowId: intValue(object["windowId"] ?? object["window_id"]),
         windowTitle: object["windowTitle"] as? String ?? object["window_title"] as? String,
         tabId: intValue(object["tabId"] ?? object["tab_id"]),
-        host: object["host"] as? String
+        host: object["host"] as? String,
+        browserWindowBounds: parseOptionalRect(
+            object["browserWindowBounds"] as? [String: Any]
+                ?? object["browser_window_bounds"] as? [String: Any]
+                ?? object["windowBounds"] as? [String: Any]
+                ?? object["window_bounds"] as? [String: Any]
+        )
     )
-    if target.bundleId == nil, target.windowId == nil, target.windowTitle == nil, target.tabId == nil, target.host == nil {
+    if target.bundleId == nil, target.windowId == nil, target.windowTitle == nil, target.tabId == nil, target.host == nil, target.browserWindowBounds == nil {
         throw ControlServerError.coded("E_CONTEXT_REQUIRED", "target requires at least one of bundleId, windowId, tabId, host")
     }
     return target
@@ -3724,6 +3763,50 @@ private func mouseButton(_ rawValue: String?) -> MouseButton {
 
 private func scrollStyle(_ rawValue: String?) -> ScrollStyle {
     ScrollStyle(rawValue: rawValue ?? "wheel") ?? .wheel
+}
+
+private func parseKeyModifiers(_ value: Any?) -> CGEventFlags {
+    var flags: CGEventFlags = []
+    for raw in parseModifierNames(value) {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cmd", "command", "meta", "super":
+            flags.insert(.maskCommand)
+        case "shift":
+            flags.insert(.maskShift)
+        case "ctrl", "control":
+            flags.insert(.maskControl)
+        case "alt", "option":
+            flags.insert(.maskAlternate)
+        default:
+            continue
+        }
+    }
+    return flags
+}
+
+private func parseModifierNames(_ value: Any?) -> [String] {
+    if let array = value as? [String] {
+        return array
+    }
+    if let array = value as? [Any] {
+        return array.compactMap { $0 as? String }
+    }
+    if let raw = value as? String {
+        return raw
+            .split { character in
+                character == "+" || character == "," || character == " "
+            }
+            .map(String.init)
+    }
+    if let object = value as? [String: Any] {
+        return object.compactMap { key, rawValue in
+            guard boolValue(rawValue) == true else {
+                return nil
+            }
+            return key
+        }
+    }
+    return []
 }
 
 private func optionalCGPoint(_ value: Any?, name: String) throws -> CGPoint? {

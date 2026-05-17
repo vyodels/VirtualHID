@@ -123,6 +123,83 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertTrue(abs((typeLearned.motion.interKeyMsMean ?? 0) - 134) < 0.01)
     }
 
+    func testRebuildDoesNotPromoteTwoPointMoveSamplesIntoPathSkeleton() throws {
+        let store = try ProfileStore(path: ":memory:")
+
+        for index in 0..<5 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_005_000 + index),
+                    source: "user",
+                    host: "example.com",
+                    elementSig: "sig-straight",
+                    taskId: "task-straight",
+                    stage: "stage",
+                    actionType: "move",
+                    payload: TracePayload(
+                        eventId: "straight-\(index)",
+                        type: "mouseMoved",
+                        point: TracePoint(x: 420, y: 160),
+                        points: [
+                            TracePoint(x: 20, y: 80),
+                            TracePoint(x: 420, y: 160)
+                        ],
+                        origin: TracePoint(x: 20, y: 80),
+                        targetPoint: TracePoint(x: 420, y: 160),
+                        durationMs: 360 + Double(index * 20),
+                        segmentMs: [360 + Double(index * 20)]
+                    )
+                )
+            )
+        }
+
+        _ = try store.rebuild(host: "example.com")
+        let template = try store.lookupTemplate(host: "example.com", sig: "sig-straight", taskId: "task-straight", actionType: "move")
+        let learned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(template.paramsJSON.utf8))
+
+        XCTAssertNil(learned.motion.pathSkeleton)
+        XCTAssertNotNil(learned.motion.pointCount)
+        XCTAssertNotNil(learned.motion.moveSpeedPxS)
+    }
+
+    func testRebuildDoesNotPromoteOverlongStraightTailPathSkeleton() throws {
+        let store = try ProfileStore(path: ":memory:")
+        let path = overlongStraightTailTracePath()
+
+        for index in 0..<5 {
+            _ = try store.insertTrace(
+                TraceInput(
+                    ts: Int64(1_800_000_006_000 + index),
+                    source: "user",
+                    host: "__global__",
+                    elementSig: "sig-click",
+                    taskId: nil,
+                    stage: "stage",
+                    actionType: "click",
+                    payload: TracePayload(
+                        eventId: "straight-tail-\(index)",
+                        type: "mouseMoved",
+                        point: path.last,
+                        points: path,
+                        origin: path.first,
+                        targetPoint: path.last,
+                        durationMs: 980 + Double(index * 12),
+                        segmentMs: Array(repeating: 12, count: max(1, path.count - 1)),
+                        clickHoldMs: [72 + Double(index)]
+                    )
+                )
+            )
+        }
+
+        _ = try store.rebuild(host: "__global__")
+        let template = try store.lookupTemplate(host: "__global__", sig: "sig-click", taskId: nil, actionType: "click")
+        let learned = try JSONDecoder().decode(LearnedMotionTemplate.self, from: Data(template.paramsJSON.utf8))
+
+        XCTAssertNil(learned.motion.pathSkeleton)
+        XCTAssertNotNil(learned.motion.pointCount)
+        XCTAssertNotNil(learned.motion.clickHoldMs)
+    }
+
     func testRebuildCanonicalizesKeyAndTypeIntoSingleInputTemplate() throws {
         let store = try ProfileStore(path: ":memory:")
 
@@ -445,4 +522,17 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(fetched.sampleSize, 12)
         XCTAssertEqual(fetched.actionType, "click")
     }
+}
+
+private func overlongStraightTailTracePath() -> [TracePoint] {
+    var points: [TracePoint] = [
+        TracePoint(x: 0, y: 0),
+        TracePoint(x: 80, y: 240),
+        TracePoint(x: 180, y: 520),
+        TracePoint(x: 300, y: 900),
+    ]
+    for index in 1...34 {
+        points.append(TracePoint(x: 300 + Double(index) * (1600.0 / 34.0), y: 900))
+    }
+    return points
 }

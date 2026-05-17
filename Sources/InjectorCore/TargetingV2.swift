@@ -13,13 +13,22 @@ public struct TargetDescriptor: Codable, Equatable {
     public let windowTitle: String?
     public let tabId: Int?
     public let host: String?
+    public let browserWindowBounds: CodableRect?
 
-    public init(bundleId: String? = nil, windowId: Int? = nil, windowTitle: String? = nil, tabId: Int? = nil, host: String? = nil) {
+    public init(
+        bundleId: String? = nil,
+        windowId: Int? = nil,
+        windowTitle: String? = nil,
+        tabId: Int? = nil,
+        host: String? = nil,
+        browserWindowBounds: CodableRect? = nil
+    ) {
         self.bundleId = bundleId
         self.windowId = windowId
         self.windowTitle = windowTitle
         self.tabId = tabId
         self.host = host
+        self.browserWindowBounds = browserWindowBounds
     }
 }
 

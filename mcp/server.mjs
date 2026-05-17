@@ -6,6 +6,7 @@ import path from "node:path";
 import { daemonUnavailable, mcpError } from "./errors.mjs";
 import { toolMethodMap, tools } from "./tools.mjs";
 
+const PROTOCOL_VERSION = "2025-03-26";
 const socketPath =
   process.env.VIRTUALHID_SOCKET ||
   path.join(os.homedir(), "Library", "Application Support", "VirtualHID", "virtualhid.sock");
@@ -138,7 +139,17 @@ async function runFallbackJsonRpc() {
         continue;
       }
 
-      if (request.method === "tools/list") {
+      if (request.method === "initialize") {
+        writeRpc(request.id, null, {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: { name: "virtualhid", version: "0.2.0" }
+        });
+      } else if (request.method === "notifications/initialized") {
+        if (request.id !== undefined) {
+          writeRpc(request.id, null, {});
+        }
+      } else if (request.method === "tools/list") {
         writeRpc(request.id, null, { tools });
       } else if (request.method === "tools/call") {
         const result = await enqueueToolCall(request.params?.name, request.params?.arguments || {});

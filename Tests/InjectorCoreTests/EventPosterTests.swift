@@ -155,6 +155,98 @@ final class EventPosterTests: XCTestCase {
         assertPoint(points.last, equals: targetPoint)
     }
 
+    func testLinearMoveWithoutDurationStillEmitsDenseTrajectoryEvents() throws {
+        let start = CGPoint(x: 20, y: 80)
+        let targetPoint = CGPoint(x: 420, y: 160)
+        let result = try ActionExecutor(target: testTarget()).execute(
+            ActionRequest(
+                id: "linear-move-no-duration",
+                primitives: [
+                    .move(
+                        to: targetPoint,
+                        via: .linear,
+                        durationMs: nil,
+                        profile: PrimitiveProfile(origin: start)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let moves = result.events.filter { $0.type == "mouseMoved" }
+        XCTAssertGreaterThanOrEqual(moves.count, 6)
+        assertPoint(moves.first?.location, equals: start)
+        assertPoint(moves.last?.location, equals: targetPoint)
+    }
+
+    func testTwoPointLearnedSkeletonDoesNotReplaceTrajectoryHumanization() throws {
+        let start = CGPoint(x: 20, y: 80)
+        let targetPoint = CGPoint(x: 420, y: 160)
+        let profile = MotionProfile(
+            pointCount: IntRange(min: 1, max: 1),
+            hesitationProbability: 0,
+            pathSkeleton: [
+                LearnedPathPoint(x: 0, y: 0),
+                LearnedPathPoint(x: 100, y: 0)
+            ]
+        )
+
+        let result = try ActionExecutor(target: testTarget()).execute(
+            ActionRequest(
+                id: "two-point-skeleton-fallback",
+                primitives: [
+                    .move(
+                        to: targetPoint,
+                        via: .profile(TemplateReference(id: "two-point", motionProfile: profile)),
+                        durationMs: nil,
+                        profile: PrimitiveProfile(origin: start)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let moves = result.events.filter { $0.type == "mouseMoved" }
+        XCTAssertGreaterThanOrEqual(moves.count, 6)
+        assertPoint(moves.first?.location, equals: start)
+        assertPoint(moves.last?.location, equals: targetPoint)
+    }
+
+    func testOverlongStraightTailLearnedSkeletonFallsBackToHumanizedTrajectory() throws {
+        let start = CGPoint(x: 20, y: 80)
+        let targetPoint = CGPoint(x: 2020, y: 1080)
+        let profile = MotionProfile(
+            pointCount: IntRange(min: 38, max: 38),
+            hesitationProbability: 0,
+            pathSkeleton: overlongStraightTailLearnedPath()
+        )
+
+        let result = try ActionExecutor(target: testTarget()).execute(
+            ActionRequest(
+                id: "overlong-straight-tail-skeleton-fallback",
+                primitives: [
+                    .move(
+                        to: targetPoint,
+                        via: .profile(TemplateReference(id: "straight-tail", motionProfile: profile)),
+                        durationMs: nil,
+                        profile: PrimitiveProfile(origin: start)
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-move", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let moves = result.events.filter { $0.type == "mouseMoved" }
+        let points = moves.compactMap(\.location)
+        XCTAssertGreaterThanOrEqual(moves.count, 18)
+        assertPoint(moves.first?.location, equals: start)
+        assertPoint(moves.last?.location, equals: targetPoint)
+        XCTAssertFalse(containsOverlongStraightWindow(points))
+    }
+
     func testDryRunMoveFailsWhenCursorIsContinuouslyGrabbedAway() throws {
         let grabbedPoint = CGPoint(x: 36, y: 420)
         let executor = ActionExecutor(
@@ -497,6 +589,158 @@ final class EventPosterTests: XCTestCase {
         XCTAssertGreaterThan(preludeDeltas.reduce(0, +), 1_000)
     }
 
+    func testLearnedClickPreludeClampsSparseProfilePointCount() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            pointCount: IntRange(min: 1, max: 1),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 0, max: 0),
+            clickHoldMs: IntRange(min: 40, max: 40)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-click-sparse-profile",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 420, y: 100),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(
+                            origin: CGPoint(x: 20, y: 100),
+                            motionProfile: profile
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preDownMoves = result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }
+
+        XCTAssertGreaterThanOrEqual(preDownMoves.count, 6)
+        assertPoint(preDownMoves.first?.location, equals: CGPoint(x: 20, y: 100))
+        assertPoint(preDownMoves.last?.location, equals: CGPoint(x: 420, y: 100))
+    }
+
+    func testLearnedClickPreludeUsesTimeoutBudgetForLongDistanceSlowProfile() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            moveSpeedPxS: DoubleRange(min: 90, max: 90),
+            pointCount: IntRange(min: 24, max: 24),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 0, max: 0),
+            clickHoldMs: IntRange(min: 40, max: 40)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-click-timeout-budget",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 1_620, y: 100),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(
+                            origin: CGPoint(x: 20, y: 100),
+                            motionProfile: profile
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, timeoutMs: 8_000, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preludeDeltas = Array(timestampDeltas(result.events).prefix(mouseDownIndex))
+
+        XCTAssertGreaterThanOrEqual(result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }.count, 20)
+        XCTAssertLessThan(preludeDeltas.reduce(0, +), 2_000)
+    }
+
+    func testLearnedClickPreludeUsesTimeoutBudgetForLongDistanceWideSpeedProfile() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            moveSpeedPxS: DoubleRange(min: 260, max: 620),
+            pointCount: IntRange(min: 24, max: 24),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 0, max: 0),
+            clickHoldMs: IntRange(min: 40, max: 40)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-click-wide-speed-budget",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 2_900, y: -1_600),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(
+                            origin: CGPoint(x: 20, y: 100),
+                            motionProfile: profile
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, timeoutMs: 10_000, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preludeDeltas = Array(timestampDeltas(result.events).prefix(mouseDownIndex))
+
+        XCTAssertGreaterThanOrEqual(result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }.count, 20)
+        XCTAssertLessThan(preludeDeltas.reduce(0, +), 2_000)
+    }
+
+    func testLearnedClickPreludeAlwaysUsesFallbackBudgetForLongDistanceTimeout() throws {
+        let executor = ActionExecutor(target: testTarget())
+        let profile = MotionProfile(
+            moveSpeedPxS: DoubleRange(min: 980, max: 980),
+            pointCount: IntRange(min: 24, max: 24),
+            hesitationProbability: 0,
+            settleMs: IntRange(min: 0, max: 0),
+            clickHoldMs: IntRange(min: 40, max: 40)
+        )
+
+        let result = try executor.execute(
+            ActionRequest(
+                id: "learned-click-long-distance-timeout-fallback",
+                primitives: [
+                    .click(
+                        at: CGPoint(x: 1_080, y: 100),
+                        button: .left,
+                        holdMs: 40,
+                        count: 1,
+                        profile: PrimitiveProfile(
+                            origin: CGPoint(x: 20, y: 100),
+                            motionProfile: profile
+                        )
+                    )
+                ],
+                context: ActionContext(host: "example.com", element: .init(sig: "sig-click", role: "button")),
+                options: ActionOptions(postMode: .global, timeoutMs: 10_000, dryRun: true)
+            )
+        )
+
+        let eventTypes = result.events.map(\.type)
+        let mouseDownIndex = try XCTUnwrap(eventTypes.firstIndex(of: "leftMouseDown"))
+        let preludeDeltas = Array(timestampDeltas(result.events).prefix(mouseDownIndex))
+
+        XCTAssertGreaterThanOrEqual(result.events.prefix(mouseDownIndex).filter { $0.type == "mouseMoved" }.count, 20)
+        XCTAssertLessThan(preludeDeltas.reduce(0, +), 900)
+    }
+
     func testLearnedKeyboardRangesAffectTypeDryRunTiming() throws {
         let executor = ActionExecutor(target: testTarget())
         let profile = MotionProfile(
@@ -661,6 +905,70 @@ private func maxTurnRadians(_ points: [CodablePoint]) -> Double {
         }
         return delta
     }.max() ?? 0
+}
+
+private func containsOverlongStraightWindow(_ points: [CodablePoint]) -> Bool {
+    guard points.count >= 8 else {
+        return false
+    }
+    let totalChord = pointDistance(points[0], points[points.count - 1])
+    let minimumChord = max(480, totalChord * 0.30)
+    for startIndex in 0..<(points.count - 6) {
+        var pathLength = 0.0
+        for endIndex in (startIndex + 1)..<points.count {
+            pathLength += pointDistance(points[endIndex - 1], points[endIndex])
+            let pointSpan = endIndex - startIndex + 1
+            guard pointSpan >= 6 else {
+                continue
+            }
+            let chord = pointDistance(points[startIndex], points[endIndex])
+            guard chord >= minimumChord, pathLength > 0 else {
+                continue
+            }
+            let straightness = chord / pathLength
+            let lateralLimit = max(2, chord * 0.003)
+            if straightness >= 0.995,
+               maxLateralDistance(Array(points[startIndex...endIndex])) <= lateralLimit {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+private func maxLateralDistance(_ points: [CodablePoint]) -> Double {
+    guard points.count >= 3 else {
+        return 0
+    }
+    let start = points[0]
+    let end = points[points.count - 1]
+    let chord = pointDistance(start, end)
+    guard chord > 0 else {
+        return 0
+    }
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    return points.dropFirst().dropLast().reduce(0) { partial, point in
+        let lateral = abs(dx * (start.y - point.y) - (start.x - point.x) * dy) / chord
+        return max(partial, lateral)
+    }
+}
+
+private func pointDistance(_ lhs: CodablePoint, _ rhs: CodablePoint) -> Double {
+    hypot(rhs.x - lhs.x, rhs.y - lhs.y)
+}
+
+private func overlongStraightTailLearnedPath() -> [LearnedPathPoint] {
+    var points: [LearnedPathPoint] = [
+        LearnedPathPoint(x: 0, y: 0),
+        LearnedPathPoint(x: 80, y: 240),
+        LearnedPathPoint(x: 180, y: 520),
+        LearnedPathPoint(x: 300, y: 900),
+    ]
+    for index in 1...34 {
+        points.append(LearnedPathPoint(x: 300 + Double(index) * (1600.0 / 34.0), y: 900))
+    }
+    return points
 }
 
 private func averagePointDistance(_ left: [CodablePoint], _ right: [CodablePoint]) -> Double {

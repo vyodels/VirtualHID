@@ -110,6 +110,44 @@ final class TargetingV2Tests: XCTestCase {
         XCTAssertEqual(descriptor?.windowTitle, "Pinned Browser")
     }
 
+    func testBrowserResolverStripsBrowserPageIdsFromUnresolvedMacOSWindowLookup() {
+        let descriptor = BrowserResolver.macOSWindowDescriptor(
+            for: TargetDescriptor(
+                bundleId: "com.google.Chrome",
+                windowId: 1136766964,
+                windowTitle: "职位列表 · Recruiting Workspace",
+                tabId: 1136767007,
+                host: "127.0.0.1:50149",
+                browserWindowBounds: CodableRect(x: 3195, y: -1251, width: 1526, height: 1160)
+            ),
+            pageTarget: nil
+        )
+
+        XCTAssertEqual(descriptor?.bundleId, "com.google.Chrome")
+        XCTAssertNil(descriptor?.windowId)
+        XCTAssertEqual(descriptor?.windowTitle, "职位列表 · Recruiting Workspace")
+        XCTAssertNil(descriptor?.tabId)
+        XCTAssertNil(descriptor?.host)
+        XCTAssertEqual(descriptor?.browserWindowBounds, CodableRect(x: 3195, y: -1251, width: 1526, height: 1160))
+    }
+
+    func testBrowserResolverKeepsNativeWindowIdForNonPageDescriptor() {
+        let descriptor = BrowserResolver.macOSWindowDescriptor(
+            for: TargetDescriptor(
+                bundleId: "com.example.NativeApp",
+                windowId: 42,
+                windowTitle: "Native Window"
+            ),
+            pageTarget: nil
+        )
+
+        XCTAssertEqual(descriptor?.bundleId, "com.example.NativeApp")
+        XCTAssertEqual(descriptor?.windowId, 42)
+        XCTAssertEqual(descriptor?.windowTitle, "Native Window")
+        XCTAssertNil(descriptor?.tabId)
+        XCTAssertNil(descriptor?.host)
+    }
+
     func testBrowserResolverRejectsUnresolvedPageTargetAcrossDuplicateBrowserProcesses() {
         let descriptor = TargetDescriptor(bundleId: "com.google.Chrome", tabId: 1136765612, host: "127.0.0.1:58944")
 
@@ -140,6 +178,23 @@ final class TargetingV2Tests: XCTestCase {
             windowTitle: "候选人详情 · 李青 · Recruiting Workspace",
             tabId: 1136765612,
             host: "127.0.0.1:58944"
+        )
+
+        XCTAssertFalse(
+            BrowserResolver.shouldRejectUnresolvedPageTarget(
+                descriptor: descriptor,
+                pageTarget: nil,
+                appCount: 2
+            )
+        )
+    }
+
+    func testBrowserResolverAllowsUnresolvedPageTargetWhenBoundsCanBindNativeWindow() {
+        let descriptor = TargetDescriptor(
+            bundleId: "com.google.Chrome",
+            tabId: 1136765612,
+            host: "127.0.0.1:58944",
+            browserWindowBounds: CodableRect(x: 3195, y: -1251, width: 1526, height: 1160)
         )
 
         XCTAssertFalse(

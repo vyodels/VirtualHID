@@ -114,6 +114,7 @@ public enum BrowserResolver {
     public static func resolve(
         bundleIdentifiers: [String],
         descriptor: TargetDescriptor? = nil,
+        expectedViewportSize: CGSize? = nil,
         promptForPermission: Bool = true
     ) throws -> BrowserTarget {
         try ensureAccessibilityTrusted(prompt: promptForPermission)
@@ -129,7 +130,8 @@ public enum BrowserResolver {
         let pageTarget = pageResolution?.page
         let targetBundleIdentifiers = pageTarget.map { [$0.bundleId] } ?? requestedBundleIdentifiers
         let windowDescriptor = macOSWindowDescriptor(for: descriptor, pageTarget: pageTarget)
-        let useFocusedBrowserWindow = requiresFocusedBrowserWindow(descriptor)
+        let useFocusedBrowserWindow = pageTarget != nil || requiresFocusedBrowserWindow(descriptor)
+        let raiseMatchedWindow = requiresBrowserWindowRaise(descriptor)
         for bundleIdentifier in targetBundleIdentifiers {
             let apps = runningApplications(bundleIdentifier: bundleIdentifier, waitForRegistration: pageTarget != nil)
                 .sorted {
@@ -163,7 +165,18 @@ public enum BrowserResolver {
                             for: app,
                             bundleIdentifier: bundleIdentifier,
                             descriptor: windowDescriptor,
-                            focusedOnly: useFocusedBrowserWindow
+                            expectedViewportSize: expectedViewportSize,
+                            focusedOnly: useFocusedBrowserWindow,
+                            raiseMatchedWindow: raiseMatchedWindow
+                        )
+                    } catch BrowserResolverError.windowNotFound where pageTarget != nil {
+                        window = try resolveMainWindow(
+                            for: app,
+                            bundleIdentifier: bundleIdentifier,
+                            descriptor: windowDescriptor,
+                            expectedViewportSize: expectedViewportSize,
+                            focusedOnly: false,
+                            raiseMatchedWindow: raiseMatchedWindow
                         )
                     } catch BrowserResolverError.windowNotFound where useFocusedBrowserWindow {
                         // Some Chrome sessions do not expose AXFocusedWindow even after
@@ -174,7 +187,9 @@ public enum BrowserResolver {
                             for: app,
                             bundleIdentifier: bundleIdentifier,
                             descriptor: windowDescriptor,
-                            focusedOnly: false
+                            expectedViewportSize: expectedViewportSize,
+                            focusedOnly: false,
+                            raiseMatchedWindow: raiseMatchedWindow
                         )
                     }
                     resolvedTargets.append(
@@ -183,7 +198,7 @@ public enum BrowserResolver {
                             pid: app.processIdentifier,
                             bundleIdentifier: bundleIdentifier,
                             windowId: window.windowId,
-                            windowTitle: window.title,
+                            windowTitle: window.title ?? pageTarget?.windowTitle ?? pageTarget?.tabTitle,
                             browserWindowId: pageTarget?.windowId,
                             tabId: pageTarget?.tabId ?? descriptor?.tabId,
                             host: pageTarget?.host ?? descriptor?.host,
@@ -197,6 +212,29 @@ public enum BrowserResolver {
                     lastWindowError = .windowNotFound(bundleIdentifier)
                     continue
                 }
+            }
+
+            if let fallback = resolveCGWindowAcrossRunningProcesses(
+                bundleIdentifier: bundleIdentifier,
+                descriptor: windowDescriptor,
+                expectedViewportSize: expectedViewportSize
+            ) {
+                resolvedTargets.append(
+                    BrowserTarget(
+                        app: fallback.app,
+                        pid: fallback.app.processIdentifier,
+                        bundleIdentifier: bundleIdentifier,
+                        windowId: fallback.window.windowId,
+                        windowTitle: fallback.window.title,
+                        browserWindowId: pageTarget?.windowId,
+                        tabId: pageTarget?.tabId ?? descriptor?.tabId,
+                        host: pageTarget?.host ?? descriptor?.host,
+                        url: pageTarget?.url,
+                        frame: fallback.window.frame,
+                        viewportFrame: fallback.window.viewportFrame,
+                        viewportFrameSource: fallback.window.viewportFrameSource
+                    )
+                )
             }
         }
 
@@ -225,13 +263,24 @@ public enum BrowserResolver {
         }
         // Browser extension window/tab ids are not macOS window ids. If the
         // AppleScript page resolver cannot bind the browser page and multiple
-        // Chrome processes exist, only an explicit title gives AX/CG lookup a
-        // process-independent way to choose the correct native window.
-        return descriptor.windowTitle == nil
+        // Chrome processes exist, only explicit browser-derived native window
+        // evidence gives AX/CG lookup a process-independent way to choose the
+        // correct native window.
+        return descriptor.windowTitle == nil && descriptor.browserWindowBounds == nil
     }
 
     static func macOSWindowDescriptor(for descriptor: TargetDescriptor?, pageTarget: BrowserPageTarget?) -> TargetDescriptor? {
         guard let pageTarget else {
+            guard let descriptor else {
+                return nil
+            }
+            if descriptor.host != nil || descriptor.tabId != nil {
+                return TargetDescriptor(
+                    bundleId: descriptor.bundleId,
+                    windowTitle: descriptor.windowTitle,
+                    browserWindowBounds: descriptor.browserWindowBounds
+                )
+            }
             return descriptor
         }
         let title = descriptor?.windowTitle ?? pageTarget.windowTitle ?? pageTarget.tabTitle
@@ -239,7 +288,8 @@ public enum BrowserResolver {
             bundleId: pageTarget.bundleId,
             windowTitle: title,
             tabId: pageTarget.tabId ?? descriptor?.tabId,
-            host: pageTarget.host ?? descriptor?.host
+            host: pageTarget.host ?? descriptor?.host,
+            browserWindowBounds: descriptor?.browserWindowBounds
         )
     }
 
@@ -275,6 +325,18 @@ public enum BrowserResolver {
                 bundleIdentifiers: bundleIdentifiers
             )
         } catch TargetResolverV2Error.noCandidate {
+            if let fallbackDescriptor = browserPageFallbackDescriptor(for: descriptor) {
+                do {
+                    return try BrowserPageResolver.resolve(
+                        descriptor: fallbackDescriptor,
+                        bundleIdentifiers: bundleIdentifiers
+                    )
+                } catch TargetResolverV2Error.noCandidate {
+                    return nil
+                } catch BrowserPageResolverError.automationFailed {
+                    return nil
+                }
+            }
             // Browser MCP already owns tab selection. Some Chrome sessions expose
             // AX/CG windows but not AppleScript windows, so page activation must
             // be best-effort instead of blocking HID execution.
@@ -282,6 +344,19 @@ public enum BrowserResolver {
         } catch BrowserPageResolverError.automationFailed {
             return nil
         }
+    }
+
+    private static func browserPageFallbackDescriptor(for descriptor: TargetDescriptor) -> TargetDescriptor? {
+        guard descriptor.host != nil else {
+            return nil
+        }
+        let fallback = TargetDescriptor(
+            bundleId: descriptor.bundleId,
+            windowTitle: descriptor.windowTitle,
+            host: descriptor.host,
+            browserWindowBounds: descriptor.browserWindowBounds
+        )
+        return fallback == descriptor ? nil : fallback
     }
 
     private struct ResolvedWindow {
@@ -296,13 +371,18 @@ public enum BrowserResolver {
         for app: NSRunningApplication,
         bundleIdentifier: String,
         descriptor: TargetDescriptor?,
-        focusedOnly: Bool
+        expectedViewportSize: CGSize?,
+        focusedOnly: Bool,
+        raiseMatchedWindow: Bool = false
     ) throws -> ResolvedWindow {
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(axApp, 0.2)
         if let focusedWindow = copyAXElementAttribute(of: axApp, name: kAXFocusedWindowAttribute),
            let resolved = resolveWindow(focusedWindow, pid: app.processIdentifier),
-           matches(resolved, descriptor: descriptor) {
+           matches(resolved, descriptor: descriptor, expectedViewportSize: expectedViewportSize) {
+            if raiseMatchedWindow {
+                raiseWindow(focusedWindow, app: app)
+            }
             return resolved
         }
 
@@ -314,17 +394,38 @@ public enum BrowserResolver {
         let status = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value)
         if status == .success, let windows = value as? [AXUIElement], !windows.isEmpty {
             for window in windows {
-                if let resolved = resolveWindow(window, pid: app.processIdentifier), matches(resolved, descriptor: descriptor) {
+                if let resolved = resolveWindow(window, pid: app.processIdentifier),
+                   matches(resolved, descriptor: descriptor, expectedViewportSize: expectedViewportSize) {
+                    if raiseMatchedWindow {
+                        raiseWindow(window, app: app)
+                    }
                     return resolved
                 }
             }
         }
 
-        if let fallback = resolveCGWindow(for: app.processIdentifier, descriptor: descriptor) {
+        if let fallback = resolveCGWindow(for: app.processIdentifier, descriptor: descriptor, expectedViewportSize: expectedViewportSize) {
             return fallback
         }
 
         throw BrowserResolverError.windowNotFound(bundleIdentifier)
+    }
+
+    private static func requiresBrowserWindowRaise(_ descriptor: TargetDescriptor?) -> Bool {
+        guard let descriptor else {
+            return false
+        }
+        return descriptor.host != nil
+            || descriptor.tabId != nil
+            || descriptor.windowId != nil
+            || descriptor.windowTitle != nil
+    }
+
+    private static func raiseWindow(_ window: AXUIElement, app: NSRunningApplication) {
+        _ = FocusController.ensureFrontmost(app: app, timeout: 1.0)
+        AXUIElementSetMessagingTimeout(window, 0.2)
+        _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        _ = AXUIElementSetAttributeValue(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute as CFString, window)
     }
 
     private static func resolveWindow(_ window: AXUIElement, pid: pid_t) -> ResolvedWindow? {
@@ -350,13 +451,21 @@ public enum BrowserResolver {
         )
     }
 
-    private static func matches(_ window: ResolvedWindow, descriptor: TargetDescriptor?) -> Bool {
+    private static func matches(_ window: ResolvedWindow, descriptor: TargetDescriptor?, expectedViewportSize: CGSize? = nil) -> Bool {
         guard let descriptor else {
+            return true
+        }
+        if descriptor.browserWindowBounds != nil,
+           !browserWindowBoundsMatches(window: window, descriptor: descriptor) {
+            return false
+        }
+        if descriptor.browserWindowBounds != nil {
             return true
         }
         // Browser page identity is resolved and activated before AX window lookup.
         // The AX step stays grounded in macOS window evidence.
-        if let requestedTitle = descriptor.windowTitle, window.title?.contains(requestedTitle) != true {
+        if let requestedTitle = descriptor.windowTitle, window.title?.contains(requestedTitle) != true,
+           !viewportSizeMatches(window: window, expectedViewportSize: expectedViewportSize) {
             return false
         }
         return true
@@ -438,7 +547,11 @@ public enum BrowserResolver {
         return nil
     }
 
-    private static func resolveCGWindow(for pid: pid_t, descriptor: TargetDescriptor?) -> ResolvedWindow? {
+    private static func resolveCGWindow(
+        for pid: pid_t,
+        descriptor: TargetDescriptor?,
+        expectedViewportSize: CGSize? = nil
+    ) -> ResolvedWindow? {
         guard
             let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else {
@@ -459,21 +572,92 @@ public enum BrowserResolver {
                 continue
             }
 
-            let title = window[kCGWindowName as String] as? String
-            if let requestedTitle = descriptor?.windowTitle, title?.contains(requestedTitle) != true {
-                continue
-            }
             let fallbackViewport = browserContentFallbackFrame(windowFrame: frame)
-            return ResolvedWindow(
-                title: title,
+            let resolved = ResolvedWindow(
+                title: window[kCGWindowName as String] as? String,
                 frame: frame,
                 windowId: windowId,
                 viewportFrame: fallbackViewport,
                 viewportFrameSource: fallbackViewport == nil ? nil : "browserWindowContentHeuristic"
             )
+            if !matches(resolved, descriptor: descriptor, expectedViewportSize: expectedViewportSize) {
+                continue
+            }
+            return resolved
         }
 
         return nil
+    }
+
+    private static func resolveCGWindowAcrossRunningProcesses(
+        bundleIdentifier: String,
+        descriptor: TargetDescriptor?,
+        expectedViewportSize: CGSize? = nil
+    ) -> (app: NSRunningApplication, window: ResolvedWindow)? {
+        guard (descriptor?.windowTitle != nil || descriptor?.browserWindowBounds != nil || expectedViewportSize != nil),
+              let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        for window in windowList {
+            guard let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t,
+                  let app = NSRunningApplication(processIdentifier: ownerPid),
+                  app.bundleIdentifier == bundleIdentifier,
+                  let boundsValue = window[kCGWindowBounds as String] as? [String: Any]
+            else {
+                continue
+            }
+
+            let cfBounds = boundsValue as CFDictionary
+            guard let frame = CGRect(dictionaryRepresentation: cfBounds), frame.width > 200, frame.height > 200 else {
+                continue
+            }
+
+            let windowId = window[kCGWindowNumber as String] as? Int
+            let fallbackViewport = browserContentFallbackFrame(windowFrame: frame)
+            let resolved = ResolvedWindow(
+                title: window[kCGWindowName as String] as? String,
+                frame: frame,
+                windowId: windowId,
+                viewportFrame: fallbackViewport,
+                viewportFrameSource: fallbackViewport == nil ? nil : "browserWindowContentHeuristic"
+            )
+            if !matches(resolved, descriptor: descriptor, expectedViewportSize: expectedViewportSize) {
+                continue
+            }
+            return (app, resolved)
+        }
+
+        return nil
+    }
+
+    private static func viewportSizeMatches(window: ResolvedWindow, expectedViewportSize: CGSize?) -> Bool {
+        guard let expectedViewportSize,
+              expectedViewportSize.width > 0,
+              expectedViewportSize.height > 0,
+              let viewportFrame = window.viewportFrame
+        else {
+            return false
+        }
+        return abs(viewportFrame.width - expectedViewportSize.width) <= 4
+            && abs(viewportFrame.height - expectedViewportSize.height) <= 96
+    }
+
+    private static func browserWindowBoundsMatches(window: ResolvedWindow, descriptor: TargetDescriptor) -> Bool {
+        guard let expected = descriptor.browserWindowBounds else {
+            return false
+        }
+        let expectedFrame = CGRect(x: expected.x, y: expected.y, width: expected.width, height: expected.height)
+        guard expectedFrame.width > 200, expectedFrame.height > 200 else {
+            return false
+        }
+        let originTolerance: CGFloat = 160
+        let sizeTolerance: CGFloat = 180
+        return abs(window.frame.origin.x - expectedFrame.origin.x) <= originTolerance
+            && abs(window.frame.origin.y - expectedFrame.origin.y) <= originTolerance
+            && abs(window.frame.width - expectedFrame.width) <= sizeTolerance
+            && abs(window.frame.height - expectedFrame.height) <= sizeTolerance
     }
 
     private static func resolveWebViewportFrame(in window: AXUIElement, windowFrame: CGRect, cacheKey: String?) -> (frame: CGRect, source: String)? {

@@ -15,6 +15,18 @@ const pointSchema = {
   additionalProperties: true
 };
 
+const rectSchema = {
+  type: "object",
+  required: ["x", "y", "width", "height"],
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+    width: { type: "number" },
+    height: { type: "number" }
+  },
+  additionalProperties: true
+};
+
 const primitiveSchema = {
   oneOf: [
     {
@@ -88,6 +100,14 @@ const primitiveSchema = {
         type: { const: "key" },
         keyCode: { type: "integer" },
         virtualKey: { type: "integer" },
+        modifiers: {
+          anyOf: [
+            { type: "array", items: { type: "string", enum: ["cmd", "command", "meta", "shift", "ctrl", "control", "alt", "option"] } },
+            { type: "string" },
+            { type: "object", additionalProperties: { type: "boolean" } }
+          ],
+          description: "Optional keyboard modifiers for chord shortcuts. Use [\"cmd\"] with keyCode 37 for macOS Cmd+L address bar focus, then pasteText the same-origin URL, then keyCode 36 for Enter."
+        },
         holdMs: { type: "integer" },
         profile: objectSchema
       },
@@ -112,7 +132,7 @@ export const toolMethodMap = {
 export const tools = [
   {
     name: "hid_action",
-    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click primitive；VirtualHID 会在 click 执行内部生成拟人化鼠标移动轨迹、选择落点、激活目标应用并完成点击，Agent 不应显式编排 move。VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。Chrome 下载气泡、下载列表等浏览器外壳 UI 不属于网页 DOM；VirtualHID 会在 browserChromeOverlayPolicy=auto 时用 AX 检测外壳瞬态遮挡并在必要时预先关闭，调用方不得用页面 JS/mock fallback 处理。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。postMode 通常应省略并使用默认值；click/drag/type/pasteText/key 这类真实写入必须走 global 或 auto，pid 只适用于 mouseMoved/scrollWheel 等不会改变页面语义的底层事件。`,
+    description: `${agentNotice} 执行一组 HID 动作原语。调用时必须提供非空 primitives；不要只传 target/context。网页点击应先由上游 browser snapshot/clickPoint 或等价观察证据给出 viewport/document 坐标，再构造 click primitive；VirtualHID 会在 click 执行内部生成拟人化鼠标移动轨迹、选择落点、激活目标应用并完成点击，Agent 不应显式编排 move。VirtualHID 会用 macOS/AX/CG 证据解析 Chrome 内容 viewport 并换算到真实 HID screen 坐标。调用方不要传或合成可信 macOS screen origin；geometry.viewportInScreen 若出现只作为诊断/兼容输入，网页 viewport/document 映射会以 VirtualHID 解析出的 viewport 为准。Chrome 下载气泡、下载列表等浏览器外壳 UI 不属于网页 DOM；VirtualHID 会在 browserChromeOverlayPolicy=auto 时用 AX 检测外壳瞬态遮挡并在必要时预先关闭，调用方不得用页面 JS/mock fallback 处理。网页目标场景中，context.host 是学习、trace 与执行归因键，必须与 browser_target.host 或 target.host 指向同一浏览器目标；非网页桌面目标可使用其它稳定 target/context 归因字段。当同源链接点击失败但 URL 已由 browser 观察确认时，可使用键盘链路恢复导航：key keyCode=37 modifiers=["cmd"] 聚焦地址栏，pasteText 写入同源 URL，再 key keyCode=36 回车，并随后用 browser 观察确认。postMode 通常应省略并使用默认值；click/drag/type/pasteText/key 这类真实写入必须走 global 或 auto，pid 只适用于 mouseMoved/scrollWheel 等不会改变页面语义的底层事件。`,
     inputSchema: {
       type: "object",
       required: ["id", "primitives", "context"],
@@ -125,7 +145,15 @@ export const tools = [
             windowId: { type: "integer" },
             windowTitle: { type: "string" },
             tabId: { type: "integer" },
-            host: { type: "string" }
+            host: { type: "string" },
+            browserWindowBounds: {
+              ...rectSchema,
+              description: "Read-only Chrome window bounds copied from browser_list_tabs/browser_snapshot target.window. Used only to disambiguate the native browser window; never as click coordinate input."
+            },
+            windowBounds: {
+              ...rectSchema,
+              description: "Alias for browserWindowBounds. Used only to disambiguate the native browser window."
+            }
           },
           additionalProperties: false
         },

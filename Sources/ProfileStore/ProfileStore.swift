@@ -1579,7 +1579,7 @@ public final class ProfileStore {
 
     private func learnedPathSkeleton(from samples: [TraceSample]) -> [LearnedPathPoint]? {
         let representative = representativePathSkeleton(from: samples)
-        guard representative.count >= 2 else {
+        guard representative.count >= 3 else {
             return nil
         }
         return representative.map { LearnedPathPoint(x: $0.x, y: $0.y) }
@@ -1758,9 +1758,68 @@ public final class ProfileStore {
 
     private func representativePathSkeleton(from samples: [TraceSample]) -> [TracePoint] {
         samples
-            .filter { $0.pathSkeleton.count >= 2 }
+            .filter { isReusablePathSkeleton($0.pathSkeleton) }
             .max { lhs, rhs in lhs.pathSkeleton.count < rhs.pathSkeleton.count }?
             .pathSkeleton ?? []
+    }
+
+    private func isReusablePathSkeleton(_ path: [TracePoint]) -> Bool {
+        guard path.count >= 3 else {
+            return false
+        }
+        if let straightness = computeStraightness(path),
+           straightness >= 0.995,
+           maxLateralDistance(path) <= max(2.0, distance(from: path[0], to: path[path.count - 1]) * 0.006) {
+            return false
+        }
+        return !hasOverlongStraightWindow(path)
+    }
+
+    private func hasOverlongStraightWindow(_ path: [TracePoint]) -> Bool {
+        guard path.count >= 8 else {
+            return false
+        }
+        let totalChord = distance(from: path[0], to: path[path.count - 1])
+        let minimumChord = max(480.0, totalChord * 0.30)
+        for startIndex in 0..<(path.count - 6) {
+            var pathLength = 0.0
+            for endIndex in (startIndex + 1)..<path.count {
+                pathLength += distance(from: path[endIndex - 1], to: path[endIndex])
+                let pointSpan = endIndex - startIndex + 1
+                guard pointSpan >= 6 else {
+                    continue
+                }
+                let chord = distance(from: path[startIndex], to: path[endIndex])
+                guard chord >= minimumChord, pathLength > 0 else {
+                    continue
+                }
+                let straightness = chord / pathLength
+                let lateralLimit = max(2.0, chord * 0.003)
+                if straightness >= 0.995,
+                   maxLateralDistance(Array(path[startIndex...endIndex])) <= lateralLimit {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func maxLateralDistance(_ path: [TracePoint]) -> Double {
+        guard path.count >= 3 else {
+            return 0
+        }
+        let start = path[0]
+        let end = path[path.count - 1]
+        let chord = distance(from: start, to: end)
+        guard chord > 0 else {
+            return 0
+        }
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        return path.dropFirst().dropLast().reduce(0) { partial, point in
+            let lateral = abs(dx * (start.y - point.y) - (start.x - point.x) * dy) / chord
+            return max(partial, lateral)
+        }
     }
 
     private func representativeSegmentMs(from samples: [TraceSample]) -> [Double] {
