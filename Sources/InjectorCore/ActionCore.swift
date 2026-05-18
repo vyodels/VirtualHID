@@ -1043,17 +1043,26 @@ public final class ActionExecutor {
         if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.2) {
             return true
         }
-        if pointerEventCanActivateTarget(type), FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle) {
+        if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, windowFrame: target.frame, timeout: 1.2) {
+            return true
+        }
+        if isTargetWindowFrontmost() {
+            return true
+        }
+        if pointerEventCanActivateTarget(type), isTargetTopVisibleWindow() {
             return true
         }
         guard focusTargetWindowWithChromeClick(dryRun: dryRun) else {
             return false
         }
-        if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.0) {
+        if FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, windowFrame: target.frame, timeout: 1.0) {
+            return true
+        }
+        if isTargetWindowFrontmost() {
             return true
         }
         return pointerEventCanActivateTarget(type)
-            && FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+            && isTargetTopVisibleWindow()
     }
 
     private func focusTargetWindowWithChromeClick(dryRun: Bool) -> Bool {
@@ -1095,7 +1104,12 @@ public final class ActionExecutor {
     }
 
     private func isTargetWindowFrontmost() -> Bool {
-        FocusController.isFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+        FocusController.isFrontmostWindow(
+            app: target.app,
+            windowId: target.windowId,
+            windowTitle: target.windowTitle,
+            windowFrame: target.frame
+        )
     }
 
     private func isTargetReadyForEvent(_ type: CGEventType) -> Bool {
@@ -1103,7 +1117,16 @@ public final class ActionExecutor {
             return true
         }
         return pointerEventCanActivateTarget(type)
-            && FocusController.isTopVisibleWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+            && isTargetTopVisibleWindow()
+    }
+
+    private func isTargetTopVisibleWindow() -> Bool {
+        FocusController.isTopVisibleWindow(
+            app: target.app,
+            windowId: target.windowId,
+            windowTitle: target.windowTitle,
+            windowFrame: target.frame
+        )
     }
 
     private func pointerEventCanActivateTarget(_ type: CGEventType) -> Bool {

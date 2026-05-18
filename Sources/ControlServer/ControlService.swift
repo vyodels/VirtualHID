@@ -2628,7 +2628,7 @@ public final class ControlService {
     }
 
     private func postEscapeToDismissBrowserChrome(target: BrowserTarget) throws {
-        guard FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, timeout: 1.2) else {
+        guard FocusController.ensureFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, windowFrame: target.frame, timeout: 1.2) else {
             throw PosterError.notFrontmost
         }
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
@@ -2642,7 +2642,7 @@ public final class ControlService {
     }
 
     private func isTargetWindowFrontmost(_ target: BrowserTarget) -> Bool {
-        FocusController.isFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle)
+        FocusController.isFrontmostWindow(app: target.app, windowId: target.windowId, windowTitle: target.windowTitle, windowFrame: target.frame)
     }
 
     private func parsePrimitives(_ array: [[String: Any]]?) throws -> [ActionPrimitive] {

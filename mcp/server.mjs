@@ -29,17 +29,33 @@ if (process.argv.includes("--smoke-state")) {
   }
 }
 
+function daemonTimeoutFor(method, params) {
+  if (method !== "action") {
+    return daemonTimeoutMs;
+  }
+  const options = params?.options || {};
+  const actionTimeoutMs = Number(options.timeoutMs || 0);
+  const preDelayMs = Number(options.preDelayMs || 0);
+  const postDelayMs = Number(options.postDelayMs || 0);
+  const requestedBudgetMs = actionTimeoutMs + Math.max(0, preDelayMs) + Math.max(0, postDelayMs);
+  if (!Number.isFinite(requestedBudgetMs) || requestedBudgetMs <= 0) {
+    return daemonTimeoutMs;
+  }
+  return Math.max(daemonTimeoutMs, requestedBudgetMs + 10000);
+}
+
 async function callDaemon(method, params) {
   const id = crypto.randomUUID();
   const payload = `${JSON.stringify({ id, method, params: params || {} })}\n`;
+  const timeoutMs = daemonTimeoutFor(method, params || {});
 
   return await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = "";
     const timeout = setTimeout(() => {
       socket.destroy();
-      reject(daemonUnavailable(`timeout waiting for daemon response from ${socketPath} after ${daemonTimeoutMs}ms`));
-    }, daemonTimeoutMs);
+      reject(daemonUnavailable(`timeout waiting for daemon response from ${socketPath} after ${timeoutMs}ms`));
+    }, timeoutMs);
 
     socket.on("connect", () => {
       socket.write(payload);
