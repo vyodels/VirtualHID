@@ -1305,17 +1305,27 @@ private struct HIDPlaybackStep {
     let detail: String
 }
 
+private struct HIDHistoricalFrame {
+    let frame: HIDOverlayFrame
+    let recordedAt: Date
+}
+
 final class HIDOverlayView: NSView {
-    private let maxHistoricalFrames = 20
+    private let maxHistoricalFrames = 10
+    private let historicalFrameMaxAge: TimeInterval = 60
+    private let now: () -> Date
     private var screenFrame: NSRect
     private var settings: HIDOverlaySettings
     private var frameData: HIDOverlayFrame?
+    private var frameDataRecordedAt: Date?
     private var lastPersistentFrame: HIDOverlayFrame?
-    private var historicalFrames = [HIDOverlayFrame]()
+    private var lastPersistentFrameRecordedAt: Date?
+    private var historicalFrames = [HIDHistoricalFrame]()
 
-    init(frame: NSRect, screenFrame: NSRect, settings: HIDOverlaySettings) {
+    init(frame: NSRect, screenFrame: NSRect, settings: HIDOverlaySettings, now: @escaping () -> Date = Date.init) {
         self.screenFrame = screenFrame
         self.settings = settings
+        self.now = now
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -1327,29 +1337,36 @@ final class HIDOverlayView: NSView {
     }
 
     func render(_ data: HIDOverlayFrame) {
+        purgeExpiredFrames()
+        let recordedAt = now()
         frameData = data
+        frameDataRecordedAt = recordedAt
         if settings.persistent, hidOverlayIsCompletedHistoryFrame(data) {
             lastPersistentFrame = data
-            recordHistoricalFrame(data)
+            lastPersistentFrameRecordedAt = recordedAt
+            recordHistoricalFrame(data, recordedAt: recordedAt)
         } else if !settings.persistent || !data.context.dryRun || lastPersistentFrame == nil {
             lastPersistentFrame = data
+            lastPersistentFrameRecordedAt = recordedAt
         }
         needsDisplay = true
         displayIfNeeded()
     }
 
     func snapshotForTesting() -> HIDOverlayViewSnapshot {
-        HIDOverlayViewSnapshot(
+        purgeExpiredFrames()
+        return HIDOverlayViewSnapshot(
             currentEventCount: frameData?.events.count,
             currentTrailPoints: frameData.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) } ?? [],
             currentActualPoint: frameData?.actual,
-            historyEventCounts: historicalFrames.map(\.events.count),
-            historyTrailPoints: historicalFrames.map { hidOverlayTrailPoints(events: $0.events, actual: $0.actual) },
-            historyActualPoints: historicalFrames.map(\.actual)
+            historyEventCounts: historicalFrames.map(\.frame.events.count),
+            historyTrailPoints: historicalFrames.map { hidOverlayTrailPoints(events: $0.frame.events, actual: $0.frame.actual) },
+            historyActualPoints: historicalFrames.map(\.frame.actual)
         )
     }
 
     func resize(frame: NSRect, screenFrame: NSRect) {
+        purgeExpiredFrames()
         self.frame = frame
         self.screenFrame = screenFrame
         needsDisplay = true
@@ -1357,15 +1374,18 @@ final class HIDOverlayView: NSView {
     }
 
     func updateSettings(_ settings: HIDOverlaySettings) {
+        purgeExpiredFrames()
         self.settings = settings
         if !settings.persistent, let frameData, frameData.events.isEmpty {
             self.frameData = nil
+            self.frameDataRecordedAt = nil
         }
         needsDisplay = true
         displayIfNeeded()
     }
 
     func updateWindowFrame(_ windowFrame: CodableRect) {
+        purgeExpiredFrames()
         if let frameData {
             self.frameData = HIDOverlayFrame(
                 context: replacingWindowFrame(in: frameData.context, with: windowFrame),
@@ -1402,22 +1422,25 @@ final class HIDOverlayView: NSView {
                 guideOperationLabel: lastPersistentFrame.guideOperationLabel
             )
         }
-        historicalFrames = historicalFrames.map { frame in
-            HIDOverlayFrame(
-                context: replacingWindowFrame(in: frame.context, with: windowFrame),
-                events: frame.events,
-                expected: frame.expected,
-                actual: frame.actual,
-                errorCode: frame.errorCode,
-                stepTitle: frame.stepTitle,
-                stepDetail: frame.stepDetail,
-                guideStart: frame.guideStart,
-                guideTarget: frame.guideTarget,
-                guideAction: frame.guideAction,
-                guideOperationArea: frame.guideOperationArea,
-                guideStartLabel: frame.guideStartLabel,
-                guideTargetLabel: frame.guideTargetLabel,
-                guideOperationLabel: frame.guideOperationLabel
+        historicalFrames = historicalFrames.map { entry in
+            HIDHistoricalFrame(
+                frame: HIDOverlayFrame(
+                    context: replacingWindowFrame(in: entry.frame.context, with: windowFrame),
+                    events: entry.frame.events,
+                    expected: entry.frame.expected,
+                    actual: entry.frame.actual,
+                    errorCode: entry.frame.errorCode,
+                    stepTitle: entry.frame.stepTitle,
+                    stepDetail: entry.frame.stepDetail,
+                    guideStart: entry.frame.guideStart,
+                    guideTarget: entry.frame.guideTarget,
+                    guideAction: entry.frame.guideAction,
+                    guideOperationArea: entry.frame.guideOperationArea,
+                    guideStartLabel: entry.frame.guideStartLabel,
+                    guideTargetLabel: entry.frame.guideTargetLabel,
+                    guideOperationLabel: entry.frame.guideOperationLabel
+                ),
+                recordedAt: entry.recordedAt
             )
         }
         needsDisplay = true
@@ -1425,6 +1448,7 @@ final class HIDOverlayView: NSView {
     }
 
     func markFailure(errorCode: String) {
+        purgeExpiredFrames()
         guard let frameData else {
             return
         }
@@ -1449,10 +1473,13 @@ final class HIDOverlayView: NSView {
     }
 
     func clearTransientState() {
+        purgeExpiredFrames()
         if settings.persistent, let lastPersistentFrame {
             frameData = lastPersistentFrame
+            frameDataRecordedAt = lastPersistentFrameRecordedAt
         } else {
             frameData = nil
+            frameDataRecordedAt = nil
         }
         needsDisplay = true
         displayIfNeeded()
@@ -1460,22 +1487,38 @@ final class HIDOverlayView: NSView {
 
     func clearAll() {
         frameData = nil
+        frameDataRecordedAt = nil
         lastPersistentFrame = nil
+        lastPersistentFrameRecordedAt = nil
         historicalFrames.removeAll()
         needsDisplay = true
         displayIfNeeded()
     }
 
-    private func recordHistoricalFrame(_ frame: HIDOverlayFrame) {
-        historicalFrames.removeAll { $0.context.actionId == frame.context.actionId }
-        historicalFrames.append(frame)
+    private func recordHistoricalFrame(_ frame: HIDOverlayFrame, recordedAt: Date) {
+        historicalFrames.removeAll { $0.frame.context.actionId == frame.context.actionId }
+        historicalFrames.append(HIDHistoricalFrame(frame: frame, recordedAt: recordedAt))
         if historicalFrames.count > maxHistoricalFrames {
             historicalFrames.removeFirst(historicalFrames.count - maxHistoricalFrames)
         }
     }
 
+    private func purgeExpiredFrames() {
+        let cutoff = now().addingTimeInterval(-historicalFrameMaxAge)
+        historicalFrames.removeAll { $0.recordedAt < cutoff }
+        if let recordedAt = lastPersistentFrameRecordedAt, recordedAt < cutoff {
+            lastPersistentFrame = nil
+            lastPersistentFrameRecordedAt = nil
+        }
+        if let recordedAt = frameDataRecordedAt, recordedAt < cutoff {
+            frameData = nil
+            frameDataRecordedAt = nil
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        purgeExpiredFrames()
         guard frameData != nil || !historicalFrames.isEmpty else {
             return
         }
@@ -1568,12 +1611,12 @@ final class HIDOverlayView: NSView {
         guard settings.persistent, settings.showTrail, !historicalFrames.isEmpty else {
             return
         }
-        for (index, frame) in historicalFrames.enumerated() where currentActionId == nil || frame.context.actionId != currentActionId {
-            drawHistoricalTrail(frame.events, actual: frame.actual, ordinal: index + 1)
-            if settings.showExpectedPoint, let expected = frame.expected {
+        for (index, entry) in historicalFrames.enumerated() where currentActionId == nil || entry.frame.context.actionId != currentActionId {
+            drawHistoricalTrail(entry.frame.events, actual: entry.frame.actual, ordinal: index + 1)
+            if settings.showExpectedPoint, let expected = entry.frame.expected {
                 drawHistoricalPoint(expected, title: "目标\(index + 1)", color: .systemOrange)
             }
-            if settings.showActualPoint, let actual = frame.actual {
+            if settings.showActualPoint, let actual = entry.frame.actual {
                 drawHistoricalPoint(actual, title: "实际\(index + 1)", color: .systemRed)
             }
         }

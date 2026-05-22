@@ -124,6 +124,56 @@ final class HIDOverlayTrackingTests: XCTestCase {
         XCTAssertEqual(snapshot.historyActualPoints.first ?? nil, actual)
     }
 
+    func testPersistentHistoryKeepsAtMostTenCompletedActionsByDefault() {
+        let view = HIDOverlayView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            screenFrame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            settings: HIDOverlaySettings(persistent: true)
+        )
+
+        for index in 0..<12 {
+            let context = visualContext(actionId: "history-\(index)", dryRun: false)
+            let events = [
+                injectedEvent(type: "mouseMoved", x: Double(index), y: 40, offsetMs: 0),
+                injectedEvent(type: "mouseMoved", x: Double(index + 10), y: 80, offsetMs: 12),
+                injectedEvent(type: "leftMouseDown", x: Double(index + 12), y: 82, offsetMs: 24),
+                injectedEvent(type: "leftMouseUp", x: Double(index + 12), y: 82, offsetMs: 48)
+            ]
+            view.render(frame(context: context, events: events, actual: CodablePoint(x: Double(index + 10), y: 80)))
+        }
+
+        let snapshot = view.snapshotForTesting()
+        XCTAssertEqual(snapshot.historyEventCounts.count, 10)
+        XCTAssertEqual(snapshot.historyTrailPoints.first?.first, CodablePoint(x: 2, y: 40))
+        XCTAssertEqual(snapshot.historyTrailPoints.last?.first, CodablePoint(x: 11, y: 40))
+    }
+
+    func testPersistentHistoryExpiresCompletedActionsAfterSixtySeconds() {
+        var currentDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let view = HIDOverlayView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            screenFrame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            settings: HIDOverlaySettings(persistent: true),
+            now: { currentDate }
+        )
+        let events = [
+            injectedEvent(type: "mouseMoved", x: 20, y: 40, offsetMs: 0),
+            injectedEvent(type: "mouseMoved", x: 80, y: 120, offsetMs: 12),
+            injectedEvent(type: "leftMouseDown", x: 90, y: 130, offsetMs: 24),
+            injectedEvent(type: "leftMouseUp", x: 90, y: 130, offsetMs: 48)
+        ]
+
+        view.render(frame(context: visualContext(actionId: "expiring-history", dryRun: false), events: events, actual: CodablePoint(x: 80, y: 120)))
+        currentDate = currentDate.addingTimeInterval(60)
+        XCTAssertEqual(view.snapshotForTesting().historyEventCounts.count, 1)
+
+        currentDate = currentDate.addingTimeInterval(0.001)
+        let snapshot = view.snapshotForTesting()
+        XCTAssertNil(snapshot.currentEventCount)
+        XCTAssertTrue(snapshot.historyEventCounts.isEmpty)
+        XCTAssertTrue(snapshot.historyTrailPoints.isEmpty)
+    }
+
     func testBestTrackedWindowMatchPrefersTitleMatch() {
         let target = trackedTarget(title: "Candidate Detail", frame: CGRect(x: 100, y: 80, width: 900, height: 700))
         let windows = [
